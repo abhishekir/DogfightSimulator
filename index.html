@@ -526,11 +526,12 @@ function createPlayerJet(){
   const wm=new THREE.MeshStandardMaterial({color:0x6a737d,metalness:.75,roughness:.25,envMapIntensity:1.2});
   const wL=new THREE.Mesh(wg,wm);wL.rotation.set(Math.PI/2,0,0);wL.position.set(.2,0,1.5);j.add(wL);
   const wR=wL.clone();wR.scale.x=-1;wR.position.x=-.2;j.add(wR);
-  // Canted twin vertical stabilizers (smooth)
-  const vsShape=new THREE.Shape();vsShape.moveTo(0,0);vsShape.lineTo(0,4);vsShape.lineTo(2.5,3);vsShape.lineTo(3.5,0);
-  const vg=new THREE.ExtrudeGeometry(vsShape,{depth:.1,bevelEnabled:true,bevelThickness:.03,bevelSize:.03,bevelSegments:2});
-  const vL=new THREE.Mesh(vg,bodyMat);vL.position.set(1.2,0,6.5);vL.rotation.set(Math.PI/2,-.35,0);j.add(vL);
-  const vR=new THREE.Mesh(vg,bodyMat);vR.position.set(-1.2,0,6.5);vR.rotation.set(Math.PI/2,.35,0);vR.scale.x=-1;j.add(vR);
+  // F-22-style twin tail fins rise above the fuselage and cant outward.
+  const vsShape=new THREE.Shape();vsShape.moveTo(0,0);vsShape.lineTo(.8,3.2);vsShape.lineTo(2.6,4);vsShape.lineTo(4.2,0);
+  const vg=new THREE.ExtrudeGeometry(vsShape,{depth:.16,bevelEnabled:true,bevelThickness:.04,bevelSize:.04,bevelSegments:2});
+  vg.translate(0,0,-.08);vg.rotateY(Math.PI/2);
+  const vL=new THREE.Mesh(vg,bodyMat);vL.position.set(-1.25,.1,9.5);vL.rotation.z=.34;j.add(vL);
+  const vR=new THREE.Mesh(vg,bodyMat);vR.position.set(1.25,.1,9.5);vR.rotation.z=-.34;j.add(vR);
   const hs=new THREE.Shape();hs.moveTo(0,0);hs.lineTo(-4,-.8);hs.lineTo(-3,-1.5);hs.lineTo(0,-1);
   const hg=new THREE.ExtrudeGeometry(hs,{depth:.12,bevelEnabled:true,bevelThickness:.04,bevelSize:.04,bevelSegments:2});
   const hL=new THREE.Mesh(hg,bodyMat);hL.rotation.set(Math.PI/2,0,0);hL.position.set(.5,.1,8);j.add(hL);
@@ -741,11 +742,10 @@ function spawnEnemy(wc){if(enemies.length>=MAX_ENEMIES)return;const m=enemyJetTe
   const e={mesh:m,hp,alive:true,
     aggression,skill,baseSpeed,currentSpeed:baseSpeed,
     state:'inbound',stateTimer:0,stateDuration:0,
-    extendDir:new THREE.Vector3(),attackOffset:new THREE.Vector3(),
-    preferredAlt:250+Math.random()*400+aggression*200,
+    extendDir:new THREE.Vector3(),attackPoint:new THREE.Vector3(),attackAligned:false,
     fireCooldown:1+Math.random()*2,burstCount:0,missileCooldown:8+Math.random()*12,
     evadeDir:new THREE.Vector3(),wasHit:false,evadeCooldown:0,
-    passSide:Math.random()>.5?1:-1,repositionForward:800,repositionLateral:450,repositionHeight:120};
+    passSide:Math.random()>.5?1:-1,repositionForward:850,repositionLateral:250,repositionHeight:100};
   scene.add(m);enemies.push(e);
 }
 
@@ -916,6 +916,7 @@ function updatePlayer(dt){
 }
 
 const _eFwd=new THREE.Vector3(), _eTarget=new THREE.Vector3(), _eDesired=new THREE.Quaternion(), _eLook=new THREE.Matrix4();
+const ENEMY_BREAK_DISTANCE=400,ENEMY_REENGAGE_DISTANCE=700;
 function smoothLookAt(mesh, target, dt, turnSpeed) {
   _eLook.lookAt(mesh.position, target, _axisY);
   _eDesired.setFromRotationMatrix(_eLook);
@@ -923,19 +924,24 @@ function smoothLookAt(mesh, target, dt, turnSpeed) {
 }
 function transitionEnemy(enemy,state,duration=0){enemy.state=state;enemy.stateTimer=0;enemy.stateDuration=duration}
 function beginEnemyAttack(e){
-  transitionEnemy(e,'attack',2.8+Math.random()*1.2);e.burstCount=0;e.passSide=Math.random()>.5?1:-1;
-  const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
-  e.attackOffset.copy(right).multiplyScalar(e.passSide*(100+Math.random()*140));e.attackOffset.y=(Math.random()-.5)*100;
+  transitionEnemy(e,'attack',2.6+Math.random()*.7);e.burstCount=0;e.passSide=Math.random()>.5?1:-1;e.attackAligned=false;
+  const playerRight=new THREE.Vector3().crossVectors(_fwd,_axisY);
+  if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
+  const dist=e.mesh.position.distanceTo(playerJet.position);
+  const leadTime=Math.min(dist/(Math.max(e.currentSpeed,e.baseSpeed)+220)*e.skill,1.1);
+  e.attackPoint.copy(playerJet.position).addScaledVector(player.velocity,leadTime)
+    .addScaledVector(playerRight,e.passSide*(100+Math.random()*80));
+  e.attackPoint.y=Math.max(e.attackPoint.y+(Math.random()-.5)*100,getTerrainHeight(e.attackPoint.x,e.attackPoint.z)+100);
 }
 function beginEnemyExtend(e){
-  transitionEnemy(e,'extend',2.2+Math.random()*1.3);
+  transitionEnemy(e,'extend',3+Math.random());
   const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
   e.extendDir.copy(_eFwd).addScaledVector(right,e.passSide*(.12+Math.random()*.12));
   e.extendDir.y+=.08+Math.random()*.12;e.extendDir.normalize();
 }
 function beginEnemyReposition(e){
   transitionEnemy(e,'reposition');e.passSide=Math.random()>.5?1:-1;
-  e.repositionForward=650+Math.random()*350;e.repositionLateral=350+Math.random()*250;e.repositionHeight=80+Math.random()*180;
+  e.repositionForward=750+Math.random()*250;e.repositionLateral=180+Math.random()*180;e.repositionHeight=60+Math.random()*80;
 }
 function enemyPositioningSpeed(e,dist,baseMultiplier,catchupWeight){
   const baseSpeed=e.baseSpeed*baseMultiplier;
@@ -991,20 +997,28 @@ function updateEnemies(dt){
             const perp=new THREE.Vector3().crossVectors(mdir,new THREE.Vector3(0,1,0)).normalize();
             e.evadeDir.copy(perp).multiplyScalar(Math.random()>.5?1:-1).add(new THREE.Vector3(0,.8,0)).normalize();break}}}}
 
+    // Any close merge becomes a fixed-vector extension, preventing another turn into the player.
+    if(dist<ENEMY_BREAK_DISTANCE&&e.state!=='extend'&&e.state!=='evade')beginEnemyExtend(e);
+
     // Commit to discrete attack passes so enemies do not settle into endless turn fights.
     let turnRate=1.5;
     if(e.state==='inbound'){
-      const playerFwd=player.velocity.clone().normalize();
-      _eTarget.copy(playerJet.position).addScaledVector(playerFwd,350);
-      _eTarget.y=Math.max(playerJet.position.y+130,e.preferredAlt);
+      const playerFwd=_fwd;
+      const playerRight=new THREE.Vector3().crossVectors(playerFwd,_axisY);
+      if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
+      _eTarget.copy(playerJet.position).addScaledVector(playerFwd,500).addScaledVector(playerRight,e.passSide*220);
+      _eTarget.y=Math.max(playerJet.position.y+100,getTerrainHeight(_eTarget.x,_eTarget.z)+120);
+      const playerBearing=playerFwd.dot(toPN);
       const catchupWeight=THREE.MathUtils.smoothstep(playerFwd.dot(toPN),-.2,.8);
-      e.currentSpeed=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1.25+e.skill*.5;
-      if(dist<1050+e.aggression*200&&facingPlayer>.15)beginEnemyAttack(e);
+      e.currentSpeed=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1+e.skill*.35;
+      const presentationReady=playerBearing<-.55&&dist>500;
+      if(presentationReady&&dist<1050+e.aggression*200)beginEnemyAttack(e);
+      else if(playerBearing<-.05&&dist<=500)beginEnemyReposition(e);
     }else if(e.state==='attack'){
-      // Offset passes avoid head-on collisions and leave a target the player can track through the merge.
-      const leadTime=Math.min(dist/(e.currentSpeed+220)*e.skill,1.35);
-      _eTarget.copy(playerJet.position).add(player.velocity.clone().multiplyScalar(leadTime)).add(e.attackOffset);
-      e.currentSpeed=e.baseSpeed*(1.15+e.aggression*.12);turnRate=1.25+e.skill*.9;
+      // Hold a fixed aim point so every attack becomes a committed fly-by instead of a pursuit turn.
+      _eTarget.copy(e.attackPoint);
+      e.currentSpeed=e.baseSpeed*(1.15+e.aggression*.12);turnRate=.95+e.skill*.55;
+      if(facingPlayer>.45)e.attackAligned=true;
       if(dist<500&&facingPlayer>.85&&e.fireCooldown<=0){
         e.fireCooldown=.12+.08*(1-e.skill);e.burstCount++;
         const bs=350+e.skill*100,leadT=dist/bs*.5*e.skill;
@@ -1021,24 +1035,25 @@ function updateEnemies(dt){
         if(spawnMissile(mp,_eFwd.clone(),{mesh:playerJet,alive:!gameOver},true))
           e.missileCooldown=10+Math.random()*15;
       }
-      if(dist<220||e.stateTimer>e.stateDuration||(facingPlayer<-.2&&dist<450))beginEnemyExtend(e);
+      const reachedAttackPoint=e.mesh.position.distanceTo(e.attackPoint)<140;
+      if(reachedAttackPoint||e.stateTimer>e.stateDuration||(e.attackAligned&&facingPlayer<-.05))beginEnemyExtend(e);
     }else if(e.state==='extend'){
-      // Fly mostly straight after the merge, opening distance and a clean pursuit window.
+      // Hold a straight escape vector until there is enough room for a genuinely separate pass.
       _eTarget.copy(e.mesh.position).addScaledVector(e.extendDir,1000);
-      e.currentSpeed=e.baseSpeed*(1.3+e.aggression*.1);turnRate=.45+e.skill*.25;
-      if((e.stateTimer>e.stateDuration&&dist>550)||e.stateTimer>e.stateDuration+2)beginEnemyReposition(e);
+      e.currentSpeed=Math.min(Math.max(e.baseSpeed*(1.35+e.aggression*.1),player.velocity.length()+140),650);turnRate=.35;
+      if(e.stateTimer>e.stateDuration&&dist>ENEMY_REENGAGE_DISTANCE)beginEnemyReposition(e);
     }else if(e.state==='reposition'){
-      // Present ahead and off one wing instead of orbiting tightly behind the player.
-      const playerFwd=player.velocity.clone().normalize();
+      // Stay inside the forward view corridor while setting up the next pass.
+      const playerFwd=_fwd;
       const playerRight=new THREE.Vector3().crossVectors(playerFwd,_axisY);
       if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
       _eTarget.copy(playerJet.position).addScaledVector(playerFwd,e.repositionForward)
         .addScaledVector(playerRight,e.passSide*e.repositionLateral);
-      _eTarget.y=Math.max(playerJet.position.y+e.repositionHeight,e.preferredAlt);
+      _eTarget.y=Math.max(playerJet.position.y+e.repositionHeight,getTerrainHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
-      e.currentSpeed=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=1+e.skill*.6;
-      const enemyAhead=playerBearing<-.15;
-      if(e.stateTimer>2&&enemyAhead&&dist>450&&dist<1300)beginEnemyAttack(e);
+      e.currentSpeed=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=.75+e.skill*.35;
+      const enemyAhead=playerBearing<-.65;
+      if(e.stateTimer>2&&enemyAhead&&dist>ENEMY_REENGAGE_DISTANCE&&dist<1300)beginEnemyAttack(e);
     }else if(e.state==='evade'){
       _eTarget.copy(e.mesh.position).addScaledVector(e.evadeDir,600);
       e.currentSpeed=e.baseSpeed*1.3;turnRate=2.4+e.skill*.8;

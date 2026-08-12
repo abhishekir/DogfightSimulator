@@ -87,16 +87,22 @@ function createSunGlowTexture(){const s=256,c=document.createElement('canvas');c
 
 /* ═══════════════════ SOUND ENGINE ═══════════════════ */
 class SoundEngine {
-  constructor() { this.ctx = null; this.on = false; this.noiseBuffer = null; }
+  constructor() { this.ctx = null; this.noiseBuffer = null; }
   init() {
-    if (this.on) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
-    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-    this.master = this.ctx.createGain(); this.master.gain.value = 0.45;
-    this.master.connect(this.ctx.destination);
-    this.noiseBuffer = this._noise(2);
-    this._setupEngine(); this._setupWind(); this._setupCannon();
-    this._setupLock(); this._setupWarn();
-    this.on = true;
+    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    this.ctx = ctx;
+    try {
+      this.master = ctx.createGain(); this.master.gain.value = 0.45;
+      this.master.connect(ctx.destination);
+      this.noiseBuffer = this._noise(2);
+      this._setupEngine(); this._setupWind(); this._setupCannon();
+      this._setupLock(); this._setupWarn();
+    } catch (error) {
+      this.ctx = null;
+      ctx.close().catch(() => {});
+      throw error;
+    }
   }
   _noise(dur) {
     const len = this.ctx.sampleRate * dur;
@@ -153,7 +159,7 @@ class SoundEngine {
     this.warnOsc.connect(this.warnGain); this.warnGain.connect(this.master); this.warnOsc.start();
   }
   update(throttle, speed, firing, lockProg, threat, dt) {
-    if (!this.on) return;
+    if (!this.ctx) return;
     const t = throttle;
     // Jet rumble - noise floor rises with throttle
     this.rumbleFilter.frequency.value = 120 + t * 300;
@@ -188,13 +194,13 @@ class SoundEngine {
     this.warnGain.gain.value = threat ? (Math.sin(performance.now() * 0.025) > 0 ? 0.05 : 0) : 0;
   }
   silence() {
-    if (!this.on) return;
+    if (!this.ctx) return;
     this.rumbleGain.gain.value = 0; this.turbineGain.gain.value = 0; this.compGain.gain.value = 0;
     this.abGain.gain.value = 0; this.windGain.gain.value = 0; this.cannonGain.gain.value = 0;
     this.lockGain.gain.value = 0; this.warnGain.gain.value = 0;
   }
   explosion(dist) {
-    if (!this.on) return;
+    if (!this.ctx) return;
     const now = this.ctx.currentTime, delay = Math.min(dist / 343, 3);
     const vol = Math.max(0.25 - dist * 0.0002, 0.01);
     const boom = this.ctx.createOscillator(); boom.type = 'sine';
@@ -213,7 +219,7 @@ class SoundEngine {
     ns.start(now + delay); ns.stop(now + delay + 0.7);
   }
   missileLaunch() {
-    if (!this.on) return;
+    if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const o = this.ctx.createOscillator(); o.type = 'sawtooth';
     o.frequency.setValueAtTime(150, now);
@@ -232,7 +238,7 @@ class SoundEngine {
     ns.connect(nf); nf.connect(ng2); ng2.connect(this.master); ns.start(now); ns.stop(now + 1.2);
   }
   hitMarker() {
-    if (!this.on) return;
+    if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const o = this.ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 1200;
     const g = this.ctx.createGain();
@@ -255,8 +261,9 @@ function startWave(w){const wc=getWaveConfig(w);waveTotal=wc.count;waveSpawned=0
 let sunDirection = new THREE.Vector3();
 let gForce = 1, screenShake = 0, hitFlash = 0, fovPulse = 0;
 let incomingThreat = false, threatDir = new THREE.Vector3();
-let lockTarget = null, lockProgress = 0, lockActive = false;
-const LOCK_TIME = 1.5, LOCK_CONE = 0.85;
+let lockTarget = null, lockProgress = 0;
+const LOCK_TIME = 1.5, LOCK_CONE = 0.85, LOCK_WAIT_PROGRESS = 0.99;
+const MAX_PLAYER_HP = 100, MAX_MISSILE_AMMO = 12;
 let deathCamTimer = 0, deathCamCenter = new THREE.Vector3(), deathCamAngle = 0;
 const killNotifications = [];
 const keys = {};
@@ -321,15 +328,17 @@ sunLight.shadow.bias = -0.001;
 scene.add(sunLight); scene.add(sunLight.target);
 
 /* ═══════════════════ ATMOSPHERIC SKY ═══════════════════ */
-const sky = new Sky(); sky.scale.setScalar(45000); scene.add(sky);
-const skyU = sky.material.uniforms;
-skyU['turbidity'].value = 1.5;
-skyU['rayleigh'].value = 0.8;
-skyU['mieCoefficient'].value = 0.003;
-skyU['mieDirectionalG'].value = 0.8;
 const phi = THREE.MathUtils.degToRad(35), theta = THREE.MathUtils.degToRad(200);
 sunDirection.setFromSphericalCoords(1, phi, theta);
-skyU['sunPosition'].value.copy(sunDirection);
+function configureSky(skyObject) {
+  const uniforms = skyObject.material.uniforms;
+  uniforms['turbidity'].value = 1.5;
+  uniforms['rayleigh'].value = 0.8;
+  uniforms['mieCoefficient'].value = 0.003;
+  uniforms['mieDirectionalG'].value = 0.8;
+  uniforms['sunPosition'].value.copy(sunDirection);
+}
+const sky = new Sky(); sky.scale.setScalar(45000); configureSky(sky); scene.add(sky);
 sunLight.position.copy(sunDirection.clone().multiplyScalar(2000));
 
 const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -342,32 +351,28 @@ scene.add(sunSprite);
 
 const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularShader();
 { const ts = new THREE.Scene(); const sk = new Sky(); sk.scale.setScalar(10);
-  sk.material.uniforms['turbidity'].value=1.5; sk.material.uniforms['rayleigh'].value=0.8;
-  sk.material.uniforms['mieCoefficient'].value=.003; sk.material.uniforms['mieDirectionalG'].value=.8;
-  sk.material.uniforms['sunPosition'].value.copy(sunDirection); ts.add(sk);
+  configureSky(sk); ts.add(sk);
   scene.environment = pmrem.fromScene(ts, 0, .01, 1000).texture;
   sk.geometry.dispose(); sk.material.dispose(); pmrem.dispose(); }
 
-const fogColor = 0x6a8fba;
-scene.fog = new THREE.FogExp2(fogColor, 0.00008);
+const fogColor = 0x6a8fba, FOG_DENSITY = 0.00008;
+scene.fog = new THREE.FogExp2(fogColor, FOG_DENSITY);
 
 /* ═══════════════════ WATER SHADER ═══════════════════ */
 const waterMat = new THREE.ShaderMaterial({
   transparent: true, side: THREE.DoubleSide,
   uniforms: { uTime:{value:0}, uSunDir:{value:sunDirection.clone()}, uSkyColor:{value:new THREE.Color(0x4a80b8)},
     uDeepColor:{value:new THREE.Color(0x001020)}, uShallowColor:{value:new THREE.Color(0x0a4060)},
-    uFogColor:{value:new THREE.Color(fogColor)}, uFogDensity:{value:0.00008}, uCamPos:{value:new THREE.Vector3()} },
+    uFogColor:{value:new THREE.Color(fogColor)}, uFogDensity:{value:FOG_DENSITY}, uCamPos:{value:new THREE.Vector3()} },
   vertexShader:`uniform float uTime;varying vec3 vWP;varying vec3 vN;varying float vFD;
-    float w(vec2 p,float t,float f,float s,vec2 d){return sin(dot(p,d)*f+t*s);}
-    void main(){vec3 pos=position;float t=uTime;vec2 p=pos.xz;float h=0.;
-    h+=w(p,t,.008,.6,vec2(.8,.6))*6.;h+=w(p,t,.015,.9,vec2(-.5,.85))*3.5;
-    h+=w(p,t,.03,1.3,vec2(.7,-.7))*1.8;h+=w(p,t,.06,1.8,vec2(-.3,.95))*.8;
-    h+=w(p,t,.12,2.5,vec2(.9,.4))*.3;pos.y+=h;float e=2.;
-    float hx1=w(p+vec2(e,0.),t,.008,.6,vec2(.8,.6))*6.+w(p+vec2(e,0.),t,.015,.9,vec2(-.5,.85))*3.5+w(p+vec2(e,0.),t,.03,1.3,vec2(.7,-.7))*1.8;
-    float hx0=w(p-vec2(e,0.),t,.008,.6,vec2(.8,.6))*6.+w(p-vec2(e,0.),t,.015,.9,vec2(-.5,.85))*3.5+w(p-vec2(e,0.),t,.03,1.3,vec2(.7,-.7))*1.8;
-    float hz1=w(p+vec2(0.,e),t,.008,.6,vec2(.8,.6))*6.+w(p+vec2(0.,e),t,.015,.9,vec2(-.5,.85))*3.5+w(p+vec2(0.,e),t,.03,1.3,vec2(.7,-.7))*1.8;
-    float hz0=w(p-vec2(0.,e),t,.008,.6,vec2(.8,.6))*6.+w(p-vec2(0.,e),t,.015,.9,vec2(-.5,.85))*3.5+w(p-vec2(0.,e),t,.03,1.3,vec2(.7,-.7))*1.8;
-    vec3 wN=normalize(vec3(hx0-hx1,2.*e,hz0-hz1));vN=normalize(normalMatrix*wN);
+    float wg(vec2 p,float t,float f,float s,vec2 d,float a,inout vec2 gradient){
+      float phase=dot(p,d)*f+t*s;gradient+=cos(phase)*f*d*a;return sin(phase)*a;
+    }
+    void main(){vec3 pos=position;float t=uTime;vec2 p=pos.xz,gradient=vec2(0.);float h=0.;
+    h+=wg(p,t,.008,.6,vec2(.8,.6),6.,gradient);h+=wg(p,t,.015,.9,vec2(-.5,.85),3.5,gradient);
+    h+=wg(p,t,.03,1.3,vec2(.7,-.7),1.8,gradient);h+=wg(p,t,.06,1.8,vec2(-.3,.95),.8,gradient);
+    h+=wg(p,t,.12,2.5,vec2(.9,.4),.3,gradient);pos.y+=h;
+    vec3 wN=normalize(vec3(-gradient.x,1.,-gradient.y));vN=normalize(normalMatrix*wN);
     vec4 mv=modelViewMatrix*vec4(pos,1.);vFD=-mv.z;vWP=(modelMatrix*vec4(pos,1.)).xyz;gl_Position=projectionMatrix*mv;}`,
   fragmentShader:`uniform vec3 uSunDir,uSkyColor,uDeepColor,uShallowColor,uFogColor,uCamPos;uniform float uFogDensity;
     varying vec3 vWP,vN;varying float vFD;
@@ -383,22 +388,67 @@ const waterGeo = new THREE.PlaneGeometry(50000, 50000, 200, 200); waterGeo.rotat
 const water = new THREE.Mesh(waterGeo, waterMat); water.position.y = -1; water.receiveShadow = true; scene.add(water);
 
 /* ═══════════════════ CLOUDS ═══════════════════ */
-const cloudTex = createCloudTexture();
-const cloudClusters = [];
-const CLOUD_POOL = 90, CLOUD_RANGE = 8000;
-function createCloudCluster(px, pz) {
-  const g = new THREE.Group(); const cnt = 3 + Math.floor(Math.random() * 5);
-  for (let i = 0; i < cnt; i++) {
-    const mat = new THREE.SpriteMaterial({ map: cloudTex, color: 0xffffff, transparent: true, opacity: .25 + Math.random() * .2, depthWrite: false, fog: true });
-    const sp = new THREE.Sprite(mat); const s = 200 + Math.random() * 500;
-    sp.scale.set(s, s * .4, 1);
-    sp.position.set((Math.random()-.5)*s*.8, (Math.random()-.5)*30, (Math.random()-.5)*s*.8);
-    g.add(sp);
-  }
-  g.position.set(px + (Math.random()-.5)*CLOUD_RANGE*2, 600 + Math.random()*1800, pz + (Math.random()-.5)*CLOUD_RANGE*2);
-  scene.add(g); return g;
+const viewDirection = new THREE.Vector3();
+function updateViewDirection(){camera.getWorldDirection(viewDirection)}
+function cameraDepth(x,y,z){return viewDirection.x*(x-camera.position.x)+viewDirection.y*(y-camera.position.y)+viewDirection.z*(z-camera.position.z)}
+function createDynamicInstancedMesh(geometry,material,capacity,renderOrder){
+  const mesh=new THREE.InstancedMesh(geometry,material,capacity);
+  mesh.count=0;mesh.frustumCulled=false;mesh.renderOrder=renderOrder;
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);scene.add(mesh);return mesh;
 }
-function initClouds() { for (let i = 0; i < CLOUD_POOL; i++) cloudClusters.push(createCloudCluster(0, 0)); }
+const cloudTex = createCloudTexture();
+const cloudClusters = [], cloudPuffs = [];
+const CLOUD_POOL = 90, CLOUD_RANGE = 8000, MAX_CLOUD_INSTANCES = CLOUD_POOL * 7;
+const cloudGeometry = new THREE.PlaneGeometry(1, 1);
+const cloudOpacity = new THREE.InstancedBufferAttribute(new Float32Array(MAX_CLOUD_INSTANCES), 1);
+cloudOpacity.setUsage(THREE.DynamicDrawUsage);
+cloudGeometry.setAttribute('iOpacity', cloudOpacity);
+const cloudMaterial = new THREE.ShaderMaterial({
+  uniforms: { uMap:{value:cloudTex}, uFogColor:{value:new THREE.Color(fogColor)}, uFogDensity:{value:FOG_DENSITY} },
+  vertexShader:`attribute float iOpacity;varying vec2 vUv;varying float vOpacity,vFogDepth;
+    void main(){vUv=uv;vOpacity=iOpacity;
+    vec4 mvPosition=modelViewMatrix*instanceMatrix*vec4(0.,0.,0.,1.);
+    vec2 instanceScale=vec2(length(instanceMatrix[0].xyz),length(instanceMatrix[1].xyz));
+    mvPosition.xy+=position.xy*instanceScale;vFogDepth=-mvPosition.z;
+    gl_Position=projectionMatrix*mvPosition;}`,
+  fragmentShader:`uniform sampler2D uMap;uniform vec3 uFogColor;uniform float uFogDensity;
+    varying vec2 vUv;varying float vOpacity,vFogDepth;
+    void main(){vec4 cloud=texture2D(uMap,vUv);cloud.a*=vOpacity;if(cloud.a<.002)discard;
+    gl_FragColor=cloud;
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+    float ff=1.-exp(-uFogDensity*uFogDensity*vFogDepth*vFogDepth);
+    gl_FragColor.rgb=mix(gl_FragColor.rgb,uFogColor,clamp(ff,0.,1.));}`,
+  transparent:true, depthWrite:false
+});
+const cloudMesh = createDynamicInstancedMesh(cloudGeometry,cloudMaterial,MAX_CLOUD_INSTANCES,1);
+const cloudMatrix = new THREE.Matrix4();
+function createCloudCluster() {
+  const cluster = { position:new THREE.Vector3() };
+  const cnt = 3 + Math.floor(Math.random() * 5);
+  for (let i = 0; i < cnt; i++) {
+    const opacity = .25 + Math.random() * .2, s = 200 + Math.random() * 500;
+    cloudPuffs.push({ cluster, opacity, size:s, depth:0,
+      offset:new THREE.Vector3((Math.random()-.5)*s*.8,(Math.random()-.5)*30,(Math.random()-.5)*s*.8) });
+  }
+  cluster.position.set((Math.random()-.5)*CLOUD_RANGE*2,600+Math.random()*1800,(Math.random()-.5)*CLOUD_RANGE*2);
+  return cluster;
+}
+function syncCloudInstances(){
+  updateViewDirection();
+  for(const puff of cloudPuffs){const c=puff.cluster.position,o=puff.offset;
+    puff.depth=cameraDepth(c.x+o.x,c.y+o.y,c.z+o.z)}
+  cloudPuffs.sort((a,b)=>b.depth-a.depth);
+  for(let i=0;i<cloudPuffs.length;i++){const puff=cloudPuffs[i],c=puff.cluster.position,o=puff.offset;
+    cloudMatrix.makeScale(puff.size,puff.size*.4,1).setPosition(c.x+o.x,c.y+o.y,c.z+o.z);
+    cloudMesh.setMatrixAt(i,cloudMatrix);cloudOpacity.setX(i,puff.opacity)}
+  cloudMesh.count=cloudPuffs.length;
+  if(cloudPuffs.length){cloudMesh.instanceMatrix.needsUpdate=true;cloudOpacity.needsUpdate=true}
+}
+function initClouds() {
+  for (let i = 0; i < CLOUD_POOL; i++) cloudClusters.push(createCloudCluster());
+  syncCloudInstances();
+}
 function updateClouds(px, pz) {
   for (const c of cloudClusters) { const dx=c.position.x-px, dz=c.position.z-pz;
     if (dx*dx+dz*dz > CLOUD_RANGE*CLOUD_RANGE*4) {
@@ -406,13 +456,16 @@ function updateClouds(px, pz) {
       c.position.set(px+Math.cos(a)*d, 600+Math.random()*1800, pz+Math.sin(a)*d);
     }
   }
+  syncCloudInstances();
 }
 
 /* ═══════════════════ TERRAIN ═══════════════════ */
 const CHUNK_SIZE=800, CHUNK_SEG_NEAR=24, CHUNK_SEG_FAR=8, CHUNK_HALF=14, CHUNK_NEAR=7;
 const terrainChunks = new Map();
+const terrainMaterial=new THREE.MeshStandardMaterial({vertexColors:true,roughness:.88,metalness:.02,flatShading:false,envMapIntensity:.3});
+let terrainChunkX=null,terrainChunkZ=null;
 function getTerrainHeight(x, z) { return Math.max(simplex.noise2D(x*.00025,z*.00025)*500+simplex.noise2D(x*.0006,z*.0006)*200+simplex.noise2D(x*.002,z*.002)*60+simplex.noise2D(x*.008,z*.008)*15, -8); }
-function terrainColor(y, ny) {
+function setTerrainColor(colors, offset, y, ny) {
   const slope = 1 - Math.abs(ny); let r, g, b;
   if (y<2){r=.76;g=.7;b=.5}else if(y<40){const t=y/40;r=.76-t*.48;g=.7-t*.3;b=.5-t*.35}
   else if(y<120){const t=(y-40)/80;r=.28+t*.2;g=.4-t*.08;b=.15+t*.13}
@@ -420,7 +473,7 @@ function terrainColor(y, ny) {
   else if(y<380){const t=(y-250)/130;r=.66+t*.22;g=.5+t*.35;b=.46+t*.42}
   else{r=.9;g=.88;b=.92}
   if(slope>.5&&y>30){const rb=Math.min((slope-.5)*2,1);r=r*(1-rb)+.45*rb;g=g*(1-rb)+.4*rb;b=b*(1-rb)+.38*rb}
-  return[r,g,b];
+  colors[offset]=r;colors[offset+1]=g;colors[offset+2]=b;
 }
 function createTerrainChunk(cx, cz, seg) {
   const key=`${cx},${cz}`; if(terrainChunks.has(key))return;
@@ -429,16 +482,18 @@ function createTerrainChunk(cx, cz, seg) {
   for(let i=0;i<pos.count;i++){const wx=pos.getX(i)+cx*CHUNK_SIZE,wz=pos.getZ(i)+cz*CHUNK_SIZE;pos.setY(i,getTerrainHeight(wx,wz))}
   geo.computeVertexNormals();
   const colors=new Float32Array(pos.count*3), normals=geo.attributes.normal;
-  for(let i=0;i<pos.count;i++){const[r,g,b]=terrainColor(pos.getY(i),normals.getY(i));colors[i*3]=r;colors[i*3+1]=g;colors[i*3+2]=b}
+  for(let i=0;i<pos.count;i++)setTerrainColor(colors,i*3,pos.getY(i),normals.getY(i));
   geo.setAttribute('color',new THREE.BufferAttribute(colors,3));
-  const mat=new THREE.MeshStandardMaterial({vertexColors:true,roughness:.88,metalness:.02,flatShading:false,envMapIntensity:.3});
-  const mesh=new THREE.Mesh(geo,mat); mesh.position.set(cx*CHUNK_SIZE,0,cz*CHUNK_SIZE); mesh.receiveShadow=true;
+  const mesh=new THREE.Mesh(geo,terrainMaterial); mesh.position.set(cx*CHUNK_SIZE,0,cz*CHUNK_SIZE); mesh.receiveShadow=true;
   scene.add(mesh); terrainChunks.set(key,mesh);
 }
 function updateTerrain(px, pz) {
-  const pcx=Math.round(px/CHUNK_SIZE),pcz=Math.round(pz/CHUNK_SIZE); const needed=new Set();
+  const pcx=Math.round(px/CHUNK_SIZE),pcz=Math.round(pz/CHUNK_SIZE);
+  if(pcx===terrainChunkX&&pcz===terrainChunkZ)return;
+  const needed=new Set();
   for(let dx=-CHUNK_HALF;dx<=CHUNK_HALF;dx++)for(let dz=-CHUNK_HALF;dz<=CHUNK_HALF;dz++){const cx=pcx+dx,cz=pcz+dz;const dist=Math.max(Math.abs(dx),Math.abs(dz));const seg=dist<=CHUNK_NEAR?CHUNK_SEG_NEAR:CHUNK_SEG_FAR;needed.add(`${cx},${cz}`);createTerrainChunk(cx,cz,seg)}
-  for(const[key,mesh]of terrainChunks)if(!needed.has(key)){scene.remove(mesh);mesh.geometry.dispose();mesh.material.dispose();terrainChunks.delete(key)}
+  for(const[key,mesh]of terrainChunks)if(!needed.has(key)){scene.remove(mesh);mesh.geometry.dispose();terrainChunks.delete(key)}
+  terrainChunkX=pcx;terrainChunkZ=pcz;
 }
 
 /* ═══════════════════ PLAYER JET ═══════════════════ */
@@ -499,13 +554,15 @@ function createPlayerJet(){
   j.scale.set(1.8,1.8,1.8);return j;
 }
 const playerJet=createPlayerJet();playerJet.position.set(0,350,0);scene.add(playerJet);
-const player={speed:120,minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,0,-120),
-  rollRate:0,pitchRate:0,yawRate:0,hp:100,fireCooldown:0,missileCooldown:0,missileAmmo:12,prevVelocity:new THREE.Vector3()};
+const player={minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,0,-120),
+  rollRate:0,pitchRate:0,yawRate:0,hp:MAX_PLAYER_HP,fireCooldown:0,missileCooldown:0,missileAmmo:MAX_MISSILE_AMMO,
+  missileSide:1,prevVelocity:new THREE.Vector3()};
 
 /* ═══════════════════ ENEMY JET ═══════════════════ */
 const eBMat=new THREE.MeshStandardMaterial({color:0x5a3030,metalness:.7,roughness:.3,envMapIntensity:1});
 const eDMat=new THREE.MeshStandardMaterial({color:0x3a2020,metalness:.8,roughness:.3});
 const eWMat=new THREE.MeshStandardMaterial({color:0x6a3838,metalness:.65,roughness:.3,envMapIntensity:1});
+const eGlowMat=new THREE.MeshBasicMaterial({color:0xff4400});
 function createEnemyJet(){
   const j=new THREE.Group();
   // Nose
@@ -533,11 +590,12 @@ function createEnemyJet(){
   const hsR=hsL.clone();hsR.scale.x=-1;hsR.position.x=-.3;j.add(hsR);
   // Bright engine glow (visible from distance)
   const nzGeo=new THREE.CylinderGeometry(.45,.65,1.2,16);nzGeo.rotateX(Math.PI/2);
-  const nz=new THREE.Mesh(nzGeo,new THREE.MeshBasicMaterial({color:0xff4400}));
+  const nz=new THREE.Mesh(nzGeo,eGlowMat);
   nz.position.z=9;j.add(nz);
   j.traverse(c=>{if(c.isMesh){c.castShadow=true;c.receiveShadow=true}});
   j.scale.set(2,2,2);return j;
 }
+const enemyJetTemplate=createEnemyJet();
 
 /* ═══════════════════ OBJECT POOLS ═══════════════════ */
 const MAX_BULLETS=250,bulletPool=[];
@@ -547,31 +605,112 @@ for(let i=0;i<MAX_BULLETS;i++){const m=new THREE.Mesh(tracerGeo,pBMat);m.visible
 function spawnBullet(pos,dir,speed,isEnemy=false){for(const b of bulletPool)if(!b.userData.active){b.position.copy(pos);b.userData.vel.copy(dir).multiplyScalar(speed);b.userData.life=2.5;b.userData.active=true;b.userData.isEnemy=isEnemy;b.material=isEnemy?eBulletMat:pBMat;b.scale.set(isEnemy?1.5:1,isEnemy?1.5:1,isEnemy?1.5:1);b.visible=true;return b}}
 
 const MAX_MISSILES=20,missilePool=[];
-const missileGeo=new THREE.ConeGeometry(.12,1.8,8);missileGeo.rotateX(Math.PI/2);
-const missileMat=new THREE.MeshStandardMaterial({color:0xcccccc,metalness:.8,roughness:.2,emissive:0x221100});
-for(let i=0;i<MAX_MISSILES;i++){const m=new THREE.Mesh(missileGeo,missileMat.clone());m.visible=false;m.userData={active:false,vel:new THREE.Vector3(),life:0,target:null,isEnemy:false};scene.add(m);missilePool.push(m)}
-function spawnMissile(pos,dir,target,isEnemy=false){for(const m of missilePool)if(!m.userData.active){m.position.copy(pos);m.userData.vel.copy(dir).multiplyScalar(280);m.userData.life=5;m.userData.active=true;m.userData.target=target;m.userData.isEnemy=isEnemy;m.userData.tracking=true;m.userData.trackEnergy=1.0;m.visible=true;return m}}
+const missileBodyGeo=new THREE.CylinderGeometry(.22,.28,3,10);missileBodyGeo.rotateX(Math.PI/2);
+const missileNoseGeo=new THREE.ConeGeometry(.28,.9,10);missileNoseGeo.rotateX(Math.PI/2);
+const missileFinGeo=new THREE.BoxGeometry(.9,.06,.8);
+const missileFlameGeo=new THREE.ConeGeometry(.3,2.6,8);missileFlameGeo.rotateX(-Math.PI/2);
+const missileBodyMat=new THREE.MeshStandardMaterial({color:0xe8edf2,metalness:.7,roughness:.22,emissive:0x333333,emissiveIntensity:.8});
+const missileFinMat=new THREE.MeshStandardMaterial({color:0x59616a,metalness:.65,roughness:.3});
+const missileFlameMat=new THREE.MeshBasicMaterial({color:0xffaa33,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending});
+const missileGlowMat=new THREE.SpriteMaterial({map:createSunGlowTexture(),color:0xff7722,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending});
+function createMissileVisual(){
+  const g=new THREE.Group();
+  const body=new THREE.Mesh(missileBodyGeo,missileBodyMat);g.add(body);
+  const nose=new THREE.Mesh(missileNoseGeo,missileBodyMat);nose.position.z=1.85;g.add(nose);
+  const finH=new THREE.Mesh(missileFinGeo,missileFinMat);finH.position.z=-1;g.add(finH);
+  const finV=finH.clone();finV.rotation.z=Math.PI/2;g.add(finV);
+  const flame=new THREE.Mesh(missileFlameGeo,missileFlameMat);flame.position.z=-2.5;g.add(flame);
+  const glow=new THREE.Sprite(missileGlowMat);glow.position.z=-3.2;glow.scale.set(7,7,1);g.add(glow);
+  g.visible=false;g.userData={active:false,vel:new THREE.Vector3(),launchDir:new THREE.Vector3(),life:0,target:null,isEnemy:false,tracking:false,
+    trackEnergy:0,age:0,launchSpeed:0,maxSpeed:0,trailDistance:0,prevPos:new THREE.Vector3(),flame,glow};
+  return g;
+}
+for(let i=0;i<MAX_MISSILES;i++){const m=createMissileVisual();scene.add(m);missilePool.push(m)}
+function spawnMissile(pos,dir,target,isEnemy=false,launchSide=0){for(const m of missilePool)if(!m.userData.active){
+  const u=m.userData;m.position.copy(pos);u.launchDir.copy(dir).normalize();u.vel.copy(u.launchDir).multiplyScalar(isEnemy?160:115);
+  if(!isEnemy&&launchSide){const right=new THREE.Vector3(1,0,0).applyQuaternion(playerJet.quaternion);
+    u.vel.addScaledVector(right,launchSide*32);u.vel.y-=24}
+  u.life=7;u.active=true;u.target=target;u.isEnemy=isEnemy;u.tracking=true;u.trackEnergy=1.15;
+  u.age=0;u.launchSpeed=u.vel.length();u.maxSpeed=isEnemy?320:410;u.trailDistance=0;u.prevPos.copy(pos);
+  m.lookAt(pos.clone().add(dir));m.visible=true;emitMissileLaunch(pos,dir,isEnemy);return m}}
 
-const MAX_PARTICLES=600,particlePool=[],particleGeo=new THREE.SphereGeometry(1,5,5);
-for(let i=0;i<MAX_PARTICLES;i++){const mat=new THREE.MeshBasicMaterial({color:0xff6600,transparent:true,opacity:1,depthWrite:false,blending:THREE.AdditiveBlending});const m=new THREE.Mesh(particleGeo,mat);m.visible=false;m.userData={active:false,vel:new THREE.Vector3(),life:0,maxLife:1,size:1,type:'fire'};scene.add(m);particlePool.push(m)}
-function spawnP(pos,vel,life,color,size,type='fire'){for(const p of particlePool)if(!p.userData.active){p.position.copy(pos);p.userData.vel.copy(vel);p.userData.life=life;p.userData.maxLife=life;p.userData.active=true;p.userData.size=size;p.userData.type=type;p.material.color.set(color);p.material.blending=type==='smoke'?THREE.NormalBlending:THREE.AdditiveBlending;p.material.opacity=type==='smoke'?.35:1;p.scale.setScalar(size);p.visible=true;return p}}
+const MAX_PARTICLES=600,MAX_TRAIL_PARTICLES=360,PARTICLE_EFFECT_RESERVE=160,freeParticles=[],activeParticles=[];
+let activeTrailParticles=0;
+const particleGeo=new THREE.SphereGeometry(1,5,5),smokeParticleGeo=particleGeo.clone();
+function createParticleMaterial(blending) {
+  return new THREE.ShaderMaterial({
+    uniforms:{uFogColor:{value:new THREE.Color(fogColor)},uFogDensity:{value:FOG_DENSITY}},
+    vertexShader:`attribute vec3 iColor;attribute float iOpacity;
+      varying vec3 vColor;varying float vOpacity,vFogDepth;
+      void main(){vColor=iColor;vOpacity=iOpacity;
+      vec4 mvPosition=modelViewMatrix*instanceMatrix*vec4(position,1.);
+      vFogDepth=-mvPosition.z;gl_Position=projectionMatrix*mvPosition;}`,
+    fragmentShader:`uniform vec3 uFogColor;uniform float uFogDensity;
+      varying vec3 vColor;varying float vOpacity,vFogDepth;
+      void main(){gl_FragColor=vec4(vColor,vOpacity);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+      float ff=1.-exp(-uFogDensity*uFogDensity*vFogDepth*vFogDepth);
+      gl_FragColor.rgb=mix(gl_FragColor.rgb,uFogColor,clamp(ff,0.,1.));}`,
+    transparent:true,depthWrite:false,blending
+  });
+}
+function createParticleBatch(geometry,blending,renderOrder) {
+  const colors=new THREE.InstancedBufferAttribute(new Float32Array(MAX_PARTICLES*3),3);
+  const opacities=new THREE.InstancedBufferAttribute(new Float32Array(MAX_PARTICLES),1);
+  colors.setUsage(THREE.DynamicDrawUsage);opacities.setUsage(THREE.DynamicDrawUsage);
+  geometry.setAttribute('iColor',colors);geometry.setAttribute('iOpacity',opacities);
+  const mesh=createDynamicInstancedMesh(geometry,createParticleMaterial(blending),MAX_PARTICLES,renderOrder);
+  return{mesh,colors,opacities};
+}
+const smokeParticleBatch=createParticleBatch(smokeParticleGeo,THREE.NormalBlending,2);
+const fireParticleBatch=createParticleBatch(particleGeo,THREE.AdditiveBlending,3);
+for(let i=0;i<MAX_PARTICLES;i++)freeParticles.push({position:new THREE.Vector3(),velocity:new THREE.Vector3(),color:new THREE.Color(),
+  opacity:0,scale:1,depth:0,life:0,maxLife:1,size:1,type:'fire',isTrail:false});
+function spawnP(pos,vel,life,color,size,type='fire',isTrail=false){
+  if(isTrail&&(activeTrailParticles>=MAX_TRAIL_PARTICLES||freeParticles.length<=PARTICLE_EFFECT_RESERVE))return;
+  const p=freeParticles.pop();if(!p)return;
+  p.position.copy(pos);p.velocity.copy(vel);p.life=life;p.maxLife=life;p.size=size;p.type=type;
+  p.color.set(color);p.opacity=type==='smoke'?.35:1;p.scale=size;p.isTrail=isTrail;
+  if(isTrail)activeTrailParticles++;activeParticles.push(p)}
+function releaseParticle(index){const p=activeParticles[index],last=activeParticles.pop();if(index<activeParticles.length)activeParticles[index]=last;
+  if(p.isTrail){p.isTrail=false;activeTrailParticles--}freeParticles.push(p)}
+const particleMatrix=new THREE.Matrix4();
+const smokeRenderParticles=[],fireRenderParticles=[];
+function writeParticleBatch(batch,particles){
+  batch.mesh.count=particles.length;
+  for(let i=0;i<particles.length;i++){const p=particles[i];
+    particleMatrix.makeScale(p.scale,p.scale,p.scale).setPosition(p.position);batch.mesh.setMatrixAt(i,particleMatrix);
+    batch.colors.setXYZ(i,p.color.r,p.color.g,p.color.b);batch.opacities.setX(i,p.opacity)}
+  if(particles.length){batch.mesh.instanceMatrix.needsUpdate=true;batch.colors.needsUpdate=true;batch.opacities.needsUpdate=true}
+}
+function syncParticleBatches(){
+  updateViewDirection();
+  smokeRenderParticles.length=0;fireRenderParticles.length=0;
+  for(const p of activeParticles){if(p.type==='smoke'){p.depth=cameraDepth(p.position.x,p.position.y,p.position.z);smokeRenderParticles.push(p)}
+    else fireRenderParticles.push(p)}
+  smokeRenderParticles.sort((a,b)=>b.depth-a.depth);
+  writeParticleBatch(smokeParticleBatch,smokeRenderParticles);writeParticleBatch(fireParticleBatch,fireRenderParticles);
+}
+function resetParticlePool(){while(activeParticles.length){const p=activeParticles.pop();p.isTrail=false;freeParticles.push(p)}
+  activeTrailParticles=0;smokeParticleBatch.mesh.count=0;fireParticleBatch.mesh.count=0}
 
 /* ═══════════════════ DEBRIS POOL ═══════════════════ */
 const MAX_DEBRIS=30,debrisPool=[];
 const debrisGeos=[new THREE.BoxGeometry(1.5,.5,1),new THREE.TetrahedronGeometry(.8),new THREE.BoxGeometry(.8,.3,2)];
 const debrisMat=new THREE.MeshStandardMaterial({color:0x555555,metalness:.6,roughness:.4});
 for(let i=0;i<MAX_DEBRIS;i++){const m=new THREE.Mesh(debrisGeos[i%3],debrisMat.clone());m.visible=false;m.userData={active:false,vel:new THREE.Vector3(),rotVel:new THREE.Vector3(),life:0};scene.add(m);debrisPool.push(m)}
-function spawnDebris(pos,count=4){for(let i=0;i<count;i++)for(const d of debrisPool)if(!d.userData.active){d.position.copy(pos);d.userData.vel.set((Math.random()-.5)*200,Math.random()*150+50,(Math.random()-.5)*200);d.userData.rotVel.set((Math.random()-.5)*10,(Math.random()-.5)*10,(Math.random()-.5)*10);d.userData.life=1.5+Math.random()*2;d.userData.active=true;d.visible=true;d.scale.setScalar(.8+Math.random()*1.5);d.material.color.setHex([0x555555,0x444444,0x666655,0x553333][Math.floor(Math.random()*4)]);break}}
+function spawnDebris(pos,count){for(let i=0;i<count;i++)for(const d of debrisPool)if(!d.userData.active){d.position.copy(pos);d.userData.vel.set((Math.random()-.5)*200,Math.random()*150+50,(Math.random()-.5)*200);d.userData.rotVel.set((Math.random()-.5)*10,(Math.random()-.5)*10,(Math.random()-.5)*10);d.userData.life=1.5+Math.random()*2;d.userData.active=true;d.visible=true;d.scale.setScalar(.8+Math.random()*1.5);d.material.color.setHex([0x555555,0x444444,0x666655,0x553333][Math.floor(Math.random()*4)]);break}}
 
-function spawnExplosion(pos, count = 35) {
-  spawnP(pos.clone(), new THREE.Vector3(), .15, 0xffffff, 20 + count * .5);
-  spawnP(pos.clone(), new THREE.Vector3(), .25, 0xffffcc, 12 + count * .3);
+function spawnExplosion(pos, count) {
+  spawnP(pos, new THREE.Vector3(), .15, 0xffffff, 20 + count * .5);
+  spawnP(pos, new THREE.Vector3(), .25, 0xffffcc, 12 + count * .3);
   for (let i = 0; i < count; i++) { const v = new THREE.Vector3((Math.random()-.5)*250,(Math.random()-.5)*250,(Math.random()-.5)*250);
-    spawnP(pos.clone(), v, .4+Math.random()*.8, [0xff4400,0xff8800,0xffcc00,0xff2200,0xffaa00][Math.floor(Math.random()*5)], 1.5+Math.random()*3.5); }
+    spawnP(pos, v, .4+Math.random()*.8, [0xff4400,0xff8800,0xffcc00,0xff2200,0xffaa00][Math.floor(Math.random()*5)], 1.5+Math.random()*3.5); }
   for (let i = 0; i < count * .6; i++) { const v = new THREE.Vector3((Math.random()-.5)*80,Math.random()*60,(Math.random()-.5)*80);
-    spawnP(pos.clone(), v, 1+Math.random()*2, 0x333333, 2+Math.random()*5, 'smoke'); }
+    spawnP(pos, v, 1+Math.random()*2, 0x333333, 2+Math.random()*5, 'smoke'); }
   for (let i = 0; i < 18; i++) { const a = (i/18)*Math.PI*2;
-    spawnP(pos.clone(), new THREE.Vector3(Math.cos(a)*400,Math.sin(a*.3)*40,Math.sin(a)*400), .18, 0xffcc66, 2.5); }
+    spawnP(pos, new THREE.Vector3(Math.cos(a)*400,Math.sin(a*.3)*40,Math.sin(a)*400), .18, 0xffcc66, 2.5); }
   if (count >= 30) spawnDebris(pos, 3 + Math.floor(Math.random()*3));
 }
 
@@ -589,9 +728,8 @@ scene.add(new THREE.Points(cGeo,cMat));
 let contrailTimer=0;
 
 /* ═══════════════════ ENEMIES ═══════════════════ */
-function disposeGroup(g){g.traverse(c=>{if(c.isMesh){c.geometry.dispose();if(Array.isArray(c.material))c.material.forEach(m=>m.dispose());else c.material.dispose()}})}
 const MAX_ENEMIES=8, enemies=[];
-function spawnEnemy(wc){if(enemies.length>=MAX_ENEMIES)return;const m=createEnemyJet();
+function spawnEnemy(wc){if(enemies.length>=MAX_ENEMIES)return;const m=enemyJetTemplate.clone();
   const a=Math.random()*Math.PI*2,d=1500+Math.random()*800;
   const spawnAlt=Math.max(playerJet.position.y+200+Math.random()*400,300);
   m.position.set(playerJet.position.x+Math.cos(a)*d,spawnAlt,playerJet.position.z+Math.sin(a)*d);
@@ -602,19 +740,45 @@ function spawnEnemy(wc){if(enemies.length>=MAX_ENEMIES)return;const m=createEnem
   const hp=40+(wc.hpBonus||0);
   const e={mesh:m,hp,alive:true,
     aggression,skill,baseSpeed,currentSpeed:baseSpeed,
-    state:'inbound',stateTimer:0,
-    breakDir:new THREE.Vector3(),attackOffset:new THREE.Vector3(),
+    state:'inbound',stateTimer:0,stateDuration:0,
+    extendDir:new THREE.Vector3(),attackOffset:new THREE.Vector3(),
     preferredAlt:250+Math.random()*400+aggression*200,
     fireCooldown:1+Math.random()*2,burstCount:0,missileCooldown:8+Math.random()*12,
-    evadeDir:new THREE.Vector3(),wasHit:false,
-    angle:Math.random()*Math.PI*2,timer:0};
+    evadeDir:new THREE.Vector3(),wasHit:false,evadeCooldown:0,
+    passSide:Math.random()>.5?1:-1,repositionForward:800,repositionLateral:450,repositionHeight:120};
   scene.add(m);enemies.push(e);
 }
 
 /* ═══════════════════ VFX ═══════════════════ */
 const _fwd = new THREE.Vector3();
-function emitExhaust(pos,dir,thr){if(Math.random()>thr*.7)return;const v=dir.clone().multiplyScalar(-40-Math.random()*50);v.x+=(Math.random()-.5)*12;v.y+=(Math.random()-.5)*12;v.z+=(Math.random()-.5)*12;const c=thr>.85?0x4488ff:(thr>.5?0xff8833:0xff5500);spawnP(pos.clone(),v,.15+Math.random()*.25,c,.4+Math.random()*1.2)}
-function emitMuzzle(pos){spawnP(pos.clone(),new THREE.Vector3(),0.05,0xffffff,4);for(let i=0;i<5;i++){const v=new THREE.Vector3((Math.random()-.5)*50,(Math.random()-.5)*50,(Math.random()-.5)*50);spawnP(pos.clone(),v,.05+Math.random()*.08,0xffffaa,2+Math.random()*3)}}
+function emitExhaust(pos,dir,thr){if(Math.random()>thr*.7)return;const v=dir.clone().multiplyScalar(-40-Math.random()*50);v.x+=(Math.random()-.5)*12;v.y+=(Math.random()-.5)*12;v.z+=(Math.random()-.5)*12;const c=thr>.85?0x4488ff:(thr>.5?0xff8833:0xff5500);spawnP(pos,v,.15+Math.random()*.25,c,.4+Math.random()*1.2)}
+function emitMuzzle(pos){spawnP(pos,new THREE.Vector3(),0.05,0xffffff,4);for(let i=0;i<5;i++){const v=new THREE.Vector3((Math.random()-.5)*50,(Math.random()-.5)*50,(Math.random()-.5)*50);spawnP(pos,v,.05+Math.random()*.08,0xffffaa,2+Math.random()*3)}}
+function emitMissileLaunch(pos,dir,isEnemy){
+  const back=dir.clone().normalize().negate();
+  spawnP(pos,back.clone().multiplyScalar(30),.18,0xffffff,7);
+  for(let i=0;i<8;i++){const v=back.clone().multiplyScalar(40+Math.random()*60);
+    v.x+=(Math.random()-.5)*35;v.y+=(Math.random()-.5)*35;v.z+=(Math.random()-.5)*35;
+    spawnP(pos,v,.12+Math.random()*.18,isEnemy?0xff4422:0xffaa33,1.5+Math.random()*2.5)}
+  for(let i=0;i<5;i++){const v=back.clone().multiplyScalar(15+Math.random()*25);
+    v.x+=(Math.random()-.5)*15;v.y+=(Math.random()-.5)*15;v.z+=(Math.random()-.5)*15;
+    spawnP(pos,v,.8+Math.random()*.7,0x888888,1.8+Math.random()*2,'smoke')}
+  if(!isEnemy){screenShake=Math.max(screenShake,.3);fovPulse=Math.max(fovPulse,.12)}
+}
+const _missileTrailPos=new THREE.Vector3(),_missileTrailVel=new THREE.Vector3(),_missileTrailBack=new THREE.Vector3(),_missileSteer=new THREE.Vector3();
+function emitMissileTrail(m,activeMissiles){
+  const u=m.userData,travel=u.prevPos.distanceTo(m.position);if(travel<.1)return;
+  const spacing=8+Math.max(0,activeMissiles-2)*2.5;
+  u.trailDistance%=spacing;
+  let distanceToNext=spacing-u.trailDistance,emitted=0;
+  _missileTrailBack.copy(u.vel).normalize().negate();
+  while(distanceToNext<=travel&&emitted<4){_missileTrailPos.lerpVectors(u.prevPos,m.position,distanceToNext/travel);
+    _missileTrailVel.copy(_missileTrailBack).multiplyScalar(18);
+    _missileTrailVel.x+=(Math.random()-.5)*7;_missileTrailVel.y+=(Math.random()-.5)*7;_missileTrailVel.z+=(Math.random()-.5)*7;
+    spawnP(_missileTrailPos,_missileTrailVel,1.2+Math.random()*.7,0x9aa0a6,1.5+Math.random()*1.2,'smoke',true);
+    if(Math.random()<.6)spawnP(_missileTrailPos,_missileTrailVel,.1+Math.random()*.08,u.isEnemy?0xff4422:0xff9933,.7+Math.random()*.7,'fire',true);
+    distanceToNext+=spacing;emitted++}
+  u.trailDistance=(u.trailDistance+travel)%spacing;u.prevPos.copy(m.position);
+}
 function addKillNotification(sv){killNotifications.push({text:'ENEMY DESTROYED',score:sv,timer:2.5,maxTimer:2.5})}
 
 /* ═══════════════════ CAMERA ═══════════════════ */
@@ -640,7 +804,7 @@ function updateCamera(dt){
 /* ═══════════════════ GAME LOGIC ═══════════════════ */
 const _qP=new THREE.Quaternion(),_qR=new THREE.Quaternion(),_qY=new THREE.Quaternion();
 const _axisX=new THREE.Vector3(1,0,0),_axisY=new THREE.Vector3(0,1,0),_axisZ=new THREE.Vector3(0,0,1);
-const _tmpV1=new THREE.Vector3(),_tmpV2=new THREE.Vector3(),_tmpQ=new THREE.Quaternion();
+const _tmpV1=new THREE.Vector3(),_tmpQ=new THREE.Quaternion();
 const _hudEuler=new THREE.Euler();
 
 function findNearestEnemy(){let n=null,md=Infinity;for(const e of enemies){if(!e.alive)continue;const d=e.mesh.position.distanceTo(playerJet.position);if(d<md&&d<1500){md=d;n=e}}return n}
@@ -650,7 +814,7 @@ function updatePlayer(dt){
   player.prevVelocity.copy(player.velocity);
   if(keys['KeyW'])player.throttle=Math.min(player.throttle+dt*.5,1);
   if(keys['KeyS'])player.throttle=Math.max(player.throttle-dt*.5,0);
-  player.speed=player.minSpeed+(player.maxSpeed-player.minSpeed)*player.throttle;
+  const speed=player.minSpeed+(player.maxSpeed-player.minSpeed)*player.throttle;
 
   // Pitch (up arrow = nose dips down, down arrow = nose pulls up)
   const pI=(keys['ArrowDown']?1:0)-(keys['ArrowUp']?1:0);
@@ -668,7 +832,7 @@ function updatePlayer(dt){
   _qY.setFromAxisAngle(_axisY,player.yawRate*dt);
   playerJet.quaternion.multiply(_qY).multiply(_qP).multiply(_qR).normalize();
   _fwd.set(0,0,-1).applyQuaternion(playerJet.quaternion);
-  _tmpV1.copy(_fwd).multiplyScalar(player.speed);player.velocity.lerp(_tmpV1,dt*2);
+  _tmpV1.copy(_fwd).multiplyScalar(speed);player.velocity.lerp(_tmpV1,dt*2);
   if(playerJet.position.y>5)player.velocity.y-=18*dt;
   _tmpV1.copy(player.velocity).multiplyScalar(dt);playerJet.position.add(_tmpV1);
   _tmpV1.copy(player.velocity).sub(player.prevVelocity).divideScalar(Math.max(dt,.001));
@@ -701,28 +865,29 @@ function updatePlayer(dt){
   if(firing){player.fireCooldown=.07;
     const gL=new THREE.Vector3(-2.5,-.6,-14).applyQuaternion(playerJet.quaternion).add(playerJet.position);
     const gR=new THREE.Vector3(2.5,-.6,-14).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-    spawnBullet(gL,_fwd.clone(),player.speed+650);spawnBullet(gR,_fwd.clone(),player.speed+650);emitMuzzle(gL);emitMuzzle(gR)}
+    spawnBullet(gL,_fwd.clone(),speed+650);spawnBullet(gR,_fwd.clone(),speed+650);emitMuzzle(gL);emitMuzzle(gR)}
 
   // Lock-on system
   player.missileCooldown-=dt;
   if(keys['KeyF']&&player.missileAmmo>0){
-    if(!lockActive){lockActive=true;lockProgress=0;lockTarget=null}
     const fwd=_fwd;
+    const maxLockProgress=missilePool.some(m=>!m.userData.active)?1:LOCK_WAIT_PROGRESS;
     let best=null,bestD=LOCK_CONE;
     for(const e of enemies){if(!e.alive)continue;const dir=new THREE.Vector3().subVectors(e.mesh.position,playerJet.position).normalize();
       const dot=dir.dot(fwd),dist=e.mesh.position.distanceTo(playerJet.position);
       if(dot>bestD&&dist<1500){bestD=dot;best=e}}
     if(best){if(lockTarget!==best){lockTarget=best;lockProgress=0}
-      lockProgress=Math.min(lockProgress+dt/LOCK_TIME,1);
-      if(lockProgress>=1&&player.missileCooldown<=0){player.missileCooldown=.5;
-        const mp=new THREE.Vector3(0,-2,-6).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-        spawnMissile(mp,fwd.clone(),lockTarget);player.missileAmmo--;snd.missileLaunch();lockProgress=0}}
-    else{lockTarget=null;lockProgress=Math.min(lockProgress+dt*2,1);
+      lockProgress=Math.min(lockProgress+dt/LOCK_TIME,maxLockProgress)}
+    else{lockTarget=null;lockProgress=Math.min(lockProgress+dt*2,maxLockProgress);
       // Dumb-fire if no target and held long enough
-      if(lockProgress>=1&&player.missileCooldown<=0){player.missileCooldown=.5;
-        const mp=new THREE.Vector3(0,-2,-6).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-        spawnMissile(mp,fwd.clone(),null);player.missileAmmo--;snd.missileLaunch();lockProgress=0}}
-  }else{if(lockActive){lockActive=false;lockTarget=null;lockProgress=0}}
+    }
+    if(lockProgress>=1&&player.missileCooldown<=0){
+      const launchSide=player.missileSide;
+      const mp=new THREE.Vector3(launchSide*5,-1.7,-1).applyQuaternion(playerJet.quaternion).add(playerJet.position);
+      const launched=spawnMissile(mp,fwd.clone(),lockTarget,false,launchSide);
+      if(launched){lockProgress=0;player.missileCooldown=.5;player.missileSide*=-1;player.missileAmmo--;snd.missileLaunch()}
+      else lockProgress=LOCK_WAIT_PROGRESS}
+  }else{lockTarget=null;lockProgress=0}
 
   // Speed lines
   if(player.throttle>.7)for(const sl of speedLines)if(!sl.userData.active&&Math.random()<.35){
@@ -737,17 +902,17 @@ function updatePlayer(dt){
     spawnP(o,new THREE.Vector3((Math.random()-.5)*15,Math.random()*20,(Math.random()-.5)*15),.8+Math.random()*1.2,0x444444,1.5+Math.random()*2,'smoke')}
   if(player.hp<40){const o=new THREE.Vector3((Math.random()-.5)*4,(Math.random()-.5)*2,5+Math.random()*8).applyQuaternion(playerJet.quaternion).add(playerJet.position);
     spawnP(o,new THREE.Vector3((Math.random()-.5)*10,Math.random()*15,(Math.random()-.5)*10),.6+Math.random(),0x333333,1+Math.random()*2.5,'smoke');
-    if(Math.random()<.15)spawnP(o.clone(),new THREE.Vector3((Math.random()-.5)*80,(Math.random()-.5)*80,(Math.random()-.5)*80),.1+Math.random()*.15,0xffcc44,.3+Math.random()*.5)}
+    if(Math.random()<.15)spawnP(o,new THREE.Vector3((Math.random()-.5)*80,(Math.random()-.5)*80,(Math.random()-.5)*80),.1+Math.random()*.15,0xffcc44,.3+Math.random()*.5)}
   if(player.hp<20){const o=new THREE.Vector3((Math.random()-.5)*3,(Math.random()-.5)*2,3+Math.random()*6).applyQuaternion(playerJet.quaternion).add(playerJet.position);
     spawnP(o,new THREE.Vector3((Math.random()-.5)*20,Math.random()*30,(Math.random()-.5)*20),.2+Math.random()*.4,0xff4400,1+Math.random()*2)}
   // Wing vapor
   if(gForce>3&&Math.random()<.5){const wL=new THREE.Vector3(-12*1.8,0,0).applyQuaternion(playerJet.quaternion).add(playerJet.position);
     const wR=new THREE.Vector3(12*1.8,0,0).applyQuaternion(playerJet.quaternion).add(playerJet.position);
     const v=new THREE.Vector3((Math.random()-.5)*5,(Math.random()-.5)*5,(Math.random()-.5)*5);
-    spawnP(wL,v.clone(),.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke');
-    spawnP(wR,v.clone(),.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke')}
+    spawnP(wL,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke');
+    spawnP(wR,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke')}
 
-  snd.update(player.throttle,player.speed,keys['Space'],lockProgress,incomingThreat,dt);
+  snd.update(player.throttle,speed,keys['Space'],lockProgress,incomingThreat,dt);
 }
 
 const _eFwd=new THREE.Vector3(), _eTarget=new THREE.Vector3(), _eDesired=new THREE.Quaternion(), _eLook=new THREE.Matrix4();
@@ -755,6 +920,28 @@ function smoothLookAt(mesh, target, dt, turnSpeed) {
   _eLook.lookAt(mesh.position, target, _axisY);
   _eDesired.setFromRotationMatrix(_eLook);
   mesh.quaternion.slerp(_eDesired, Math.min(dt * turnSpeed, 1));
+}
+function transitionEnemy(enemy,state,duration=0){enemy.state=state;enemy.stateTimer=0;enemy.stateDuration=duration}
+function beginEnemyAttack(e){
+  transitionEnemy(e,'attack',2.8+Math.random()*1.2);e.burstCount=0;e.passSide=Math.random()>.5?1:-1;
+  const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
+  e.attackOffset.copy(right).multiplyScalar(e.passSide*(100+Math.random()*140));e.attackOffset.y=(Math.random()-.5)*100;
+}
+function beginEnemyExtend(e){
+  transitionEnemy(e,'extend',2.2+Math.random()*1.3);
+  const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
+  e.extendDir.copy(_eFwd).addScaledVector(right,e.passSide*(.12+Math.random()*.12));
+  e.extendDir.y+=.08+Math.random()*.12;e.extendDir.normalize();
+}
+function beginEnemyReposition(e){
+  transitionEnemy(e,'reposition');e.passSide=Math.random()>.5?1:-1;
+  e.repositionForward=650+Math.random()*350;e.repositionLateral=350+Math.random()*250;e.repositionHeight=80+Math.random()*180;
+}
+function enemyPositioningSpeed(e,dist,baseMultiplier,catchupWeight){
+  const baseSpeed=e.baseSpeed*baseMultiplier;
+  const closingBonus=THREE.MathUtils.clamp(dist*.14,70,190);
+  const catchupSpeed=Math.max(baseSpeed,player.velocity.length()+closingBonus);
+  return THREE.MathUtils.lerp(baseSpeed,catchupSpeed,catchupWeight);
 }
 function updateEnemies(dt){
   // Wave management
@@ -765,15 +952,15 @@ function updateEnemies(dt){
   if(waveSpawned<waveTotal&&enemies.length<MAX_ENEMIES){waveSpawnDelay-=dt;
     if(waveSpawnDelay<=0){spawnEnemy(getWaveConfig(waveNumber));waveSpawned++;waveSpawnDelay=.8+Math.random()*.4}}
   for(let i=enemies.length-1;i>=0;i--){const e=enemies[i];if(!e.alive)continue;
-    e.timer+=dt;e.stateTimer+=dt;e.fireCooldown-=dt;e.missileCooldown-=dt;
+    e.stateTimer+=dt;e.fireCooldown-=dt;e.missileCooldown-=dt;e.evadeCooldown=Math.max(0,e.evadeCooldown-dt);
     const toP=new THREE.Vector3().subVectors(playerJet.position,e.mesh.position);const dist=toP.length();
     const toPN=toP.clone().normalize();
     _eFwd.set(0,0,-1).applyQuaternion(e.mesh.quaternion);
     const facingPlayer=_eFwd.dot(toPN);
 
-    // Hit reaction -> trigger evade
-    if(e.wasHit&&e.state!=='evade'){
-      e.wasHit=false;e.state='evade';e.stateTimer=0;
+    // Hits during cooldown remain queued for the next available evade.
+    if(e.wasHit&&e.state!=='evade'&&e.evadeCooldown<=0){e.wasHit=false;
+      transitionEnemy(e,'evade',1.1+Math.random()*1.1);e.evadeCooldown=2.5;
       const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
       const up=new THREE.Vector3(0,1,0).applyQuaternion(e.mesh.quaternion);
       const r=Math.random();
@@ -785,44 +972,39 @@ function updateEnemies(dt){
         e.evadeDir.set(0,1,0).add(_eFwd.clone().multiplyScalar(.3)).add(right.multiplyScalar((Math.random()-.5)*.5)).normalize();
     }
 
-    // Bullet near-miss -> trigger evade (if not already evading or attacking)
-    if(e.state!=='evade'&&e.state!=='break'){
+    // Near misses can trigger an evade, but the cooldown preserves clear attack windows.
+    if(e.state!=='evade'&&e.state!=='extend'&&e.evadeCooldown<=0){
       for(const b of bulletPool){if(!b.userData.active||b.userData.isEnemy)continue;
         const tb=new THREE.Vector3().subVectors(b.position,e.mesh.position);
         if(tb.length()<60){const bd=b.userData.vel.clone().normalize();
-          if(bd.dot(tb.normalize())<-.6){e.state='evade';e.stateTimer=0;
+          if(bd.dot(tb.normalize())<-.6){transitionEnemy(e,'evade',1.1+Math.random()*1.1);e.evadeCooldown=2.5;
             const cr=new THREE.Vector3().crossVectors(bd,tb);
             if(cr.lengthSq()<.001)cr.set(0,1,0);else cr.normalize();
             e.evadeDir.copy(cr).multiplyScalar(Math.random()>.5?1:-1).add(new THREE.Vector3(0,.5,0)).normalize();break}}}}
 
     // Incoming missile detection -> trigger evade
-    if(e.state!=='evade'){
+    if(e.state!=='evade'&&e.evadeCooldown<=0){
       for(const m of missilePool){if(!m.userData.active||m.userData.isEnemy)continue;
         const tm=new THREE.Vector3().subVectors(m.position,e.mesh.position);const md=tm.length();
         if(md<250){const mdir=m.userData.vel.clone().normalize();
-          if(mdir.dot(tm.normalize())<-.5){e.state='evade';e.stateTimer=0;
+          if(mdir.dot(tm.normalize())<-.5){transitionEnemy(e,'evade',1.2+Math.random());e.evadeCooldown=2.5;
             const perp=new THREE.Vector3().crossVectors(mdir,new THREE.Vector3(0,1,0)).normalize();
             e.evadeDir.copy(perp).multiplyScalar(Math.random()>.5?1:-1).add(new THREE.Vector3(0,.8,0)).normalize();break}}}}
 
-    // State machine
-    let turnRate=2;
+    // Commit to discrete attack passes so enemies do not settle into endless turn fights.
+    let turnRate=1.5;
     if(e.state==='inbound'){
-      // Approach from distance, try to get above and behind player
-      const behindDir=player.velocity.clone().normalize();
-      _eTarget.copy(playerJet.position).sub(behindDir.multiplyScalar(200));
-      _eTarget.y=Math.max(_eTarget.y+150,e.preferredAlt);
-      e.currentSpeed=e.baseSpeed*1.1;turnRate=2;
-      if(dist<900+e.aggression*300&&facingPlayer>.3){
-        e.state='attack';e.stateTimer=0;e.burstCount=0;
-        const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
-        e.attackOffset.copy(right).multiplyScalar((Math.random()-.5)*150*(1-e.aggression));
-      }
+      const playerFwd=player.velocity.clone().normalize();
+      _eTarget.copy(playerJet.position).addScaledVector(playerFwd,350);
+      _eTarget.y=Math.max(playerJet.position.y+130,e.preferredAlt);
+      const catchupWeight=THREE.MathUtils.smoothstep(playerFwd.dot(toPN),-.2,.8);
+      e.currentSpeed=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1.25+e.skill*.5;
+      if(dist<1050+e.aggression*200&&facingPlayer>.15)beginEnemyAttack(e);
     }else if(e.state==='attack'){
-      // Attack run - fly toward player with lead and offset
-      const leadTime=Math.min(dist/(e.currentSpeed+200)*e.skill,1.5);
+      // Offset passes avoid head-on collisions and leave a target the player can track through the merge.
+      const leadTime=Math.min(dist/(e.currentSpeed+220)*e.skill,1.35);
       _eTarget.copy(playerJet.position).add(player.velocity.clone().multiplyScalar(leadTime)).add(e.attackOffset);
-      e.currentSpeed=e.baseSpeed*(1.2+e.aggression*.2);turnRate=2.5+e.skill;
-      // Cannon burst fire
+      e.currentSpeed=e.baseSpeed*(1.15+e.aggression*.12);turnRate=1.25+e.skill*.9;
       if(dist<500&&facingPlayer>.85&&e.fireCooldown<=0){
         e.fireCooldown=.12+.08*(1-e.skill);e.burstCount++;
         const bs=350+e.skill*100,leadT=dist/bs*.5*e.skill;
@@ -831,49 +1013,36 @@ function updateEnemies(dt){
         const inaccuracy=.08*(1-e.skill);
         shootDir.x+=(Math.random()-.5)*inaccuracy;shootDir.y+=(Math.random()-.5)*inaccuracy;shootDir.z+=(Math.random()-.5)*inaccuracy;
         shootDir.normalize();
-        spawnBullet(e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(-12)),shootDir,bs,true);
+        spawnBullet(e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(12)),shootDir,bs,true);
         if(e.burstCount>3+Math.floor(Math.random()*4)){e.fireCooldown=1.5+Math.random()*2*(1-e.aggression);e.burstCount=0}
       }
-      // Missile launch (aggressive enemies only)
       if(e.aggression>.6&&dist<800&&dist>200&&facingPlayer>.9&&e.missileCooldown<=0){
-        e.missileCooldown=10+Math.random()*15;
-        const mp=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(-10));
-        spawnMissile(mp,_eFwd.clone(),{mesh:playerJet,alive:!gameOver},true);
+        const mp=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(12));
+        if(spawnMissile(mp,_eFwd.clone(),{mesh:playerJet,alive:!gameOver},true))
+          e.missileCooldown=10+Math.random()*15;
       }
-      // Forced break when too close or attack run expires
-      if(dist<150||e.stateTimer>2.5+Math.random()*2){
-        e.state='break';e.stateTimer=0;
-        const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
-        const side=Math.random()>.5?1:-1;
-        e.breakDir.set(0,.5+Math.random()*.5,0).add(right.multiplyScalar(side*.6)).add(_eFwd.clone().multiplyScalar(.3)).normalize();
-      }
-    }else if(e.state==='break'){
-      // Hard break maneuver - pull away from player
-      _eTarget.copy(e.mesh.position).add(e.breakDir.clone().multiplyScalar(400));
-      e.currentSpeed=e.baseSpeed*(.85+e.aggression*.15);turnRate=3.5+e.skill;
-      if(e.stateTimer>1.5+Math.random()){e.state='reposition';e.stateTimer=0}
+      if(dist<220||e.stateTimer>e.stateDuration||(facingPlayer<-.2&&dist<450))beginEnemyExtend(e);
+    }else if(e.state==='extend'){
+      // Fly mostly straight after the merge, opening distance and a clean pursuit window.
+      _eTarget.copy(e.mesh.position).addScaledVector(e.extendDir,1000);
+      e.currentSpeed=e.baseSpeed*(1.3+e.aggression*.1);turnRate=.45+e.skill*.25;
+      if((e.stateTimer>e.stateDuration&&dist>550)||e.stateTimer>e.stateDuration+2)beginEnemyReposition(e);
     }else if(e.state==='reposition'){
-      // Climb and circle to set up next attack run from behind
+      // Present ahead and off one wing instead of orbiting tightly behind the player.
       const playerFwd=player.velocity.clone().normalize();
-      const behindAngle=Math.atan2(playerFwd.x,playerFwd.z)+Math.PI+e.angle*.3;
-      const repositionDist=500+300*(1-e.aggression);
-      _eTarget.set(
-        playerJet.position.x+Math.sin(behindAngle)*repositionDist,
-        Math.max(playerJet.position.y+100+e.preferredAlt*.5,e.preferredAlt),
-        playerJet.position.z+Math.cos(behindAngle)*repositionDist);
-      e.currentSpeed=e.baseSpeed;turnRate=2;e.angle+=dt*.8;
-      // Re-engage when in good position (behind player) or after timeout
-      const behindDot=playerFwd.dot(toPN);
-      if(e.stateTimer>3+Math.random()*4||(behindDot<-.2&&dist<1000&&dist>250)){
-        e.state='attack';e.stateTimer=0;e.burstCount=0;
-        const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
-        e.attackOffset.copy(right).multiplyScalar((Math.random()-.5)*150*(1-e.aggression));
-      }
+      const playerRight=new THREE.Vector3().crossVectors(playerFwd,_axisY);
+      if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
+      _eTarget.copy(playerJet.position).addScaledVector(playerFwd,e.repositionForward)
+        .addScaledVector(playerRight,e.passSide*e.repositionLateral);
+      _eTarget.y=Math.max(playerJet.position.y+e.repositionHeight,e.preferredAlt);
+      const playerBearing=playerFwd.dot(toPN);
+      e.currentSpeed=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=1+e.skill*.6;
+      const enemyAhead=playerBearing<-.15;
+      if(e.stateTimer>2&&enemyAhead&&dist>450&&dist<1300)beginEnemyAttack(e);
     }else if(e.state==='evade'){
-      // Dramatic evasion maneuver
-      _eTarget.copy(e.mesh.position).add(e.evadeDir.clone().multiplyScalar(500));
-      e.currentSpeed=e.baseSpeed*1.3;turnRate=4+e.skill;
-      if(e.stateTimer>1+Math.random()*1.5){e.state='reposition';e.stateTimer=0}
+      _eTarget.copy(e.mesh.position).addScaledVector(e.evadeDir,600);
+      e.currentSpeed=e.baseSpeed*1.3;turnRate=2.4+e.skill*.8;
+      if(e.stateTimer>e.stateDuration)beginEnemyExtend(e);
     }
 
     // Smooth turning toward target
@@ -893,68 +1062,77 @@ function updateEnemies(dt){
     // Exhaust trail
     if(Math.random()<.3){const ep=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(16));
       spawnP(ep,_eFwd.clone().multiplyScalar(-15),.2+Math.random()*.3,0xff6600,.3+Math.random()*.6)}
-    if(dist>2500){e.state='inbound';e.stateTimer=0}}
+    if(dist>2800&&e.state!=='inbound')transitionEnemy(e,'inbound')}
 }
 
-function killEnemy(e,sv){e.alive=false;spawnExplosion(e.mesh.position.clone(),sv>100?55:40);
+function killEnemy(e,sv){e.alive=false;spawnExplosion(e.mesh.position,sv>100?55:40);
   snd.explosion(e.mesh.position.distanceTo(playerJet.position));snd.hitMarker();
-  scene.remove(e.mesh);disposeGroup(e.mesh);const idx=enemies.indexOf(e);if(idx>=0)enemies.splice(idx,1);
-  score+=sv;kills++;player.missileAmmo=Math.min(player.missileAmmo+2,12);
+  scene.remove(e.mesh);const idx=enemies.indexOf(e);if(idx>=0)enemies.splice(idx,1);
+  score+=sv;kills++;player.missileAmmo=Math.min(player.missileAmmo+2,MAX_MISSILE_AMMO);
   addKillNotification(sv);fovPulse=.3;
   waveKilled++;
   if(waveKilled>=waveTotal&&enemies.length===0){
     waveState='cleared';waveTimer=4;waveDisplayText=`WAVE ${waveNumber} CLEARED`;waveDisplayTimer=3;
-    player.hp=Math.min(player.hp+25,100);player.missileAmmo=12}}
+    player.hp=Math.min(player.hp+25,MAX_PLAYER_HP);player.missileAmmo=MAX_MISSILE_AMMO}}
 
 function updateBullets(dt){for(const b of bulletPool){if(!b.userData.active)continue;b.userData.life-=dt;
   if(b.userData.life<=0){b.userData.active=false;b.visible=false;continue}
   _tmpV1.copy(b.userData.vel).multiplyScalar(dt);b.position.add(_tmpV1);
   _tmpV1.copy(b.position).add(b.userData.vel);b.lookAt(_tmpV1);
   if(b.userData.isEnemy){if(b.position.distanceTo(playerJet.position)<10){player.hp-=5;b.userData.active=false;b.visible=false;
-    for(let k=0;k<3;k++)spawnP(b.position.clone(),new THREE.Vector3((Math.random()-.5)*60,(Math.random()-.5)*60,(Math.random()-.5)*60),.08,0xffaa44,1);
+    for(let k=0;k<3;k++)spawnP(b.position,new THREE.Vector3((Math.random()-.5)*60,(Math.random()-.5)*60,(Math.random()-.5)*60),.08,0xffaa44,1);
     screenShake=.5;hitFlash=.15}}
   else{for(const e of enemies){if(!e.alive)continue;if(b.position.distanceTo(e.mesh.position)<14){
-    e.hp-=10;e.wasHit=true;b.userData.active=false;b.visible=false;spawnExplosion(b.position.clone(),5);snd.hitMarker();
+    e.hp-=10;e.wasHit=true;b.userData.active=false;b.visible=false;spawnExplosion(b.position,5);snd.hitMarker();
     if(e.hp<=0)killEnemy(e,100);break}}}
   if(b.position.y<getTerrainHeight(b.position.x,b.position.z)){b.userData.active=false;b.visible=false}}}
 
-function updateMissiles(dt){for(const m of missilePool){if(!m.userData.active)continue;m.userData.life-=dt;
+function updateMissiles(dt){
+  let activeMissiles=0;for(const m of missilePool)if(m.userData.active)activeMissiles++;
+  for(const m of missilePool){if(!m.userData.active)continue;m.userData.life-=dt;
   if(m.userData.life<=0){m.userData.active=false;m.visible=false;continue}
-  const tgt=m.userData.target;
-  if(tgt&&tgt.alive&&m.userData.tracking){
+  const u=m.userData;u.age+=dt;
+  const motor=Math.min(u.age/.45,1),desiredSpeed=THREE.MathUtils.lerp(u.launchSpeed,u.maxSpeed,motor);
+  if(u.vel.lengthSq()>0)u.vel.setLength(desiredSpeed);
+  if(u.age<.5){_missileSteer.copy(u.launchDir).multiplyScalar(desiredSpeed);
+    u.vel.lerp(_missileSteer,Math.min(dt*6,1));
+    if(u.vel.lengthSq()<1e-8)u.vel.copy(_missileSteer);else u.vel.setLength(desiredSpeed)}
+  const tgt=u.target;
+  if(tgt&&tgt.alive&&u.tracking){
     const toT=new THREE.Vector3().subVectors(tgt.mesh.position,m.position).normalize();
-    const velDir=m.userData.vel.clone().normalize();
-    const offAngle=Math.acos(Math.min(1,velDir.dot(toT)));
+    const velDir=u.vel.clone().normalize();
+    const offAngle=Math.acos(THREE.MathUtils.clamp(velDir.dot(toT),-1,1));
     // Drain tracking energy based on turn angle - sharp turns drain faster
-    m.userData.trackEnergy-=offAngle*dt*1.2;
-    if(m.userData.trackEnergy<=0||offAngle>1.2){m.userData.tracking=false}// lost lock - flies straight
-    else{const spd=m.userData.vel.length();const turnRate=Math.min(dt*3,1);m.userData.vel.lerp(toT.multiplyScalar(spd),turnRate);m.userData.vel.normalize().multiplyScalar(spd)}
+    u.trackEnergy-=offAngle*dt*1.2;
+    if(u.trackEnergy<=0||offAngle>1.2){u.tracking=false}// lost lock - flies straight
+    else{const spd=u.vel.length(),turnRate=Math.min(dt*(2.2+motor*1.8),1);
+      u.vel.lerp(toT.multiplyScalar(spd),turnRate).normalize().multiplyScalar(spd)}
   }
-  _tmpV1.copy(m.position).add(m.userData.vel);m.lookAt(_tmpV1);
-  _tmpV1.copy(m.userData.vel).multiplyScalar(dt);m.position.add(_tmpV1);
-  if(Math.random()<.85){const v=new THREE.Vector3((Math.random()-.5)*8,(Math.random()-.5)*8,(Math.random()-.5)*8);spawnP(m.position.clone(),v,.5+Math.random()*.5,0x888888,.6+Math.random(),'smoke')}
-  if(Math.random()<.5)spawnP(m.position.clone(),new THREE.Vector3((Math.random()-.5)*5,(Math.random()-.5)*5,(Math.random()-.5)*5),.15,0xff8844,.5);
+  _tmpV1.copy(m.position).add(u.vel);m.lookAt(_tmpV1);
+  _tmpV1.copy(u.vel).multiplyScalar(dt);m.position.add(_tmpV1);emitMissileTrail(m,activeMissiles);
+  const flicker=.8+Math.random()*.4;u.flame.scale.set(flicker,flicker,.75+motor*.75);
+  u.glow.scale.set(5+motor*3*flicker,5+motor*3*flicker,1);
   if(!m.userData.isEnemy){for(const e of enemies){if(!e.alive)continue;if(m.position.distanceTo(e.mesh.position)<22){
     e.hp-=50;e.wasHit=true;m.userData.active=false;m.visible=false;
-    if(e.hp<=0)killEnemy(e,200);else spawnExplosion(m.position.clone(),30);break}}}
+    if(e.hp<=0)killEnemy(e,200);else spawnExplosion(m.position,30);break}}}
   if(m.userData.active&&m.userData.isEnemy&&m.position.distanceTo(playerJet.position)<15){
-    player.hp-=30;m.userData.active=false;m.visible=false;spawnExplosion(m.position.clone(),25);screenShake=1.5;hitFlash=.2}
-  if(m.userData.active&&m.position.y<getTerrainHeight(m.position.x,m.position.z)){m.userData.active=false;m.visible=false;spawnExplosion(m.position.clone(),18)}}}
+    player.hp-=30;m.userData.active=false;m.visible=false;spawnExplosion(m.position,25);screenShake=1.5;hitFlash=.2}
+  if(m.userData.active&&m.position.y<getTerrainHeight(m.position.x,m.position.z)){m.userData.active=false;m.visible=false;spawnExplosion(m.position,18)}}}
 
-function updateParticles(dt){for(const p of particlePool){if(!p.userData.active)continue;p.userData.life-=dt;
-  if(p.userData.life<=0){p.userData.active=false;p.visible=false;continue}
-  p.position.add(p.userData.vel.clone().multiplyScalar(dt));p.userData.vel.multiplyScalar(p.userData.type==='smoke'?.98:.94);
-  if(p.userData.type==='smoke')p.userData.vel.y+=15*dt;const r=p.userData.life/p.userData.maxLife;
-  p.material.opacity=(p.userData.type==='smoke'?.3:1)*r;
-  p.scale.setScalar(p.userData.type==='smoke'?p.userData.size*(1+(1-r)*2):p.userData.size*(.3+r*.7))}}
+function updateParticles(dt){for(let i=activeParticles.length-1;i>=0;i--){const p=activeParticles[i];p.life-=dt;
+  if(p.life<=0){releaseParticle(i);continue}
+  p.position.addScaledVector(p.velocity,dt);p.velocity.multiplyScalar(p.type==='smoke'?.98:.94);
+  if(p.type==='smoke')p.velocity.y+=15*dt;const r=p.life/p.maxLife;
+  p.opacity=(p.type==='smoke'?.3:1)*r;
+  p.scale=p.type==='smoke'?p.size*(1+(1-r)*2):p.size*(.3+r*.7)}}
 
 function updateDebris(dt){for(const d of debrisPool){if(!d.userData.active)continue;d.userData.life-=dt;
   if(d.userData.life<=0){d.userData.active=false;d.visible=false;continue}
-  d.userData.vel.y-=180*dt;d.position.add(d.userData.vel.clone().multiplyScalar(dt));
+  d.userData.vel.y-=180*dt;d.position.addScaledVector(d.userData.vel,dt);
   d.rotation.x+=d.userData.rotVel.x*dt;d.rotation.y+=d.userData.rotVel.y*dt;d.rotation.z+=d.userData.rotVel.z*dt;
   const h=getTerrainHeight(d.position.x,d.position.z);
   if(d.position.y<h){d.position.y=h;d.userData.vel.y*=-.3;d.userData.vel.x*=.7;d.userData.vel.z*=.7;
-    for(let j=0;j<2;j++)spawnP(d.position.clone(),new THREE.Vector3((Math.random()-.5)*20,Math.random()*10,(Math.random()-.5)*20),.5+Math.random()*.5,0x222211,1.5+Math.random()*2,'smoke')}}}
+    for(let j=0;j<2;j++)spawnP(d.position,new THREE.Vector3((Math.random()-.5)*20,Math.random()*10,(Math.random()-.5)*20),.5+Math.random()*.5,0x222211,1.5+Math.random()*2,'smoke')}}}
 
 function updateSpeedLines(dt){for(const sl of speedLines){if(!sl.userData.active)continue;sl.userData.life-=dt;if(sl.userData.life<=0){sl.userData.active=false;sl.visible=false}}}
 
@@ -1008,7 +1186,7 @@ function drawHUD(){
       hud.font='10px Courier New';hud.fillStyle=hud.strokeStyle;const dd=Math.round(nearest.mesh.position.distanceTo(playerJet.position));
       hud.fillText(`TGT ${dd}m`,sx+s+5,sy-5);hud.fillText(`HP ${nearest.hp}`,sx+s+5,sy+8);hud.shadowBlur=0}}
 
-  if(lockTarget&&lockTarget.alive&&lockActive){const sp=lockTarget.mesh.position.clone().project(camera);
+  if(lockTarget&&lockTarget.alive){const sp=lockTarget.mesh.position.clone().project(camera);
     if(sp.z<1){const sx=(sp.x*.5+.5)*w,sy=(-sp.y*.5+.5)*h;const sz=45*(1-lockProgress*.6);
       hud.strokeStyle=lockProgress>=1?'#ff0000':'#ffcc00';hud.lineWidth=2;hud.shadowColor=hud.strokeStyle;hud.shadowBlur=12;
       hud.beginPath();hud.moveTo(sx,sy-sz);hud.lineTo(sx+sz,sy);hud.lineTo(sx,sy+sz);hud.lineTo(sx-sz,sy);hud.closePath();hud.stroke();
@@ -1044,7 +1222,7 @@ function drawHUD(){
   const remaining=waveTotal-waveKilled;
   hud.fillStyle=remaining>0?'#f80':'#0f0';hud.fillText(`REMAIN  ${String(remaining).padStart(6)}`,rpX,rpY+82);
   hud.fillStyle='rgba(255,255,255,.06)';hud.fillRect(rpX,rpY+96,170,12);
-  const hpR=Math.max(player.hp/100,0);hud.fillStyle=hpR>.5?'#00dd44':hpR>.25?'#ffaa00':'#ff2200';
+  const hpR=Math.max(player.hp/MAX_PLAYER_HP,0);hud.fillStyle=hpR>.5?'#00dd44':hpR>.25?'#ffaa00':'#ff2200';
   hud.fillRect(rpX,rpY+96,170*hpR,12);hud.strokeStyle='rgba(0,255,200,.15)';hud.strokeRect(rpX,rpY+96,170,12);
   hud.fillStyle='#fff';hud.font='9px Courier New';hud.fillText(`HULL ${Math.round(hpR*100)}%`,rpX+55,rpY+106);
 
@@ -1133,29 +1311,28 @@ function drawHUD(){
 
 /* ═══════════════════ GAME STATE ═══════════════════ */
 function checkGameOver(){if(player.hp<=0&&!gameOver){gameOver=true;snd.silence();deathCamTimer=3;deathCamCenter.copy(playerJet.position);deathCamAngle=0;
-  spawnExplosion(playerJet.position.clone(),60);snd.explosion(0);playerJet.visible=false}}
+  spawnExplosion(playerJet.position,60);snd.explosion(0);playerJet.visible=false}}
 
-function resetGame(){player.hp=100;player.speed=120;player.throttle=.3;player.velocity.set(0,0,-120);
-  player.rollRate=player.pitchRate=player.yawRate=0;player.fireCooldown=player.missileCooldown=0;player.missileAmmo=12;
+function resetPool(pool){for(const item of pool){item.userData.active=false;item.visible=false}}
+function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.set(0,0,-120);
+  player.rollRate=player.pitchRate=player.yawRate=0;player.fireCooldown=player.missileCooldown=0;
+  player.missileAmmo=MAX_MISSILE_AMMO;player.missileSide=1;
   playerJet.position.set(0,350,0);playerJet.quaternion.identity();playerJet.visible=true;
   score=0;kills=0;gameTime=0;gameOver=false;paused=false;camInit=false;screenShake=0;hitFlash=0;gForce=1;fovPulse=0;
-  lockTarget=null;lockProgress=0;lockActive=false;incomingThreat=false;
+  lockTarget=null;lockProgress=0;incomingThreat=false;
   waveNumber=1;waveTotal=0;waveSpawned=0;waveKilled=0;waveState='intermission';waveTimer=3;waveSpawnDelay=0;
   waveDisplayText='WAVE 1';waveDisplayTimer=3;
   deathCamTimer=0;killNotifications.length=0;contrailPos.length=0;
   camera.fov=68;camera.updateProjectionMatrix();
   for(const e of enemies)scene.remove(e.mesh);enemies.length=0;
-  for(const b of bulletPool){b.userData.active=false;b.visible=false}
-  for(const m of missilePool){m.userData.active=false;m.visible=false}
-  for(const p of particlePool){p.userData.active=false;p.visible=false}
-  for(const sl of speedLines){sl.userData.active=false;sl.visible=false}
-  for(const d of debrisPool){d.userData.active=false;d.visible=false}
+  resetPool(bulletPool);resetPool(missilePool);resetParticlePool();resetPool(speedLines);resetPool(debrisPool);
   document.getElementById('game-over').style.display='none';
   document.getElementById('pause').style.display='none';
   clock=new THREE.Clock()}
 
-document.getElementById('blocker').addEventListener('click',()=>{document.getElementById('blocker').style.display='none';gameStarted=true;snd.init();resetGame()});
-document.getElementById('game-over').addEventListener('click',()=>{snd.init();resetGame()});
+function startGame(){try{snd.init()}finally{resetGame()}}
+document.getElementById('blocker').addEventListener('click',()=>{document.getElementById('blocker').style.display='none';gameStarted=true;startGame()});
+document.getElementById('game-over').addEventListener('click',startGame);
 document.getElementById('pause').addEventListener('click',()=>{togglePause()});
 
 /* ═══════════════════ INIT ═══════════════════ */
@@ -1177,10 +1354,12 @@ function animate(){requestAnimationFrame(animate);
     sunLight.position.copy(sunDirection.clone().multiplyScalar(1000).add(playerJet.position));
     sunLight.target.position.copy(playerJet.position);
     waterMat.uniforms.uTime.value=elapsed;waterMat.uniforms.uCamPos.value.copy(camera.position);
+    syncParticleBatches();
   } else if(gameOver&&deathCamTimer>0){
     deathCamTimer-=dt;deathCamAngle+=dt*1.5;const oD=60+((3-deathCamTimer)/3)*40;
     camera.position.set(deathCamCenter.x+Math.cos(deathCamAngle)*oD,deathCamCenter.y+20+((3-deathCamTimer)/3)*15,deathCamCenter.z+Math.sin(deathCamAngle)*oD);
     camera.lookAt(deathCamCenter);updateParticles(dt);updateDebris(dt);
+    syncCloudInstances();syncParticleBatches();
     if(deathCamTimer<=0){document.getElementById('final-score').textContent=score;document.getElementById('game-over').style.display='flex'}
   }
   if(hitFlash>0){hitFlash-=1.2*dt;if(hitFlash<0)hitFlash=0}

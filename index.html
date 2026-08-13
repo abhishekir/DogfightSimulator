@@ -403,14 +403,15 @@ const cloudGeometry = new THREE.PlaneGeometry(1, 1);
 const cloudOpacity = new THREE.InstancedBufferAttribute(new Float32Array(MAX_CLOUD_INSTANCES), 1);
 cloudOpacity.setUsage(THREE.DynamicDrawUsage);
 cloudGeometry.setAttribute('iOpacity', cloudOpacity);
+const cloudVertexShader=`attribute float iOpacity;varying vec2 vUv;varying float vOpacity,vFogDepth;
+  void main(){vUv=uv;vOpacity=iOpacity;
+  vec4 mvPosition=modelViewMatrix*instanceMatrix*vec4(0.,0.,0.,1.);
+  vec2 instanceScale=vec2(length(instanceMatrix[0].xyz),length(instanceMatrix[1].xyz));
+  mvPosition.xy+=position.xy*instanceScale;vFogDepth=-mvPosition.z;
+  gl_Position=projectionMatrix*mvPosition;}`;
 const cloudMaterial = new THREE.ShaderMaterial({
   uniforms: { uMap:{value:cloudTex}, uFogColor:{value:new THREE.Color(fogColor)}, uFogDensity:{value:FOG_DENSITY} },
-  vertexShader:`attribute float iOpacity;varying vec2 vUv;varying float vOpacity,vFogDepth;
-    void main(){vUv=uv;vOpacity=iOpacity;
-    vec4 mvPosition=modelViewMatrix*instanceMatrix*vec4(0.,0.,0.,1.);
-    vec2 instanceScale=vec2(length(instanceMatrix[0].xyz),length(instanceMatrix[1].xyz));
-    mvPosition.xy+=position.xy*instanceScale;vFogDepth=-mvPosition.z;
-    gl_Position=projectionMatrix*mvPosition;}`,
+  vertexShader:cloudVertexShader,
   fragmentShader:`uniform sampler2D uMap;uniform vec3 uFogColor;uniform float uFogDensity;
     varying vec2 vUv;varying float vOpacity,vFogDepth;
     void main(){vec4 cloud=texture2D(uMap,vUv);cloud.a*=vOpacity;if(cloud.a<.002)discard;
@@ -419,9 +420,21 @@ const cloudMaterial = new THREE.ShaderMaterial({
     #include <colorspace_fragment>
     float ff=1.-exp(-uFogDensity*uFogDensity*vFogDepth*vFogDepth);
     gl_FragColor.rgb=mix(gl_FragColor.rgb,uFogColor,clamp(ff,0.,1.));}`,
-  transparent:true, depthWrite:false
+  transparent:true,depthWrite:false
 });
-const cloudMesh = createDynamicInstancedMesh(cloudGeometry,cloudMaterial,MAX_CLOUD_INSTANCES,1);
+const cloudDepthMaterial = new THREE.ShaderMaterial({
+  uniforms:{uMap:{value:cloudTex}},vertexShader:cloudVertexShader,
+  fragmentShader:`uniform sampler2D uMap;varying vec2 vUv;varying float vOpacity;
+    float hash(vec2 p){return fract(52.9829189*fract(dot(p,vec2(.06711056,.00583715))));}
+    void main(){float alpha=texture2D(uMap,vUv).a*vOpacity;
+    float coverage=smoothstep(.02,.35,alpha);if(alpha<.02||hash(gl_FragCoord.xy)>coverage)discard;
+    gl_FragColor=vec4(0.);}`,
+  colorWrite:false,depthWrite:true
+});
+cloudGeometry.clearGroups();
+cloudGeometry.addGroup(0,cloudGeometry.index.count,0);
+cloudGeometry.addGroup(0,cloudGeometry.index.count,1);
+const cloudMesh = createDynamicInstancedMesh(cloudGeometry,[cloudDepthMaterial,cloudMaterial],MAX_CLOUD_INSTANCES,1);
 const cloudMatrix = new THREE.Matrix4();
 function createCloudCluster() {
   const cluster = { position:new THREE.Vector3() };
@@ -605,7 +618,7 @@ const pBMat=new THREE.MeshBasicMaterial({color:0xffee44}),eBulletMat=new THREE.M
 for(let i=0;i<MAX_BULLETS;i++){const m=new THREE.Mesh(tracerGeo,pBMat);m.visible=false;m.userData={active:false,vel:new THREE.Vector3(),life:0,isEnemy:false};scene.add(m);bulletPool.push(m)}
 function spawnBullet(pos,dir,speed,isEnemy=false){for(const b of bulletPool)if(!b.userData.active){b.position.copy(pos);b.userData.vel.copy(dir).multiplyScalar(speed);b.userData.life=2.5;b.userData.active=true;b.userData.isEnemy=isEnemy;b.material=isEnemy?eBulletMat:pBMat;b.scale.set(isEnemy?1.5:1,isEnemy?1.5:1,isEnemy?1.5:1);b.visible=true;return b}}
 
-const MAX_MISSILES=20,missilePool=[];
+const MAX_MISSILES=20,missilePool=[],missileEjectVelocity=new THREE.Vector3();
 const missileBodyGeo=new THREE.CylinderGeometry(.22,.28,3,10);missileBodyGeo.rotateX(Math.PI/2);
 const missileNoseGeo=new THREE.ConeGeometry(.28,.9,10);missileNoseGeo.rotateX(Math.PI/2);
 const missileFinGeo=new THREE.BoxGeometry(.9,.06,.8);
@@ -627,12 +640,13 @@ function createMissileVisual(){
   return g;
 }
 for(let i=0;i<MAX_MISSILES;i++){const m=createMissileVisual();scene.add(m);missilePool.push(m)}
-function spawnMissile(pos,dir,target,isEnemy=false,launchSide=0){for(const m of missilePool)if(!m.userData.active){
-  const u=m.userData;m.position.copy(pos);u.launchDir.copy(dir).normalize();u.vel.copy(u.launchDir).multiplyScalar(isEnemy?160:115);
-  if(!isEnemy&&launchSide){const right=new THREE.Vector3(1,0,0).applyQuaternion(playerJet.quaternion);
-    u.vel.addScaledVector(right,launchSide*32);u.vel.y-=24}
+function spawnMissile(pos,dir,carrierVelocity,target,isEnemy=false,launchSide=0){for(const m of missilePool)if(!m.userData.active){
+  const u=m.userData;m.position.copy(pos);u.launchDir.copy(dir).normalize();
+  u.vel.copy(carrierVelocity).addScaledVector(u.launchDir,isEnemy?160:115);
+  if(!isEnemy&&launchSide){missileEjectVelocity.set(launchSide*32,-24,0).applyQuaternion(playerJet.quaternion);
+    u.vel.add(missileEjectVelocity)}
   u.life=7;u.active=true;u.target=target;u.isEnemy=isEnemy;u.tracking=true;u.trackEnergy=1.15;
-  u.age=0;u.launchSpeed=u.vel.length();u.maxSpeed=isEnemy?320:410;u.trailDistance=0;u.prevPos.copy(pos);
+  u.age=0;u.launchSpeed=u.vel.length();u.maxSpeed=carrierVelocity.length()+(isEnemy?320:410);u.trailDistance=0;u.prevPos.copy(pos);
   m.lookAt(pos.clone().add(dir));m.visible=true;emitMissileLaunch(pos,dir,isEnemy);return m}}
 
 const MAX_PARTICLES=600,MAX_TRAIL_PARTICLES=360,PARTICLE_EFFECT_RESERVE=160,freeParticles=[],activeParticles=[];
@@ -765,6 +779,15 @@ function emitMissileLaunch(pos,dir,isEnemy){
   if(!isEnemy){screenShake=Math.max(screenShake,.3);fovPulse=Math.max(fovPulse,.12)}
 }
 const _missileTrailPos=new THREE.Vector3(),_missileTrailVel=new THREE.Vector3(),_missileTrailBack=new THREE.Vector3(),_missileSteer=new THREE.Vector3();
+const _missileStepStart=new THREE.Vector3(),_missileSegment=new THREE.Vector3(),_missileFromTarget=new THREE.Vector3();
+function segmentSphereHitTime(start,end,center,radius){
+  _missileSegment.subVectors(end,start);_missileFromTarget.subVectors(start,center);
+  const a=_missileSegment.lengthSq(),c=_missileFromTarget.lengthSq()-radius*radius;
+  if(c<=0)return 0;if(a<1e-8)return -1;
+  const b=_missileFromTarget.dot(_missileSegment),discriminant=b*b-a*c;
+  if(discriminant<0)return -1;
+  const t=(-b-Math.sqrt(discriminant))/a;return t>=0&&t<=1?t:-1;
+}
 function emitMissileTrail(m,activeMissiles){
   const u=m.userData,travel=u.prevPos.distanceTo(m.position);if(travel<.1)return;
   const spacing=8+Math.max(0,activeMissiles-2)*2.5;
@@ -884,7 +907,7 @@ function updatePlayer(dt){
     if(lockProgress>=1&&player.missileCooldown<=0){
       const launchSide=player.missileSide;
       const mp=new THREE.Vector3(launchSide*5,-1.7,-1).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-      const launched=spawnMissile(mp,fwd.clone(),lockTarget,false,launchSide);
+      const launched=spawnMissile(mp,fwd.clone(),player.velocity,lockTarget,false,launchSide);
       if(launched){lockProgress=0;player.missileCooldown=.5;player.missileSide*=-1;player.missileAmmo--;snd.missileLaunch()}
       else lockProgress=LOCK_WAIT_PROGRESS}
   }else{lockTarget=null;lockProgress=0}
@@ -1007,7 +1030,7 @@ function updateEnemies(dt){
       const playerRight=new THREE.Vector3().crossVectors(playerFwd,_axisY);
       if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
       _eTarget.copy(playerJet.position).addScaledVector(playerFwd,500).addScaledVector(playerRight,e.passSide*220);
-      _eTarget.y=Math.max(playerJet.position.y+100,getTerrainHeight(_eTarget.x,_eTarget.z)+120);
+      _eTarget.y=Math.max(_eTarget.y+100,getTerrainHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
       const catchupWeight=THREE.MathUtils.smoothstep(playerFwd.dot(toPN),-.2,.8);
       e.currentSpeed=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1+e.skill*.35;
@@ -1032,7 +1055,8 @@ function updateEnemies(dt){
       }
       if(e.aggression>.6&&dist<800&&dist>200&&facingPlayer>.9&&e.missileCooldown<=0){
         const mp=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(12));
-        if(spawnMissile(mp,_eFwd.clone(),{mesh:playerJet,alive:!gameOver},true))
+        const carrierVelocity=_eFwd.clone().multiplyScalar(e.currentSpeed);
+        if(spawnMissile(mp,_eFwd.clone(),carrierVelocity,{mesh:playerJet,alive:!gameOver},true))
           e.missileCooldown=10+Math.random()*15;
       }
       const reachedAttackPoint=e.mesh.position.distanceTo(e.attackPoint)<140;
@@ -1049,7 +1073,7 @@ function updateEnemies(dt){
       if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
       _eTarget.copy(playerJet.position).addScaledVector(playerFwd,e.repositionForward)
         .addScaledVector(playerRight,e.passSide*e.repositionLateral);
-      _eTarget.y=Math.max(playerJet.position.y+e.repositionHeight,getTerrainHeight(_eTarget.x,_eTarget.z)+120);
+      _eTarget.y=Math.max(_eTarget.y+e.repositionHeight,getTerrainHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
       e.currentSpeed=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=.75+e.skill*.35;
       const enemyAhead=playerBearing<-.65;
@@ -1124,15 +1148,22 @@ function updateMissiles(dt){
       u.vel.lerp(toT.multiplyScalar(spd),turnRate).normalize().multiplyScalar(spd)}
   }
   _tmpV1.copy(m.position).add(u.vel);m.lookAt(_tmpV1);
-  _tmpV1.copy(u.vel).multiplyScalar(dt);m.position.add(_tmpV1);emitMissileTrail(m,activeMissiles);
+  _missileStepStart.copy(m.position);_tmpV1.copy(u.vel).multiplyScalar(dt);m.position.add(_tmpV1);
   const flicker=.8+Math.random()*.4;u.flame.scale.set(flicker,flicker,.75+motor*.75);
   u.glow.scale.set(5+motor*3*flicker,5+motor*3*flicker,1);
-  if(!m.userData.isEnemy){for(const e of enemies){if(!e.alive)continue;if(m.position.distanceTo(e.mesh.position)<22){
-    e.hp-=50;e.wasHit=true;m.userData.active=false;m.visible=false;
-    if(e.hp<=0)killEnemy(e,200);else spawnExplosion(m.position,30);break}}}
-  if(m.userData.active&&m.userData.isEnemy&&m.position.distanceTo(playerJet.position)<15){
+  if(!u.isEnemy){let hitEnemy=null,firstHitTime=Infinity;
+    for(const e of enemies){if(!e.alive)continue;const hitTime=segmentSphereHitTime(_missileStepStart,m.position,e.mesh.position,22);
+      if(hitTime>=0&&hitTime<firstHitTime){hitEnemy=e;firstHitTime=hitTime}}
+    if(hitEnemy){m.position.copy(_missileStepStart).addScaledVector(_missileSegment,firstHitTime);
+      hitEnemy.hp-=50;hitEnemy.wasHit=true;u.active=false;m.visible=false;
+      if(hitEnemy.hp<=0)killEnemy(hitEnemy,200);else spawnExplosion(m.position,30)}
+  }
+  if(u.active&&u.isEnemy){const hitTime=segmentSphereHitTime(_missileStepStart,m.position,playerJet.position,15);if(hitTime>=0){
+    m.position.copy(_missileStepStart).addScaledVector(_missileSegment,hitTime);
     player.hp-=30;m.userData.active=false;m.visible=false;spawnExplosion(m.position,25);screenShake=1.5;hitFlash=.2}
-  if(m.userData.active&&m.position.y<getTerrainHeight(m.position.x,m.position.z)){m.userData.active=false;m.visible=false;spawnExplosion(m.position,18)}}}
+  }
+  emitMissileTrail(m,activeMissiles);
+  if(u.active&&m.position.y<getTerrainHeight(m.position.x,m.position.z)){u.active=false;m.visible=false;spawnExplosion(m.position,18)}}}
 
 function updateParticles(dt){for(let i=activeParticles.length-1;i>=0;i--){const p=activeParticles[i];p.life-=dt;
   if(p.life<=0){releaseParticle(i);continue}

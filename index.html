@@ -452,13 +452,14 @@ function initClouds() {
   syncCloudInstances();
 }
 function updateClouds(px, pz) {
+  let moved=false;
   for (const c of cloudClusters) { const dx=c.position.x-px, dz=c.position.z-pz;
     if (dx*dx+dz*dz > CLOUD_RANGE*CLOUD_RANGE*4) {
       const a=Math.random()*Math.PI*2, d=CLOUD_RANGE*.5+Math.random()*CLOUD_RANGE;
-      c.position.set(px+Math.cos(a)*d, 600+Math.random()*1800, pz+Math.sin(a)*d);
+      c.position.set(px+Math.cos(a)*d, 600+Math.random()*1800, pz+Math.sin(a)*d);moved=true;
     }
   }
-  syncCloudInstances();
+  if(moved)syncCloudInstances();
 }
 
 /* ═══════════════════ TERRAIN ═══════════════════ */
@@ -735,11 +736,9 @@ const contrailPos=[],CONTRAIL_MAX=120;
 const cGeo=new THREE.BufferGeometry(),cVerts=new Float32Array(CONTRAIL_MAX*3),cAlphas=new Float32Array(CONTRAIL_MAX);
 cGeo.setAttribute('position',new THREE.BufferAttribute(cVerts,3));
 cGeo.setAttribute('alpha',new THREE.BufferAttribute(cAlphas,1));
-const cMat=new THREE.ShaderMaterial({depthWrite:true,blending:THREE.NoBlending,
-  vertexShader:`attribute float alpha;varying float vA,vHashSeed;void main(){vA=alpha;vHashSeed=dot(position,vec3(.1031,.11369,.13787));gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);gl_PointSize=mix(1.,4.,alpha);}`,
-  fragmentShader:`varying float vA,vHashSeed;${alphaHashShader}
-    void main(){float opacity=vA*.4;if(opacity<.002||alphaHash(gl_FragCoord.xy,vHashSeed)>opacity)discard;
-    gl_FragColor=vec4(.9,.93,1.,1.);}`});
+const cMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+  vertexShader:`attribute float alpha;varying float vA;void main(){vA=alpha;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);gl_PointSize=mix(1.,4.,alpha);}`,
+  fragmentShader:`varying float vA;void main(){gl_FragColor=vec4(.9,.93,1.,vA*.4);}`});
 scene.add(new THREE.Points(cGeo,cMat));
 let contrailTimer=0;
 
@@ -956,7 +955,7 @@ function updatePlayer(dt){
 }
 
 const _eFwd=new THREE.Vector3(),_eTarget=new THREE.Vector3(),_eTargetOffset=new THREE.Vector3(),_eDesired=new THREE.Quaternion(),_eLook=new THREE.Matrix4();
-const ENEMY_BREAK_DISTANCE=400,ENEMY_REENGAGE_DISTANCE=700;
+const ENEMY_BREAK_DISTANCE=400,ENEMY_ATTACK_BREAK_DISTANCE=180,ENEMY_REENGAGE_DISTANCE=700;
 const ENEMY_INBOUND_TARGET_DISTANCE=600,ENEMY_REPOSITION_TARGET_DISTANCE=800;
 function smoothLookAt(mesh, target, dt, turnSpeed) {
   _eLook.lookAt(mesh.position, target, _axisY);
@@ -972,8 +971,9 @@ function ensureEnemyHorizontalTargetDistance(target,right,side,minDistance){
   if(requiredLateral>lateral)target.addScaledVector(right,side*(requiredLateral-lateral));
 }
 function transitionEnemy(enemy,state,duration=0){enemy.state=state;enemy.stateTimer=0;enemy.stateDuration=duration}
+function enemyAttackSpeed(e){return e.baseSpeed*(1.15+e.aggression*.12)}
 function beginEnemyAttack(e){
-  transitionEnemy(e,'attack',2.6+Math.random()*.7);e.burstCount=0;e.passSide=Math.random()>.5?1:-1;e.attackAligned=false;
+  e.burstCount=0;e.passSide=Math.random()>.5?1:-1;e.attackAligned=false;
   const playerRight=new THREE.Vector3().crossVectors(_fwd,_axisY);
   if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
   const dist=e.mesh.position.distanceTo(playerJet.position);
@@ -981,6 +981,8 @@ function beginEnemyAttack(e){
   e.attackPoint.copy(playerJet.position).addScaledVector(player.velocity,leadTime)
     .addScaledVector(playerRight,e.passSide*(100+Math.random()*80));
   e.attackPoint.y=Math.max(e.attackPoint.y+(Math.random()-.5)*100,getTerrainHeight(e.attackPoint.x,e.attackPoint.z)+100);
+  const attackTravelTime=e.mesh.position.distanceTo(e.attackPoint)/enemyAttackSpeed(e);
+  transitionEnemy(e,'attack',Math.max(4,attackTravelTime*1.25+2));
 }
 function beginEnemyExtend(e){
   transitionEnemy(e,'extend',3+Math.random());
@@ -1047,7 +1049,8 @@ function updateEnemies(dt){
             e.evadeDir.copy(perp).multiplyScalar(Math.random()>.5?1:-1).add(new THREE.Vector3(0,.8,0)).normalize();break}}}}
 
     // Any close merge becomes a fixed-vector extension, preventing another turn into the player.
-    if(dist<ENEMY_BREAK_DISTANCE&&e.state!=='extend'&&e.state!=='evade')beginEnemyExtend(e);
+    const breakDistance=e.state==='attack'?ENEMY_ATTACK_BREAK_DISTANCE:ENEMY_BREAK_DISTANCE;
+    if(dist<breakDistance&&e.state!=='extend'&&e.state!=='evade')beginEnemyExtend(e);
 
     // Commit to discrete attack passes so enemies do not settle into endless turn fights.
     let turnRate=1.5;
@@ -1068,7 +1071,7 @@ function updateEnemies(dt){
     }else if(e.state==='attack'){
       // Hold a fixed aim point so every attack becomes a committed fly-by instead of a pursuit turn.
       _eTarget.copy(e.attackPoint);
-      e.currentSpeed=e.baseSpeed*(1.15+e.aggression*.12);turnRate=.95+e.skill*.55;
+      e.currentSpeed=enemyAttackSpeed(e);turnRate=.95+e.skill*.55;
       if(facingPlayer>.45)e.attackAligned=true;
       if(dist<500&&facingPlayer>.85&&e.fireCooldown<=0){
         e.fireCooldown=.12+.08*(1-e.skill);e.burstCount++;

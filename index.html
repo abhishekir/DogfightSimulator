@@ -1067,7 +1067,7 @@ function updateEnemies(dt){
       e.currentSpeed=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1+e.skill*.35;
       const presentationReady=playerBearing<-.55&&dist>500;
       if(presentationReady&&dist<1050+e.aggression*200)beginEnemyAttack(e);
-      else if(playerBearing<-.05&&dist<=500)beginEnemyReposition(e);
+      else if(dist<ENEMY_INBOUND_TARGET_DISTANCE)beginEnemyReposition(e);
     }else if(e.state==='attack'){
       // Hold a fixed aim point so every attack becomes a committed fly-by instead of a pursuit turn.
       _eTarget.copy(e.attackPoint);
@@ -1441,7 +1441,7 @@ function animate(){requestAnimationFrame(animate);
     deathCamTimer-=dt;deathCamAngle+=dt*1.5;const oD=60+((3-deathCamTimer)/3)*40;
     camera.position.set(deathCamCenter.x+Math.cos(deathCamAngle)*oD,deathCamCenter.y+20+((3-deathCamTimer)/3)*15,deathCamCenter.z+Math.sin(deathCamAngle)*oD);
     camera.lookAt(deathCamCenter);updateParticles(dt);updateDebris(dt);
-    syncCloudInstances();syncParticleBatches();
+    syncParticleBatches();
     if(deathCamTimer<=0){document.getElementById('final-score').textContent=score;document.getElementById('game-over').style.display='flex'}
   }
   if(hitFlash>0){hitFlash-=1.2*dt;if(hitFlash<0)hitFlash=0}

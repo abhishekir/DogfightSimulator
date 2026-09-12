@@ -341,7 +341,7 @@ composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(
   { type: THREE.HalfFloatType }));
 composer.setPixelRatio(POST_RATIO);
 composer.addPass(new RenderPass(scene, camera));
-const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.30, 0.55, 1.05);
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.26, 0.45, 4.0);
 composer.addPass(bloomPass);
 composer.addPass(new OutputPass());
 // FXAA belongs after tone mapping: it is a gamma-space filter and misreads linear HDR.
@@ -349,8 +349,10 @@ const fxaaPass = new ShaderPass(FXAAShader);
 composer.addPass(fxaaPass);
 const gradePass = new ShaderPass(GradeShader);
 composer.addPass(gradePass);
+let postBufferHeight = Math.round(window.innerHeight * POST_RATIO);
 function syncPostResolution(w, h) {
   const bw = Math.round(w * POST_RATIO), bh = Math.round(h * POST_RATIO);
+  postBufferHeight = bh;
   fxaaPass.uniforms['resolution'].value.set(1 / bw, 1 / bh);
   gradePass.uniforms['uResolution'].value.set(bw, bh);
 }
@@ -359,7 +361,7 @@ window.addEventListener('resize', () => {
   const w = window.innerWidth, h = window.innerHeight;
   camera.aspect = w / h; camera.updateProjectionMatrix();
   renderer.setSize(w, h); composer.setSize(w, h);
-  syncPostResolution(w, h); resizeHUD();
+  syncPostResolution(w, h); syncOceanPixelAngle(); resizeHUD();
 });
 
 /* ═══════════════════ SHARED GLSL: SIMPLEX (matches SimplexNoise above) ═══════════════════ */
@@ -372,6 +374,16 @@ const permUniform = (() => {
     simplex.p[i*4], simplex.p[i*4+1], simplex.p[i*4+2], simplex.p[i*4+3]));
   return v;
 })();
+
+const swellConstGLSL = `
+// Where each vertex-displaced swell hands over to its per-pixel stand-in. Vertex normals are
+// interpolated linearly across a quad, so three samples per wavelength is not enough - it
+// leaves a regular diamond moiré where the grid beats against the wave. These hand over at
+// roughly seven samples instead. Displacement is then confined to about a kilometre, which is
+// as far as its silhouette reads anyway; past that the per-pixel stand-in carries the shading.
+const float GERST_FADE0=1000.,GERST_FADE1=330.,GERST_FADE2=115.;
+// Deep-water phase speeds, c = sqrt(g/k), matching the vertex stage exactly.
+const float DISP0=0.3152,DISP1=0.4459,DISP2=0.6112;`;
 
 const simplexGLSL = `
 uniform vec4 uPerm[64];
@@ -504,22 +516,40 @@ sunLight.shadow.bias = -0.0006; sunLight.shadow.normalBias = 1.2;
 scene.add(sunLight); scene.add(sunLight.target);
 
 /* ═══════════════════ ATMOSPHERIC SKY ═══════════════════ */
+const SKY_TURBIDITY = 2.0, SKY_RAYLEIGH = 2.8;
 function configureSky(skyObject) {
   const uniforms = skyObject.material.uniforms;
-  uniforms['turbidity'].value = 3.2;
-  uniforms['rayleigh'].value = 2.1;
-  uniforms['mieCoefficient'].value = 0.006;
-  uniforms['mieDirectionalG'].value = 0.82;
+  // Mie controls the aureole around the sun. At 0.006 / turbidity 3.2 a huge patch of sky
+  // sat above the tone curve's white point, so it saturated flat and bloom smeared it into a
+  // blob. A lower coefficient with a more forward-peaked g keeps the glare tight and bright.
+  uniforms['turbidity'].value = SKY_TURBIDITY;
+  // Rayleigh drives the blue; at 1.9 the sky washed out to pale grey once you climbed above
+  // the haze layer, where it should be deepening instead.
+  uniforms['rayleigh'].value = SKY_RAYLEIGH;
+  uniforms['mieCoefficient'].value = 0.0026;
+  uniforms['mieDirectionalG'].value = 0.88;
   uniforms['sunPosition'].value.copy(sunDirection);
 }
 const sky = new Sky(); sky.scale.setScalar(44000); configureSky(sky); scene.add(sky);
 sunLight.position.copy(sunDirection.clone().multiplyScalar(2000));
 
+function createSunDiscTexture(){
+  const S=256,R=S*.5,c=document.createElement('canvas');c.width=c.height=S;
+  const x=c.getContext('2d'),g=x.createRadialGradient(R,R,0,R,R,R);
+  g.addColorStop(0,   'rgba(255,252,242,1)');
+  g.addColorStop(.10, 'rgba(255,248,228,0.95)');
+  g.addColorStop(.16, 'rgba(255,226,176,0.34)');   // hard edge of the disc
+  g.addColorStop(.30, 'rgba(255,206,150,0.10)');
+  g.addColorStop(.62, 'rgba(255,188,130,0.022)');
+  g.addColorStop(1,   'rgba(255,170,110,0)');
+  x.fillStyle=g;x.fillRect(0,0,S,S);
+  return new THREE.CanvasTexture(c);
+}
 const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({
-  map: createSunGlowTexture(), color: 0xfff0d8, transparent: true, opacity: 0.55,
+  map: createSunDiscTexture(), color: 0xfff4e4, transparent: true, opacity: 0.5,
   blending: THREE.AdditiveBlending, depthWrite: false, fog: false
 }));
-sunSprite.scale.set(2600, 2600, 1);
+sunSprite.scale.set(1500, 1500, 1);
 sunSprite.position.copy(sunDirection.clone().multiplyScalar(20000));
 scene.add(sunSprite);
 
@@ -555,7 +585,7 @@ const waterMat = new THREE.ShaderMaterial({
   side: THREE.FrontSide, depthWrite: true, blending: THREE.NoBlending, fog: false,
   uniforms: Object.assign({
     uTime:       { value: 0 },
-    uZenith:     { value: new THREE.Color(0x4a7cb8) },
+    uZenith:     { value: new THREE.Color(0x3d72b4) },
     uHorizon:    { value: new THREE.Color(0xa9c4dc) },
     uSunGlow:    { value: new THREE.Color(0xffd9a8) },
     uDeepColor:  { value: new THREE.Color(0x0a3050) },
@@ -563,56 +593,117 @@ const waterMat = new THREE.ShaderMaterial({
     uShoalColor: { value: new THREE.Color(0x2f9c9e) },
     uSSSColor:   { value: new THREE.Color(0x1f8a70) },
     uFoamColor:  { value: new THREE.Color(0xe9f2f5) },
-    uOceanRadius:{ value: OCEAN_RADIUS }
+    uOceanRadius:{ value: OCEAN_RADIUS },
+    uPixelAngle: { value: 0.002 }
   }, atmoUniforms),
   vertexShader: `
     uniform float uTime,uOceanRadius;uniform vec3 uCamPos;
     varying vec3 vWorldPos;varying vec2 vSwellGrad;
-    varying float vViewDist,vSwellH,vDepth,vEdge;
+    varying float vViewDist,vSwellH,vDepth,vEdge,vFold,vLee;
     ${simplexGLSL}
-    float swell(vec2 p,float t,float freq,float speed,vec2 dir,float amp,inout vec2 grad){
-      float ph=dot(p,dir)*freq+t*speed;
-      grad+=cos(ph)*freq*dir*amp;
-      return sin(ph)*amp;
+    ${swellConstGLSL}
+
+    // Trochoidal (Gerstner) wave: the crest is drawn together and the trough spread out by a
+    // horizontal displacement, which is what gives real swell its peaked profile. Phase speed
+    // follows the deep-water dispersion relation c = sqrt(g/k), so long waves genuinely
+    // outrun short ones instead of everything sliding at one arbitrary rate.
+    void gerstner(vec2 p,vec2 dir,float w,float amp,float steep,float fade,
+                  inout vec3 disp,inout vec3 nrm,inout float fold,inout float lee){
+      amp*=fade; if(amp<1e-4)return;
+      float phase=dot(dir,p)*w+uTime*sqrt(9.81*w);
+      float c=cos(phase),s=sin(phase);
+      float wa=w*amp;
+      disp.xz+=steep*amp*dir*c;
+      disp.y +=amp*s;
+      nrm.xz-=dir*wa*c;
+      nrm.y  -=steep*wa*s;
+      // Horizontal compression: as the crest folds over itself this drives towards zero.
+      fold+=steep*wa*s;
+      // Negative vertical velocity marks the back of the crest, where spill-over persists.
+      lee-=amp*sqrt(9.81*w)*c;
     }
+
     void main(){
       vec3 wp=(modelMatrix*vec4(position,1.)).xyz;
-      float planar=length(wp.xz-uCamPos.xz);
+      vec2 base=wp.xz;
+      float planar=length(base-uCamPos.xz);
       vEdge=smoothstep(uOceanRadius*.72,uOceanRadius*.99,planar);
       // Exact CPU terrain height -> the ocean knows the coastline.
-      vDepth=-terrainRawGLSL(wp.xz);
-      float shoal=smoothstep(0.,90.,vDepth);             // waves flatten as they run ashore
-      float lod=1.-smoothstep(5000.,14000.,planar);      // drop displacement before it aliases
-      float amp=shoal*lod;
-      vec2 grad=vec2(0.);float h=0.;
-      h+=swell(wp.xz,uTime,.0068,.52,normalize(vec2( .86, .51)),6.2*amp,grad);
-      h+=swell(wp.xz,uTime,.0121,.74,normalize(vec2(-.42, .91)),2.7*amp,grad);
-      h+=swell(wp.xz,uTime,.0224,1.02,normalize(vec2( .71,-.70)),1.1*amp,grad);
-      wp.y+=h;
-      vSwellH=h;vSwellGrad=grad;vWorldPos=wp;
+      vDepth=-terrainRawGLSL(base);
+      float shoal=smoothstep(0.,90.,vDepth);   // waves flatten as they run ashore
+
+      // Wave groups: two slow crossed envelopes so the swell arrives in sets rather than at
+      // one unchanging height.
+      float g1=sin(dot(base,vec2(.00037,.00026))-uTime*.074);
+      float g2=sin(dot(base,vec2(-.00021,.00043))-uTime*.051);
+      float groups=.72+.28*(g1*.6+g2*.4)+.16*g1*g2;
+      float amp=shoal*groups;
+
+      // Each component is faded out before the grid can no longer resolve it; the fragment
+      // stage picks up from roughly where the shortest of these leaves off.
+      vec3 disp=vec3(0.),nrm=vec3(0.,1.,0.);
+      float fold=0.,lee=0.;
+      gerstner(base,normalize(vec2( .86, .51)),.01013,3.05*amp,1.00,
+               1.-smoothstep(GERST_FADE0,GERST_FADE0*2.2,planar),disp,nrm,fold,lee);
+      gerstner(base,normalize(vec2(-.42, .91)),.02027,1.80*amp,0.92,
+               1.-smoothstep(GERST_FADE1,GERST_FADE1*2.2,planar),disp,nrm,fold,lee);
+      gerstner(base,normalize(vec2( .71,-.70)),.03808,1.05*amp,0.85,
+               1.-smoothstep(GERST_FADE2,GERST_FADE2*2.4,planar),disp,nrm,fold,lee);
+
+      wp+=disp;
+      vSwellH=disp.y;
+      vSwellGrad=-nrm.xz;          // slope, matching the old convention
+      vFold=fold;
+      vLee=lee;
+      vWorldPos=wp;
       vec4 mv=viewMatrix*vec4(wp,1.);vViewDist=length(mv.xyz);
       gl_Position=projectionMatrix*mv;
     }`,
   fragmentShader: `
-    uniform float uTime,uOceanRadius;
+    uniform float uTime,uOceanRadius,uPixelAngle;
     uniform vec3 uZenith,uHorizon,uSunGlow,uDeepColor,uMidColor,uShoalColor,uSSSColor,uFoamColor;
     varying vec3 vWorldPos;varying vec2 vSwellGrad;
-    varying float vViewDist,vSwellH,vDepth,vEdge;
+    varying float vViewDist,vSwellH,vDepth,vEdge,vFold,vLee;
     ${simplexGLSL}
     ${atmosphereGLSL}
+    ${swellConstGLSL}
 
     // One ripple octave. Octaves that are too fine to resolve at this distance are faded out
     // of the normal and their slope energy is handed to roughness instead - that swap is what
     // turns far-field water into a broad glitter path rather than a field of aliased sparkle.
-    float ripple(vec2 p,float freq,float speed,vec2 dir,float amp,float fadeNear,float fadeFar,
-                 float dist,inout vec2 grad,inout float lostSlope){
-      float vis=1.-smoothstep(fadeNear,fadeFar,dist);
-      float ph=dot(p,dir)*freq+uTime*speed;
+    // Level of detail from the pixel's actual world-space footprint rather than from view
+    // distance. Water is nearly always seen at a grazing angle, where one pixel can span
+    // hundreds of metres along the view direction while being metres across - a distance
+    // threshold cannot see that, which is why fine octaves were still aliasing into speckle.
+    float lodVis(float wl,float fp){ return 1.-smoothstep(wl*.09,wl*.30,fp); }
+
+    // The seabed lookup needs the same treatment: its 125 m and 500 m octaves alias under a
+    // large footprint, and because depth drives the surf band that showed up as speckle
+    // scattered along the whole coastline.
+    float seabedLOD(vec2 p,float fp){
+      return snoise(p*.00025)*500.+snoise(p*.0006)*200.
+            +snoise(p*.002)*60.*lodVis(500.,fp)
+            +snoise(p*.008)*15.*lodVis(125.,fp);
+    }
+
+    float ripple(vec2 p,float freq,float speed,vec2 dir,float amp,float extraVis,
+                 float lossWeight,float warpAmt,float seed,float fp,
+                 inout vec2 grad,inout float lostSlope){
+      float wl=6.2832/freq;
+      float vis=extraVis*lodVis(wl,fp);
+      if(vis<=.001){lostSlope+=abs(freq*amp)*.64*lossWeight;return 0.;}
+      float wf=freq*.23;
+      vec2 warp=vec2(sin(p.y*wf+seed)+.55*sin(p.y*wf*2.7-seed*1.7),
+                     sin(p.x*wf-seed)+.55*sin(p.x*wf*2.3+seed*2.3))*wl*warpAmt;
+      float ph=dot(p+warp,dir)*freq+uTime*speed;
       float g=cos(ph)*freq*amp;
       grad+=g*dir*vis;
-      lostSlope+=abs(g)*(1.-vis);
+      lostSlope+=abs(g)*(1.-vis)*lossWeight;
       return sin(ph)*amp*vis;
     }
+
+    const float SUN_ANGULAR_RADIUS=.0047;   // ~0.27 deg half-angle
+    const float SUN_IRRADIANCE=3.4;         // matches the scene's directional light
 
     vec3 skyDome(vec3 dir){
       float up=clamp(dir.y,0.,1.);
@@ -628,19 +719,46 @@ const waterMat = new THREE.ShaderMaterial({
       vec2 p=p0+vec2(sin(p0.y*.0043+1.7)+.6*sin(p0.y*.0111-2.3),
                      sin(p0.x*.0037-0.6)+.6*sin(p0.x*.0097+1.1))*11.;
       float dist=vViewDist;
+      vec3 V=normalize(uCamPos-vWorldPos);
+      // World metres this pixel covers on the surface, including the foreshortening that makes
+      // a grazing view span far more water per pixel. Derived analytically rather than from
+      // screen-space derivatives: dFdx of an interpolated varying is constant within a
+      // triangle, so a derivative-based footprint is quantised per quad and stamps the mesh
+      // onto the sea as a diamond lattice.
+      float fp=clamp(dist*uPixelAngle/max(abs(V.y),.03),.002,4000.);
       vec2 grad=vSwellGrad;
       float lost=0.,detail=0.;
-      detail+=ripple(p,.049,1.25,normalize(vec2( .92, .39)),1.45,5000.,13000.,dist,grad,lost);
-      detail+=ripple(p,.093,1.62,normalize(vec2(-.55, .84)), .80,2600., 7500.,dist,grad,lost);
-      detail+=ripple(p,.181,2.10,normalize(vec2( .38, .93)), .39,1300., 3800.,dist,grad,lost);
-      detail+=ripple(p,.352,2.74,normalize(vec2(-.88, .47)), .17, 620., 1800.,dist,grad,lost);
-      detail+=ripple(p,.683,3.55,normalize(vec2( .64,-.77)), .072,290.,  850.,dist,grad,lost);
-      detail+=ripple(p,1.327,4.6,normalize(vec2(-.26,-.97)), .029,130.,  400.,dist,grad,lost);
-      float shoal=smoothstep(0.,110.,vDepth);
+      // The three long components fade IN exactly where the vertex stage gives up on them,
+      // so the sea keeps its large-scale shape all the way to the horizon with no seam.
+      float planar=length(p0-uCamPos.xz);
+      detail+=ripple(p,.01013,DISP0,normalize(vec2( .86, .51)),3.05,
+                     smoothstep(GERST_FADE0,GERST_FADE0*2.2,planar),0.,0.,0.9,fp,grad,lost);
+      detail+=ripple(p,.02027,DISP1,normalize(vec2(-.42, .91)),1.80,
+                     smoothstep(GERST_FADE1,GERST_FADE1*2.2,planar),0.,0.,2.6,fp,grad,lost);
+      detail+=ripple(p,.03808,DISP2,normalize(vec2( .71,-.70)),1.05,
+                     smoothstep(GERST_FADE2,GERST_FADE2*2.4,planar),0.,0.,4.4,fp,grad,lost);
+      // Everything below is per-pixel only, with visibility set purely by pixel footprint.
+      detail+=ripple(p,.049,1.25,normalize(vec2( .92, .39)),1.45,
+                     1.,1.,.21,0.7,fp,grad,lost);
+      detail+=ripple(p,.071,1.44,normalize(vec2( .29, .96)),1.02,
+                     1.,1.,.21,2.3,fp,grad,lost);
+      detail+=ripple(p,.093,1.62,normalize(vec2(-.55, .84)), .80,
+                     1.,1.,.21,4.1,fp,grad,lost);
+      detail+=ripple(p,.181,2.10,normalize(vec2( .38, .93)), .39,
+                     1.,1.,.21,5.6,fp,grad,lost);
+      detail+=ripple(p,.352,2.74,normalize(vec2(-.88, .47)), .17,
+                     1.,1.,.21,1.4,fp,grad,lost);
+      detail+=ripple(p,.683,3.55,normalize(vec2( .64,-.77)), .072,
+                     1.,1.,.21,3.2,fp,grad,lost);
+      detail+=ripple(p,1.327,4.6,normalize(vec2(-.26,-.97)), .029,
+                     1.,1.,.21,6.8,fp,grad,lost);
+      // Resolve depth per-pixel wherever it can affect shading; offshore the interpolated
+      // value is already indistinguishable and not worth the lookups.
+      float depth=vDepth<300.?-seabedLOD(p0,fp):vDepth;
+      float shoal=smoothstep(0.,110.,depth);
       grad*=mix(.35,1.,shoal);
 
       vec3 N=normalize(vec3(-grad.x,1.,-grad.y));
-      vec3 V=normalize(uCamPos-vWorldPos);
       vec3 L=normalize(uSunDir);
       float NoV=max(dot(N,V),1e-3);
 
@@ -654,42 +772,60 @@ const waterMat = new THREE.ShaderMaterial({
       float rough=clamp(.014+lost*.80+smoothstep(400.,11000.,dist)*.07,.008,.30);
       vec3 H=normalize(L+V);
       float NoH=max(dot(N,H),0.),NoL=max(dot(N,L),0.);
-      float a=rough*rough,a2=a*a;
+      // Sphere-light (representative point) normalisation: widen the lobe to the sun's
+      // angular radius and scale the energy back down, so the peak stays finite. Without it
+      // D peaks in the millions on calm water and blows the glitter path into a white ball.
+      float a=rough*rough;
+      float aP=min(a+SUN_ANGULAR_RADIUS,1.);
+      float energy=(a/aP)*(a/aP);
+      float a2=aP*aP;
       float dd=NoH*NoH*(a2-1.)+1.;
       float D=a2/(3.14159265*dd*dd);
-      float vis=.5/max(mix(2.*NoL*NoV,NoL+NoV,a),1e-4);
-      vec3 sunSpec=vec3(1.,.94,.82)*D*vis*NoL*22.;
+      float vis=.5/max(mix(2.*NoL*NoV,NoL+NoV,aP),1e-4);
+      vec3 sunSpec=vec3(1.,.94,.82)*min(D*energy*vis*NoL*SUN_IRRADIANCE,26.)*F;
 
       // Depth-graded body colour: turquoise over the shelf, deep navy offshore.
-      float dmix=1.-exp(-max(vDepth,0.)/115.);
+      float dmix=1.-exp(-max(depth,0.)/115.);
       vec3 body=mix(uShoalColor,uMidColor,smoothstep(0.,.55,dmix));
       body=mix(body,uDeepColor,smoothstep(.5,1.,dmix));
 
-      // Light bleeding through the back of a wave.
-      float sss=pow(max(dot(V,-L),0.),2.5)*smoothstep(0.,4.,vSwellH+detail*2.)*.55;
+      // Light refracting through the thin water at a crest, strongest looking into the sun.
+      // This has to stay a soft gradient: a narrow smoothstep over the summed wave height
+      // saturates, and the interference of a handful of plane waves then prints as a hard
+      // diamond lattice across the whole sea.
+      float backlit=pow(max(dot(V,-L),0.),2.2);
+      float crestLift=clamp((vSwellH+detail)*.13+.44,0.,1.);
+      float sss=backlit*crestLift*.55+crestLift*max(NoL,0.)*.08;
       body+=uSSSColor*sss*shoal;
 
       vec3 col=mix(body,refl,F)+sunSpec;
 
       // ── Foam ──
-      // Most of the ocean is neither steep enough to break nor shallow enough to surf, so
-      // gate the four noise octaves behind that test instead of paying for them everywhere.
-      float steep=length(vSwellGrad);
-      float capDrive=smoothstep(.046,.088,steep)*smoothstep(2.6,6.0,vSwellH);
+      // vFold is the horizontal compression of the trochoidal surface. It falls towards zero
+      // exactly where a crest is folding over itself, which is where water actually breaks -
+      // a far better driver than raw steepness, and it puts the foam on the crest face.
+      // Calibrated to the actual fold range: the three swell components sum to roughly
+      // +/-0.07, so the old 0.085 threshold was above the maximum and never fired.
+      float capDrive=smoothstep(.030,.065,vFold);
+      // Spill lingers on the back of the crest, where the surface is dropping away.
+      float leeSide=smoothstep(-.4,1.6,vLee);
+      capDrive*=mix(.35,1.,leeSide);
       float surfWidth=max(34.+vSwellH*4.,12.);
-      float surfBand=vDepth>0.?1.-smoothstep(0.,surfWidth,vDepth):0.;
-      float wash=vDepth>0.?1.-smoothstep(0.,115.,vDepth):0.;
+      float surfBand=depth>0.?1.-smoothstep(0.,surfWidth,depth):0.;
+      float wash=depth>0.?1.-smoothstep(0.,115.,depth):0.;
       float foam=0.;
+      // Most of the ocean is neither breaking nor shallow, so gate the noise octaves behind
+      // that test instead of paying for them everywhere.
       if(capDrive>.002||wash>.002){
-        float nf =snoise(p*.021+vec2(uTime*.045,-uTime*.035))*.5+.5;   // ~300 m
-        float nf2=snoise(p*.085-vec2(uTime*.090, uTime*.060))*.5+.5;   //  ~74 m
-        float nf3=snoise(p*.310+vec2(-uTime*.20, uTime*.150))*.5+.5;   //  ~20 m
-        float nf4=snoise(p*1.05 -vec2(uTime*.42, uTime*.310))*.5+.5;   //   ~6 m
+        float nf =mix(.5,snoise(p*.021+vec2(uTime*.045,-uTime*.035))*.5+.5,lodVis(299.,fp));
+        float nf2=mix(.5,snoise(p*.085-vec2(uTime*.090, uTime*.060))*.5+.5,lodVis(74.,fp));
+        float nf3=mix(.5,snoise(p*.310+vec2(-uTime*.20, uTime*.150))*.5+.5,lodVis(20.3,fp));
+        float nf4=mix(.5,snoise(p*1.05 -vec2(uTime*.42, uTime*.310))*.5+.5,lodVis(6.,fp));
         // Whitecaps ride fine-grained noise; weighting the coarse octaves instead turns them
         // into floating white slabs.
         float breakFine=nf*.16+nf2*.24+nf3*.32+nf4*.28;
         float breakSurf=nf*.34+nf2*.40+nf3*.26;
-        float cap=capDrive*smoothstep(.50,.72,breakFine)*.85;
+        float cap=capDrive*smoothstep(.42,.66,breakFine);
         // Surf: a bright break over the bar, then a wider, fainter wash up the beach.
         float surf=surfBand*smoothstep(.26,.58,breakSurf)+wash*.30*smoothstep(.44,.78,nf2);
         foam=clamp(max(cap,surf)*(1.-vEdge),0.,1.);
@@ -700,7 +836,7 @@ const waterMat = new THREE.ShaderMaterial({
       col=mix(col,foamLit,foam);
 
       // Wet-sand sheen right at the very edge.
-      col=mix(col,uFoamColor*.72,(1.-smoothstep(0.,4.,vDepth))*.35);
+      col=mix(col,uFoamColor*.72,(1.-smoothstep(0.,4.,depth))*.35);
 
       col=applyAerial(col,uCamPos,-V,dist);
       col=mix(col,hazeColor(-V),vEdge);
@@ -709,6 +845,14 @@ const waterMat = new THREE.ShaderMaterial({
 });
 // 256 rings is ample: the vertex stage only carries long-wavelength swell, and everything
 // finer than that is per-pixel, so denser geometry buys nothing but vertex cost.
+// Vertical angle subtended by one rendered pixel; the ocean's level of detail is measured
+// against it, so it has to track the render buffer rather than the CSS size.
+function syncOceanPixelAngle() {
+  waterMat.uniforms.uPixelAngle.value =
+    2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) * .5) / postBufferHeight;
+}
+syncOceanPixelAngle();
+
 const waterGeo = createOceanGeometry(256, OCEAN_RADIUS, 2.4);
 const water = new THREE.Mesh(waterGeo, waterMat);
 water.position.y = WATER_LEVEL; water.frustumCulled = false;
@@ -965,6 +1109,16 @@ const BIOME = [
   [ 700, new THREE.Color(0xe4eaee)]   // snowfield
 ];
 const ROCK_COLOR = new THREE.Color(0x615a51), SNOW_COLOR = new THREE.Color(0xe8edf1);
+const CANOPY_COLOR = new THREE.Color(0x2c4326);
+// Shared by the ground tint and the billboard placement, so the painted forest and the
+// modelled one describe the same woods.
+function forestDensity(wx, wz) {
+  return simplex.noise2D(wx*.00035, wz*.00035)*.62 + simplex.noise2D(wx*.0014, wz*.0014)*.38;
+}
+function canopyAmount(y, wx, wz) {
+  const band = Math.min((y - 16) / 55, (430 - y) / 100, 1);
+  return THREE.MathUtils.clamp(band, 0, 1) * THREE.MathUtils.smoothstep(forestDensity(wx, wz), -.05, .45);
+}
 const _bc = new THREE.Color();
 function setTerrainColor(colors, offset, y, ny, wx, wz) {
   // Jitter the elevation used for biome lookup so the bands stop reading as contour lines.
@@ -981,6 +1135,10 @@ function setTerrainColor(colors, offset, y, ny, wx, wz) {
   const slope = 1 - Math.abs(ny);
   const rockAmt = THREE.MathUtils.smoothstep(slope, .32, .72) * THREE.MathUtils.smoothstep(y, 10, 70);
   _bc.lerp(ROCK_COLOR, rockAmt * .85);
+  // Paint the woods into the ground as well as instancing them. Billboards only reach a few
+  // kilometres, and without this the edge of that radius reads as a line between forested and
+  // bare hills; with it, the clumps merely add relief to ground that already looks wooded.
+  _bc.lerp(CANOPY_COLOR, canopyAmount(y, wx, wz) * (1 - rockAmt) * .72);
   const snowAmt = THREE.MathUtils.smoothstep(h, 520, 760) * (1 - THREE.MathUtils.smoothstep(slope, .34, .66));
   _bc.lerp(SNOW_COLOR, snowAmt);
   colors[offset] = _bc.r; colors[offset+1] = _bc.g; colors[offset+2] = _bc.b;
@@ -1024,6 +1182,176 @@ function updateTerrain(px, pz) {
   for (const [key, mesh] of terrainChunks)
     if (!needed.has(key)) { scene.remove(mesh); mesh.geometry.dispose(); terrainChunks.delete(key) }
   terrainChunkX = pcx; terrainChunkZ = pcz;
+  updateVegetation(pcx, pcz);
+}
+/* ═══════════════════ VEGETATION ═══════════════════ */
+// Canopy clumps rather than individual trees: from a cockpit you read forest as texture and
+// silhouette, not as trunks, and a clump covers the ground a few hundred trees would for one
+// instance. Camera-facing so they hold up looking straight down as well as across.
+const VEG_CHUNK_RADIUS = 2, VEG_STANDS = 900;
+const VEG_SPAN = VEG_CHUNK_RADIUS * 2 + 1;
+const VEG_PER_CHUNK = 640, MAX_VEG = VEG_SPAN * VEG_SPAN * VEG_PER_CHUNK;
+const VEG_FADE_NEAR = 1700, VEG_FADE_FAR = 2600;
+const VEG_BUILD_BUDGET = 3;   // chunks generated per frame, to keep crossings hitch-free
+
+function createCanopyTexture() {
+  const S = 128, R = S * .5;
+  const lump = tileableFBM(S, 5, 3, 777001), fine = tileableFBM(S, 4, 8, 24681);
+  const data = new Uint8Array(S * S * 4);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const i = y * S + x, dx = (x - R + .5) / R, dy = (y - R + .5) / R;
+    // Lumpy, slightly squashed silhouette. The offsets are kept small enough that alpha
+    // reaches zero inside the inscribed circle, so the quad's own edge can never show.
+    const r = Math.sqrt(dx * dx + dy * dy * 1.22) + (lump[i] - .5) * .22 + (fine[i] - .5) * .08;
+    const a = 1 - THREE.MathUtils.smoothstep(r, .30, .60);
+    // Crowns catch the light, the underside of the clump sits in its own shadow.
+    const shade = (.50 + .76 * (1 - (dy * .5 + .5))) * (.78 + .40 * fine[i]);
+    const v = Math.max(0, Math.min(255, shade * 255));
+    data[i*4] = v; data[i*4+1] = v; data[i*4+2] = v;
+    data[i*4+3] = Math.max(0, Math.min(255, a * 255));
+  }
+  const t = new THREE.DataTexture(data, S, S, THREE.RGBAFormat);
+  t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+  t.generateMipmaps = true; t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  t.needsUpdate = true; return t;
+}
+const canopyTex = createCanopyTexture();
+
+const vegGeometry = new THREE.PlaneGeometry(1, 1);
+const vegTint = new THREE.InstancedBufferAttribute(new Float32Array(MAX_VEG * 3), 3);
+vegTint.setUsage(THREE.DynamicDrawUsage);
+vegGeometry.setAttribute('iTint', vegTint);
+
+const vegMaterial = new THREE.ShaderMaterial({
+  uniforms: Object.assign({
+    uMap:      { value: canopyTex },
+    uFadeNear: { value: VEG_FADE_NEAR },
+    uFadeFar:  { value: VEG_FADE_FAR }
+  }, atmoUniforms),
+  vertexShader: `attribute vec3 iTint;
+    varying vec2 vUv;varying vec3 vTint,vWorldPos;varying float vDist;
+    void main(){vUv=uv;vTint=iTint;
+    vec4 center=instanceMatrix*vec4(0.,0.,0.,1.);
+    vWorldPos=center.xyz;
+    vec4 mv=modelViewMatrix*center;
+    vec2 s=vec2(length(instanceMatrix[0].xyz),length(instanceMatrix[1].xyz));
+    mv.xy+=position.xy*s;
+    vDist=-mv.z;
+    gl_Position=projectionMatrix*mv;}`,
+  fragmentShader: `uniform sampler2D uMap;uniform float uFadeNear,uFadeFar;
+    varying vec2 vUv;varying vec3 vTint,vWorldPos;varying float vDist;
+    ${atmosphereGLSL}
+    void main(){
+      vec4 tex=texture2D(uMap,vUv);
+      float a=tex.a*(1.-smoothstep(uFadeNear,uFadeFar,vDist));
+      a*=1.-smoothstep(.84,1.,length(vUv*2.-1.));
+      if(a<.02)discard;
+      // Treat the clump as a hemisphere so the sun models it like the cloud billboards.
+      vec2 d=vUv*2.-1.;
+      vec3 nWorld=normalize(vec3(d,sqrt(max(1.-dot(d,d),0.)))*mat3(viewMatrix));
+      float NoL=dot(nWorld,uSunDir);
+      // Dense scatterer: a strong sky-ambient floor plus the directional term, so a clump
+      // sits at roughly the brightness of the ground it grows on.
+      vec3 col=vTint*tex.r*(.72+.95*max(NoL,0.)+.18*max(-NoL,0.));
+      col=applyAerial(col,uCamPos,normalize(vWorldPos-uCamPos),vDist);
+      gl_FragColor=vec4(col*a,a);   // premultiplied
+    }`,
+  transparent:true, depthWrite:false, depthTest:true, fog:false,
+  blending:THREE.CustomBlending,
+  blendSrc:THREE.OneFactor, blendDst:THREE.OneMinusSrcAlphaFactor,
+  blendSrcAlpha:THREE.OneFactor, blendDstAlpha:THREE.OneMinusSrcAlphaFactor
+});
+const vegMesh = createDynamicInstancedMesh(vegGeometry, vegMaterial, MAX_VEG);
+vegMesh.renderOrder = 2;
+
+const vegChunks = new Map();      // "cx,cz" -> flat array of [x,y,z,size,r,g,b]
+const vegQueue = [];
+const VEG_LOW = new THREE.Color(0x4e6b32), VEG_HIGH = new THREE.Color(0x38543a);
+const _vegCol = new THREE.Color();
+
+function buildVegChunk(cx, cz) {
+  const key = `${cx},${cz}`;
+  if (vegChunks.has(key)) return;
+  const out = [];
+  let rng = ((cx * 73856093) ^ (cz * 19349663) ^ 0x9e3779b9) >>> 0;
+  const rnd = () => { rng = (rng * 1664525 + 1013904223) >>> 0; return rng / 4294967296; };
+  // Site a stand, then scatter a grove around it. Testing every clump individually spends
+  // most of its noise lookups on candidates that get thrown away, and leaves the survivors
+  // scattered as isolated dots rather than joined into canopy.
+  for (let i = 0; i < VEG_STANDS && out.length < VEG_PER_CHUNK * 7; i++) {
+    const sxp = (cx + rnd() - .5) * CHUNK_SIZE, szp = (cz + rnd() - .5) * CHUNK_SIZE;
+    // Patchy woodland: broad stands with clearings between them.
+    const dens = forestDensity(sxp, szp);
+    if (dens < -.05) continue;
+    const h0 = terrainRaw(sxp, szp);
+    if (h0 < 16 || h0 > 430) continue;                     // above the beach, below the tree line
+    const e = 22;
+    const gx = terrainRaw(sxp+e, szp) - terrainRaw(sxp-e, szp);
+    const gz = terrainRaw(sxp, szp+e) - terrainRaw(sxp, szp-e);
+    if (Math.hypot(gx, gz) / (2*e) > .72) continue;        // too steep to hold soil
+    // Thin the grove towards the shore and the tree line instead of ending on a contour.
+    const band = Math.min((h0 - 16) / 55, (430 - h0) / 100, 1);
+    const fill = band * (.35 + Math.min(dens, 1) * .8);
+    if (fill <= .04) continue;
+    const spread = 26 + rnd() * 46;
+    const n = Math.round((9 + rnd() * 13) * fill);
+    for (let k = 0; k < n; k++) {
+      const ang = rnd() * 6.2832, rad = spread * Math.sqrt(rnd());
+      const wx = sxp + Math.cos(ang) * rad, wz = szp + Math.sin(ang) * rad;
+      const h = terrainRaw(wx, wz);
+      if (h < 12 || h > 452) continue;
+      const size = 13 + rnd() * 29;
+      _vegCol.copy(VEG_LOW).lerp(VEG_HIGH, THREE.MathUtils.clamp((h - 60) / 320, 0, 1));
+      const v = .82 + rnd() * .36;
+      out.push(wx, h + size * .30, wz, size, _vegCol.r * v, _vegCol.g * v, _vegCol.b * v);
+    }
+  }
+  vegChunks.set(key, out);
+}
+
+const _vegMatrix = new THREE.Matrix4();
+function syncVegInstances(cx, cz) {
+  let n = 0;
+  for (let dx = -VEG_CHUNK_RADIUS; dx <= VEG_CHUNK_RADIUS; dx++)
+    for (let dz = -VEG_CHUNK_RADIUS; dz <= VEG_CHUNK_RADIUS; dz++) {
+      const list = vegChunks.get(`${cx+dx},${cz+dz}`);
+      if (!list) continue;
+      for (let i = 0; i < list.length; i += 7) {
+        if (n >= MAX_VEG) break;
+        const s = list[i+3];
+        _vegMatrix.makeScale(s, s * .70, 1).setPosition(list[i], list[i+1], list[i+2]);
+        vegMesh.setMatrixAt(n, _vegMatrix);
+        vegTint.setXYZ(n, list[i+4], list[i+5], list[i+6]);
+        n++;
+      }
+    }
+  vegMesh.count = n;
+  if (n) { vegMesh.instanceMatrix.needsUpdate = true; vegTint.needsUpdate = true }
+}
+
+let vegChunkX = null, vegChunkZ = null, vegDirty = false;
+function updateVegetation(pcx, pcz) {
+  const keep = new Set();
+  vegQueue.length = 0;
+  for (let dx = -VEG_CHUNK_RADIUS; dx <= VEG_CHUNK_RADIUS; dx++)
+    for (let dz = -VEG_CHUNK_RADIUS; dz <= VEG_CHUNK_RADIUS; dz++) {
+      const key = `${pcx+dx},${pcz+dz}`;
+      keep.add(key);
+      if (!vegChunks.has(key)) vegQueue.push([pcx+dx, pcz+dz]);
+    }
+  for (const key of vegChunks.keys()) if (!keep.has(key)) vegChunks.delete(key);
+  vegChunkX = pcx; vegChunkZ = pcz; vegDirty = true;
+}
+// Placement is spread over frames so crossing a chunk boundary never stalls a frame.
+function stepVegetationBuild() {
+  if (vegQueue.length) {
+    for (let i = 0; i < VEG_BUILD_BUDGET && vegQueue.length; i++) {
+      const [cx, cz] = vegQueue.shift();
+      buildVegChunk(cx, cz);
+    }
+    vegDirty = true;
+  }
+  if (vegDirty && vegChunkX !== null) { syncVegInstances(vegChunkX, vegChunkZ); vegDirty = false }
 }
 
 /* ═══════════════════ AIRFRAME SURFACE ═══════════════════ */
@@ -2088,6 +2416,12 @@ function updateWorldAnchors(elapsed){
   waterMat.uniforms.uTime.value = elapsed;
   water.position.x = camera.position.x; water.position.z = camera.position.z;
   sky.position.copy(camera.position);
+  // The Preetham model has no notion of the viewer's altitude, so climbing left the sky the
+  // same pale ground-level wash. Thinning the air above you as you climb deepens it the way
+  // it actually does.
+  const thin = 1 - THREE.MathUtils.clamp(camera.position.y / 9000, 0, .62);
+  sky.material.uniforms['turbidity'].value = SKY_TURBIDITY * thin;
+  sky.material.uniforms['rayleigh'].value = SKY_RAYLEIGH * thin;
   sunSprite.position.copy(_sunOffset.copy(sunDirection).multiplyScalar(20000).add(camera.position));
   sunLight.position.copy(_sunOffset.copy(sunDirection).multiplyScalar(1500).add(playerJet.position));
   sunLight.target.position.copy(playerJet.position);
@@ -2109,6 +2443,7 @@ function animate(){requestAnimationFrame(animate);
     syncParticleBatches();
     if(deathCamTimer<=0){document.getElementById('final-score').textContent=score;document.getElementById('game-over').style.display='flex'}
   }
+  stepVegetationBuild();
   updateWorldAnchors(elapsed);
   if(hitFlash>0){hitFlash-=1.2*dt;if(hitFlash<0)hitFlash=0}
   drawHUD();composer.render();}

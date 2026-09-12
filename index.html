@@ -505,7 +505,7 @@ THREE.Material.prototype.onBeforeCompile = function (shader, renderer) {
 /* ═══════════════════ LIGHTING ═══════════════════ */
 // Ambient comes almost entirely from the sky environment map; the explicit fills are only
 // there to keep shadowed faces from going black.
-scene.add(new THREE.HemisphereLight(0xaecfee, 0x4a4436, 0.35));
+scene.add(new THREE.HemisphereLight(0xaecfee, 0x4a4436, 0.62));
 const sunLight = new THREE.DirectionalLight(0xffd9b0, 3.4);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(2048, 2048);
@@ -563,6 +563,38 @@ const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularSh
 // density are unused - the overridden fog chunks call applyAerial() instead.
 scene.fog = new THREE.FogExp2(HAZE_SKY.getHex(), HAZE_DENSITY);
 
+// Soft cumulus shading drifting across the landscape. Two scrolling octaves of the same
+// tileable noise, thresholded to leave most of the ground lit.
+function createCloudShadowTexture() {
+  const S = 256;
+  const a = tileableFBM(S, 5, 2, 4242), b = tileableFBM(S, 4, 5, 991);
+  const data = new Uint8Array(S * S);
+  for (let i = 0; i < S * S; i++) {
+    const v = a[i] * .68 + b[i] * .32;
+    data[i] = Math.max(0, Math.min(255, THREE.MathUtils.smoothstep(v, .40, .72) * 255));
+  }
+  const tex = new THREE.DataTexture(data, S, S, THREE.RedFormat);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true; tex.needsUpdate = true;
+  return tex;
+}
+const cloudShadowTex = createCloudShadowTexture();
+// Shared so ground and sea are shaded by the same clouds; scrolled once per frame.
+const cloudShadowUniforms = {
+  uCloudShadow:    { value: cloudShadowTex },
+  uCloudShadowXf:  { value: new THREE.Vector3(0.000105, 0, 0) },  // scale, offsetX, offsetZ
+  uCloudShadowAmt: { value: 0.42 }
+};
+const CLOUD_SHADOW_GLSL = `
+uniform sampler2D uCloudShadow;
+uniform vec3 uCloudShadowXf;
+uniform float uCloudShadowAmt;
+float cloudShadowAt(vec2 worldXZ){
+  vec2 uv = worldXZ * uCloudShadowXf.x + uCloudShadowXf.yz;
+  return 1.0 - texture2D(uCloudShadow, uv).r * uCloudShadowAmt;
+}`;
+
 /* ═══════════════════ OCEAN ═══════════════════ */
 const WATER_LEVEL = 0;
 
@@ -595,7 +627,7 @@ const waterMat = new THREE.ShaderMaterial({
     uFoamColor:  { value: new THREE.Color(0xe9f2f5) },
     uOceanRadius:{ value: OCEAN_RADIUS },
     uPixelAngle: { value: 0.002 }
-  }, atmoUniforms),
+  }, cloudShadowUniforms, atmoUniforms),
   vertexShader: `
     uniform float uTime,uOceanRadius;uniform vec3 uCamPos;
     varying vec3 vWorldPos;varying vec2 vSwellGrad;
@@ -667,6 +699,7 @@ const waterMat = new THREE.ShaderMaterial({
     ${simplexGLSL}
     ${atmosphereGLSL}
     ${swellConstGLSL}
+    ${CLOUD_SHADOW_GLSL}
 
     // One ripple octave. Octaves that are too fine to resolve at this distance are faded out
     // of the normal and their slope energy is handed to roughness instead - that swap is what
@@ -782,7 +815,9 @@ const waterMat = new THREE.ShaderMaterial({
       float dd=NoH*NoH*(a2-1.)+1.;
       float D=a2/(3.14159265*dd*dd);
       float vis=.5/max(mix(2.*NoL*NoV,NoL+NoV,aP),1e-4);
-      vec3 sunSpec=vec3(1.,.94,.82)*min(D*energy*vis*NoL*SUN_IRRADIANCE,26.)*F;
+      // A cloud overhead takes the sun off the water: the glint goes, the sky reflection stays.
+      float cloudLit=cloudShadowAt(p0);
+      vec3 sunSpec=vec3(1.,.94,.82)*min(D*energy*vis*NoL*SUN_IRRADIANCE,26.)*F*cloudLit;
 
       // Depth-graded body colour: turquoise over the shelf, deep navy offshore.
       float dmix=1.-exp(-max(depth,0.)/115.);
@@ -796,7 +831,7 @@ const waterMat = new THREE.ShaderMaterial({
       float backlit=pow(max(dot(V,-L),0.),2.2);
       float crestLift=clamp((vSwellH+detail)*.13+.44,0.,1.);
       float sss=backlit*crestLift*.55+crestLift*max(NoL,0.)*.08;
-      body+=uSSSColor*sss*shoal;
+      body+=uSSSColor*sss*shoal*cloudLit;
 
       vec3 col=mix(body,refl,F)+sunSpec;
 
@@ -832,7 +867,7 @@ const waterMat = new THREE.ShaderMaterial({
       }
       // Foam is opaque white water - light it like a diffuse solid instead of desaturating
       // the sea towards grey.
-      vec3 foamLit=uFoamColor*(.40+.75*NoL)+skyDome(vec3(0.,1.,0.))*.15;
+      vec3 foamLit=uFoamColor*(.40+.75*NoL*cloudLit)+skyDome(vec3(0.,1.,0.))*.15;
       col=mix(col,foamLit,foam);
 
       // Wet-sand sheen right at the very edge.
@@ -887,7 +922,10 @@ function createCloudTexture(){
 }
 const cloudTex = createCloudTexture();
 const cloudClusters = [], cloudPuffs = [];
-const CLOUD_POOL = 110, CLOUD_RANGE = 11000, PUFFS_MAX = 11;
+// Fewer, far larger systems. Real fair-weather cumulus are one to three kilometres across
+// with a flat condensation base and a heaped crown; the previous field was a scatter of
+// 400 m puffs at random heights, which reads as smoke rather than cloud.
+const CLOUD_POOL = 80, CLOUD_RANGE = 8500, PUFFS_MAX = 16;
 const MAX_CLOUD_INSTANCES = CLOUD_POOL * PUFFS_MAX;
 const cloudGeometry = new THREE.PlaneGeometry(1, 1);
 const cloudOpacity = new THREE.InstancedBufferAttribute(new Float32Array(MAX_CLOUD_INSTANCES), 1);
@@ -901,9 +939,9 @@ cloudGeometry.setAttribute('iShade', cloudShade);
 const cloudMaterial = new THREE.ShaderMaterial({
   uniforms: Object.assign({
     uMap:      { value: cloudTex },
-    uLitColor: { value: new THREE.Color(0xfff4e2) },
-    uMidColor: { value: new THREE.Color(0xc8d2de) },
-    uDarkColor:{ value: new THREE.Color(0x76869b) }
+    uLitColor: { value: new THREE.Color(0xfffaf0) },
+    uMidColor: { value: new THREE.Color(0xbcc9d8) },
+    uDarkColor:{ value: new THREE.Color(0x71829a) }
   }, atmoUniforms),
   vertexShader:`attribute float iOpacity,iShade;
     varying vec2 vUv;varying float vOpacity,vShade,vDist;varying vec3 vWorldPos;
@@ -949,26 +987,29 @@ cloudMesh.renderOrder = 5;
 const cloudMatrix = new THREE.Matrix4();
 function createCloudCluster() {
   const cluster = { position:new THREE.Vector3() };
-  const cnt = 6 + Math.floor(Math.random() * (PUFFS_MAX - 5));
-  const spread = 420 + Math.random() * 700, lift = 150 + Math.random() * 260;
+  const cnt = 9 + Math.floor(Math.random() * (PUFFS_MAX - 8));
+  const spread = 460 + Math.pow(Math.random(), 1.7) * 1900;
+  const lift = spread * (.45 + Math.random() * .45);   // taller systems are also wider
   for (let i = 0; i < cnt; i++) {
-    // Big flat puffs low, smaller ones stacked on top: a cauliflower crown.
     const t = i / (cnt - 1);
-    const s = (1 - t * .45) * (spread * (.55 + Math.random() * .5));
+    // Heaped crown over a flat base: wide low puffs, smaller ones piled on top, and the
+    // lowest sitting on one condensation level rather than scattered through the layer.
+    const s = (1 - t * .42) * (spread * (.42 + Math.random() * .34));
+    const flat = t < .18 ? 1 : 0;
     cloudPuffs.push({ cluster, size:s,
-      opacity: .55 + Math.random() * .35,
-      shade: t * (.7 + Math.random() * .3),
+      opacity: .62 + Math.random() * .34,
+      shade: t * (.72 + Math.random() * .28),
       offset:new THREE.Vector3(
-        (Math.random()-.5) * spread * (1.35 - t),
-        t * lift + (Math.random()-.5) * 55,
-        (Math.random()-.5) * spread * (1.35 - t)) });
+        (Math.random()-.5) * spread * (1.25 - t * .7),
+        t * lift + (1 - flat) * (Math.random()-.5) * spread * .09,
+        (Math.random()-.5) * spread * (1.25 - t * .7)) });
   }
-  cluster.position.set((Math.random()-.5)*CLOUD_RANGE*2, 750+Math.random()*1900, (Math.random()-.5)*CLOUD_RANGE*2);
+  cluster.position.set((Math.random()-.5)*CLOUD_RANGE*2, 1080+Math.random()*220, (Math.random()-.5)*CLOUD_RANGE*2);
   return cluster;
 }
 function syncCloudInstances(){
   for(let i=0;i<cloudPuffs.length;i++){const puff=cloudPuffs[i],c=puff.cluster.position,o=puff.offset;
-    cloudMatrix.makeScale(puff.size,puff.size*.62,1).setPosition(c.x+o.x,c.y+o.y,c.z+o.z);
+    cloudMatrix.makeScale(puff.size,puff.size*.70,1).setPosition(c.x+o.x,c.y+o.y,c.z+o.z);
     cloudMesh.setMatrixAt(i,cloudMatrix);
     cloudOpacity.setX(i,puff.opacity);cloudShade.setX(i,puff.shade)}
   cloudMesh.count=cloudPuffs.length;
@@ -979,15 +1020,20 @@ function initClouds() {
   for (let i = 0; i < CLOUD_POOL; i++) cloudClusters.push(createCloudCluster());
   syncCloudInstances();
 }
-function updateClouds(px, pz) {
-  let moved=false;
-  for (const c of cloudClusters) { const dx=c.position.x-px, dz=c.position.z-pz;
-    if (dx*dx+dz*dz > CLOUD_RANGE*CLOUD_RANGE*4) {
-      const a=Math.random()*Math.PI*2, d=CLOUD_RANGE*.5+Math.random()*CLOUD_RANGE;
-      c.position.set(px+Math.cos(a)*d, 600+Math.random()*1800, pz+Math.sin(a)*d);moved=true;
+function updateClouds(px, pz, dt) {
+  // Ride the same wind the ground shadows are scrolled by, so a cloud and its shadow travel
+  // together rather than one sitting still while the other slides.
+  const wx = CLOUD_WIND.x * dt, wz = CLOUD_WIND.y * dt;
+  for (const c of cloudClusters) {
+    c.position.x += wx; c.position.z += wz;
+    const dx = c.position.x - px, dz = c.position.z - pz;
+    if (dx*dx + dz*dz > CLOUD_RANGE*CLOUD_RANGE*4) {
+      // Re-enter upwind so the field keeps drifting through rather than popping in ahead.
+      const a = Math.random()*Math.PI*2, d = CLOUD_RANGE*.5 + Math.random()*CLOUD_RANGE;
+      c.position.set(px + Math.cos(a)*d, 1080 + Math.random()*220, pz + Math.sin(a)*d);
     }
   }
-  if(moved)syncCloudInstances();
+  syncCloudInstances();
 }
 
 /* ═══════════════════ GROUND DETAIL TEXTURE ═══════════════════ */
@@ -1044,6 +1090,41 @@ function createGroundDetailTexture() {
 }
 const groundDetailTex = createGroundDetailTexture();
 
+// Bedrock reads differently from soil: bedding planes and fracture rather than blotchy
+// grain. Stretching one squashed noise over both is a large part of why cliffs looked like
+// smeared paint.
+function createRockDetailTexture() {
+  const S = 512, BUMP = 78;
+  const strata = tileableFBM(S, 5, 2, 5309), fracture = tileableFBM(S, 6, 6, 88231);
+  const h = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const i = y * S + x;
+    // Compress vertically into bands, then break them with fracture noise.
+    const band = strata[((y * 5) % S) * S + x];
+    h[i] = band * .58 + fracture[i] * .42;
+  }
+  const data = new Uint8Array(S * S * 4);
+  const c255 = v => v < 0 ? 0 : v > 255 ? 255 : v;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const i = y * S + x;
+    const nx = (h[y * S + ((x - 1 + S) % S)] - h[y * S + ((x + 1) % S)]) * BUMP;
+    const ny = (h[((y - 1 + S) % S) * S + x] - h[((y + 1) % S) * S + x]) * BUMP;
+    data[i*4] = c255((nx * .5 + .5) * 255);
+    data[i*4+1] = c255((ny * .5 + .5) * 255);
+    data[i*4+2] = c255(h[i] * 255);            // albedo variation
+    data[i*4+3] = c255(fracture[i] * 255);     // roughness variation
+  }
+  const tex = new THREE.DataTexture(data, S, S, THREE.RGBAFormat);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  tex.repeat.set(3, 3);
+  tex.needsUpdate = true;
+  return tex;
+}
+const rockDetailTex = createRockDetailTexture();
+
 /* ═══════════════════ TERRAIN ═══════════════════ */
 const CHUNK_SIZE = 1000, CHUNK_HALF = 12;
 // Four LOD rings: real relief underfoot, cheap silhouettes at the horizon.
@@ -1052,38 +1133,73 @@ const chunkSegFor = d => { for (const [maxD, seg] of CHUNK_LOD) if (d <= maxD) r
 const terrainChunks = new Map();
 
 const terrainMaterial = new THREE.MeshStandardMaterial({
-  vertexColors: true, roughness: .93, metalness: 0, envMapIntensity: .55
+  vertexColors: true, roughness: .93, metalness: 0, envMapIntensity: .75
 });
 terrainMaterial.userData.detailUniforms = {
   uGroundDetail: { value: groundDetailTex },
+  uRockDetail:   { value: rockDetailTex },
   uDetailScale:  { value: new THREE.Vector2(.021, .0027) },
-  uDetailBump:   { value: new THREE.Vector2(.85, .55) }
+  uDetailBump:   { value: new THREE.Vector2(.85, .55) },
+  uRockScale:    { value: .034 },
+  uRockBump:     { value: 1.35 }
 };
 terrainMaterial.onBeforeCompile = (shader) => {
-  Object.assign(shader.uniforms, atmoUniforms, terrainMaterial.userData.detailUniforms);
+  Object.assign(shader.uniforms, atmoUniforms, cloudShadowUniforms,
+                terrainMaterial.userData.detailUniforms);
   shader.vertexShader = shader.vertexShader
-    .replace('#include <common>', '#include <common>\nvarying vec3 vGroundWorld;')
+    .replace('#include <common>',
+      '#include <common>\nvarying vec3 vGroundWorld;\nattribute float aSunVis;\nvarying float vSunVis;')
     .replace('#include <begin_vertex>',
-      '#include <begin_vertex>\nvGroundWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      '#include <begin_vertex>\nvGroundWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvSunVis = aSunVis;');
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', `#include <common>
       varying vec3 vGroundWorld;
-      uniform sampler2D uGroundDetail;
-      uniform vec2 uDetailScale, uDetailBump;`)
+      varying float vSunVis;
+      uniform sampler2D uGroundDetail, uRockDetail;
+      uniform vec2 uDetailScale, uDetailBump;
+      uniform float uRockScale, uRockBump;
+      ${CLOUD_SHADOW_GLSL}
+      // Projecting along XZ leaves a vertical face sampling one line of texels smeared down
+      // its whole height. Blending the three axis projections by the surface normal keeps the
+      // texel density even however steep the ground gets.
+      vec4 triplanar(sampler2D t, vec3 p, vec3 n, float scale){
+        vec3 w = pow(abs(n), vec3(4.0));
+        w /= (w.x + w.y + w.z);
+        return texture2D(t, p.zy * scale) * w.x
+             + texture2D(t, p.xz * scale) * w.y
+             + texture2D(t, p.xy * scale) * w.z;
+      }`)
+    .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+      // Baked ridge shadow: attenuate the direct sun only, leaving sky and bounce intact.
+      reflectedLight.directDiffuse *= vSunVis;
+      reflectedLight.directSpecular *= vSunVis;`)
     .replace('#include <color_fragment>', `#include <color_fragment>
+      // Geometric normal, before any detail perturbation, decides how steep this ground is.
+      vec3 gdGeo = normalize(vNormal * mat3(viewMatrix));
+      float gdRock = smoothstep(.62, .90, 1.0 - abs(gdGeo.y));
       vec4 gdFine  = texture2D(uGroundDetail, vGroundWorld.xz * uDetailScale.x);
       vec4 gdMacro = texture2D(uGroundDetail, vGroundWorld.xz * uDetailScale.y);
+      vec4 gdRockT = vec4(.5, .5, .5, .5);
+      if (gdRock > .01) gdRockT = triplanar(uRockDetail, vGroundWorld, gdGeo, uRockScale);
       // Break up the flat vertex-colour bands with two scales of blotching.
-      diffuseColor.rgb *= mix(.74, 1.26, gdMacro.b) * mix(.86, 1.14, gdFine.a);`)
+      diffuseColor.rgb *= mix(.74, 1.26, gdMacro.b) * mix(.86, 1.14, gdFine.a);
+      diffuseColor.rgb *= mix(1.0, mix(.72, 1.30, gdRockT.b), gdRock);
+      diffuseColor.rgb *= cloudShadowAt(vGroundWorld.xz);`)
     .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-      roughnessFactor *= mix(.88, 1.08, gdFine.b);`)
+      roughnessFactor *= mix(.88, 1.08, gdFine.b);
+      roughnessFactor *= mix(1.0, mix(.86, 1.04, gdRockT.a), gdRock);`)
     .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
       {
         // Perturb in world space, then convert back: mip-filtering flattens the bump with
         // distance on its own, so nothing shimmers on far ridgelines.
         vec3 gdN = normalize(normal * mat3(viewMatrix));
         vec2 gdP = (gdFine.rg * 2.0 - 1.0) * uDetailBump.x + (gdMacro.rg * 2.0 - 1.0) * uDetailBump.y;
-        gdN = normalize(gdN + vec3(gdP.x, 0.0, gdP.y));
+        gdP *= 1.0 - gdRock * .75;                       // soil detail gives way to bedrock
+        vec2 gdR = (gdRockT.rg * 2.0 - 1.0) * uRockBump * gdRock;
+        // Rock relief is applied across the two axes the face actually spans.
+        vec3 gdTan = normalize(cross(gdGeo, vec3(0.0, 1.0, 0.0)) + vec3(1e-4, 0.0, 0.0));
+        vec3 gdBit = cross(gdGeo, gdTan);
+        gdN = normalize(gdN + vec3(gdP.x, 0.0, gdP.y) + gdTan * gdR.x + gdBit * gdR.y);
         normal = normalize(mat3(viewMatrix) * gdN);
       }`);
 };
@@ -1144,6 +1260,31 @@ function setTerrainColor(colors, offset, y, ny, wx, wz) {
   colors[offset] = _bc.r; colors[offset+1] = _bc.g; colors[offset+2] = _bc.b;
 }
 
+// Highest the noise can reach: 500 + 200 + 60 + 15. Once a ray clears this it can no longer
+// be blocked, which bounds the march.
+const TERRAIN_CEILING = 775;
+// Mountains casting shadows into their own valleys is most of what makes a landscape read as
+// real, and nothing here was doing it - terrain was excluded from the shadow map entirely.
+// A shadow map big enough to cover a 12 km view would be uselessly coarse, and cascades would
+// mean re-rendering 600+ chunks per cascade every frame. The sun never moves, so instead each
+// vertex marches toward it once at build time and stores how much of the disc it can see.
+function sunVisibility(wx, wz, h) {
+  const sx = sunDirection.x, sy = sunDirection.y, sz = sunDirection.z;
+  let t = 26, softest = 1;
+  for (let i = 0; i < 17; i++) {
+    const py = h + sy * t;
+    if (py > TERRAIN_CEILING) break;               // ray is clear of every possible ridge
+    const gap = py - terrainRaw(wx + sx * t, wz + sz * t);
+    if (gap <= 0) return 0;
+    // Ratio of clearance to distance approximates the penumbra of a finite sun disc, so
+    // ridge shadows arrive with a soft edge instead of a hard stencil.
+    const soft = gap * 55 / t;
+    if (soft < softest) softest = soft;
+    t *= 1.42;
+  }
+  return softest < 1 ? softest : 1;
+}
+
 function createTerrainChunk(cx, cz, seg) {
   const key = `${cx},${cz}`;
   const existing = terrainChunks.get(key);
@@ -1159,26 +1300,50 @@ function createTerrainChunk(cx, cz, seg) {
   }
   geo.computeVertexNormals();
   const colors = new Float32Array(pos.count*3), normals = geo.attributes.normal;
-  for (let i = 0; i < pos.count; i++)
-    setTerrainColor(colors, i*3, pos.getY(i), normals.getY(i),
-                    pos.getX(i)+cx*CHUNK_SIZE, pos.getZ(i)+cz*CHUNK_SIZE);
+  const sunVis = new Float32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const wx = pos.getX(i)+cx*CHUNK_SIZE, wz = pos.getZ(i)+cz*CHUNK_SIZE, y = pos.getY(i);
+    setTerrainColor(colors, i*3, y, normals.getY(i), wx, wz);
+    sunVis[i] = sunVisibility(wx, wz, y);
+  }
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute('aSunVis', new THREE.BufferAttribute(sunVis, 1));
   const mesh = new THREE.Mesh(geo, terrainMaterial);
   mesh.position.set(cx*CHUNK_SIZE, 0, cz*CHUNK_SIZE);
   mesh.receiveShadow = true; mesh.castShadow = false;
   mesh.userData.seg = seg;
   scene.add(mesh); terrainChunks.set(key, mesh);
 }
+// Baking the sun march makes a near chunk cost a few milliseconds, and a boundary crossing
+// re-tiers dozens of them at once. Queue the work nearest-first and spend a fixed slice of
+// each frame on it; the old chunk stays on screen until its replacement is ready, so raising
+// detail never opens a hole.
+const terrainQueue = [];
+function stepTerrainBuild() {
+  if (!terrainQueue.length) return;
+  const deadline = performance.now() + 4;
+  while (terrainQueue.length && performance.now() < deadline) {
+    const job = terrainQueue.shift();
+    createTerrainChunk(job[0], job[1], job[2]);
+  }
+}
 function updateTerrain(px, pz) {
   const pcx = Math.round(px/CHUNK_SIZE), pcz = Math.round(pz/CHUNK_SIZE);
   if (pcx === terrainChunkX && pcz === terrainChunkZ) return;
+  const first = terrainChunkX === null;
   const needed = new Set();
+  terrainQueue.length = 0;
   for (let dx = -CHUNK_HALF; dx <= CHUNK_HALF; dx++)
     for (let dz = -CHUNK_HALF; dz <= CHUNK_HALF; dz++) {
-      const cx = pcx+dx, cz = pcz+dz;
-      needed.add(`${cx},${cz}`);
-      createTerrainChunk(cx, cz, chunkSegFor(Math.max(Math.abs(dx), Math.abs(dz))));
+      const cx = pcx+dx, cz = pcz+dz, key = `${cx},${cz}`;
+      needed.add(key);
+      const seg = chunkSegFor(Math.max(Math.abs(dx), Math.abs(dz)));
+      const have = terrainChunks.get(key);
+      if (have && have.userData.seg === seg) continue;
+      if (first) createTerrainChunk(cx, cz, seg);
+      else terrainQueue.push([cx, cz, seg, dx*dx + dz*dz]);
     }
+  terrainQueue.sort((a, b) => a[3] - b[3]);      // ground underfoot first
   for (const [key, mesh] of terrainChunks)
     if (!needed.has(key)) { scene.remove(mesh); mesh.geometry.dispose(); terrainChunks.delete(key) }
   terrainChunkX = pcx; terrainChunkZ = pcz;
@@ -1227,7 +1392,7 @@ const vegMaterial = new THREE.ShaderMaterial({
     uMap:      { value: canopyTex },
     uFadeNear: { value: VEG_FADE_NEAR },
     uFadeFar:  { value: VEG_FADE_FAR }
-  }, atmoUniforms),
+  }, atmoUniforms, cloudShadowUniforms),
   vertexShader: `attribute vec3 iTint;
     varying vec2 vUv;varying vec3 vTint,vWorldPos;varying float vDist;
     void main(){vUv=uv;vTint=iTint;
@@ -1241,6 +1406,7 @@ const vegMaterial = new THREE.ShaderMaterial({
   fragmentShader: `uniform sampler2D uMap;uniform float uFadeNear,uFadeFar;
     varying vec2 vUv;varying vec3 vTint,vWorldPos;varying float vDist;
     ${atmosphereGLSL}
+    ${CLOUD_SHADOW_GLSL}
     void main(){
       vec4 tex=texture2D(uMap,vUv);
       float a=tex.a*(1.-smoothstep(uFadeNear,uFadeFar,vDist));
@@ -1252,7 +1418,7 @@ const vegMaterial = new THREE.ShaderMaterial({
       float NoL=dot(nWorld,uSunDir);
       // Dense scatterer: a strong sky-ambient floor plus the directional term, so a clump
       // sits at roughly the brightness of the ground it grows on.
-      vec3 col=vTint*tex.r*(.72+.95*max(NoL,0.)+.18*max(-NoL,0.));
+      vec3 col=vTint*tex.r*(.72+.95*max(NoL,0.)*cloudShadowAt(vWorldPos.xz)+.18*max(-NoL,0.));
       col=applyAerial(col,uCamPos,normalize(vWorldPos-uCamPos),vDist);
       gl_FragColor=vec4(col*a,a);   // premultiplied
     }`,
@@ -2410,7 +2576,14 @@ updateTerrain(0,0);initClouds();
 // Everything that has to sit on top of the viewer: the ocean grid, the sky dome, the sun,
 // the shadow frustum, and the camera position every atmosphere shader reads from.
 const _sunOffset = new THREE.Vector3();
+// Prevailing wind. The clouds ride it and their shadows track them across the ground, which
+// is most of what gives a landscape this size a sense of scale and weather.
+const CLOUD_WIND = new THREE.Vector2(11.5, -6.2);
 function updateWorldAnchors(elapsed){
+  cloudShadowUniforms.uCloudShadowXf.value.set(
+    0.000105,
+    -CLOUD_WIND.x * elapsed * 0.000105,
+    -CLOUD_WIND.y * elapsed * 0.000105);
   atmoUniforms.uCamPos.value.copy(camera.position);
   gradePass.uniforms.uTime.value = elapsed;
   waterMat.uniforms.uTime.value = elapsed;
@@ -2433,7 +2606,7 @@ function animate(){requestAnimationFrame(animate);
     gameTime+=dt;updatePlayer(dt);updateEnemies(dt);updateBullets(dt);updateMissiles(dt);
     updateParticles(dt);updateDebris(dt);updateSpeedLines(dt);updateContrails(dt);
     updateKillNotifications(dt);updateThreatDetection();updateCamera(dt);
-    updateTerrain(playerJet.position.x,playerJet.position.z);updateClouds(playerJet.position.x,playerJet.position.z);
+    updateTerrain(playerJet.position.x,playerJet.position.z);updateClouds(playerJet.position.x,playerJet.position.z,dt);
     checkGameOver();
     syncParticleBatches();
   } else if(gameOver&&deathCamTimer>0){
@@ -2443,6 +2616,7 @@ function animate(){requestAnimationFrame(animate);
     syncParticleBatches();
     if(deathCamTimer<=0){document.getElementById('final-score').textContent=score;document.getElementById('game-over').style.display='flex'}
   }
+  stepTerrainBuild();
   stepVegetationBuild();
   updateWorldAnchors(elapsed);
   if(hitFlash>0){hitFlash-=1.2*dt;if(hitFlash<0)hitFlash=0}

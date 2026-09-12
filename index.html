@@ -82,7 +82,6 @@ class SimplexNoise{constructor(seed=Math.random()){this.grad3=[[1,1,0],[-1,1,0],
 const simplex = new SimplexNoise(42);
 
 /* ═══════════════════ PROCEDURAL TEXTURES ═══════════════════ */
-function createCloudTexture(){const s=256,c=document.createElement('canvas');c.width=s;c.height=s;const ctx=c.getContext('2d');const dp=(x,y,r,a)=>{const g=ctx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,`rgba(255,255,255,${a})`);g.addColorStop(.5,`rgba(240,245,255,${a*.4})`);g.addColorStop(1,'rgba(220,230,255,0)');ctx.fillStyle=g;ctx.fillRect(0,0,s,s)};dp(128,128,90,.7);dp(90,120,65,.5);dp(170,125,70,.5);dp(115,90,55,.4);dp(145,150,60,.4);dp(80,145,45,.3);dp(175,95,50,.3);const tex=new THREE.CanvasTexture(c);tex.premultiplyAlpha=true;return tex}
 function createSunGlowTexture(){const s=256,c=document.createElement('canvas');c.width=s;c.height=s;const ctx=c.getContext('2d');const g=ctx.createRadialGradient(128,128,0,128,128,128);g.addColorStop(0,'rgba(255,255,240,1)');g.addColorStop(.15,'rgba(255,230,180,0.7)');g.addColorStop(.4,'rgba(255,200,100,0.2)');g.addColorStop(.7,'rgba(255,150,50,0.05)');g.addColorStop(1,'rgba(255,100,20,0)');ctx.fillStyle=g;ctx.fillRect(0,0,s,s);return new THREE.CanvasTexture(c)}
 
 /* ═══════════════════ SOUND ENGINE ═══════════════════ */
@@ -294,58 +293,233 @@ renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-pe
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.6;
+renderer.toneMappingExposure = 0.66;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
-composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, { type: THREE.HalfFloatType }));
+/* ═══════════════════ POST PROCESSING ═══════════════════ */
+// Photographic finish applied after tone mapping: lens falloff, a touch of lateral
+// chromatic aberration, a gentle S-curve, and fine grain to keep sky gradients from banding.
+const GradeShader = {
+  uniforms: {
+    tDiffuse:   { value: null },
+    uResolution:{ value: new THREE.Vector2(1, 1) },
+    uVignette:  { value: .34 },
+    uAberration:{ value: .0030 },
+    uContrast:  { value: 1.07 },
+    uSaturation:{ value: 1.12 },
+    uGrain:     { value: .016 },
+    uTime:      { value: 0 }
+  },
+  vertexShader: `varying vec2 vUv;
+    void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+  fragmentShader: `uniform sampler2D tDiffuse;uniform vec2 uResolution;
+    uniform float uVignette,uAberration,uContrast,uSaturation,uGrain,uTime;
+    varying vec2 vUv;
+    void main(){
+      vec2 c=vUv-.5;float r2=dot(c,c);
+      vec2 off=c*r2*uAberration;
+      vec3 col=vec3(texture2D(tDiffuse,vUv+off).r,
+                    texture2D(tDiffuse,vUv).g,
+                    texture2D(tDiffuse,vUv-off).b);
+      col=clamp((col-.5)*uContrast+.5,0.,1.);
+      col=mix(vec3(dot(col,vec3(.2126,.7152,.0722))),col,uSaturation);
+      col*=1.-uVignette*smoothstep(.15,.95,r2*2.);
+      float g=fract(sin(dot(vUv*uResolution+uTime,vec2(12.9898,78.233)))*43758.5453);
+      col+=(g-.5)*uGrain;
+      gl_FragColor=vec4(col,1.);
+    }`
+};
+
+// Post runs at the drawing-buffer resolution. The composer used to sit at CSS pixels while
+// the canvas was at 2x, so the whole frame was rendered at half res and upscaled.
+const POST_RATIO = Math.min(window.devicePixelRatio, 1.5);
+composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(
+  Math.round(window.innerWidth * POST_RATIO), Math.round(window.innerHeight * POST_RATIO),
+  { type: THREE.HalfFloatType }));
+composer.setPixelRatio(POST_RATIO);
 composer.addPass(new RenderPass(scene, camera));
-const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.2, 0.3, 0.92);
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.30, 0.55, 1.05);
 composer.addPass(bloomPass);
-const fxaaPass = new ShaderPass(FXAAShader);
-fxaaPass.uniforms['resolution'].value.set(1/window.innerWidth, 1/window.innerHeight);
-composer.addPass(fxaaPass);
 composer.addPass(new OutputPass());
+// FXAA belongs after tone mapping: it is a gamma-space filter and misreads linear HDR.
+const fxaaPass = new ShaderPass(FXAAShader);
+composer.addPass(fxaaPass);
+const gradePass = new ShaderPass(GradeShader);
+composer.addPass(gradePass);
+function syncPostResolution(w, h) {
+  const bw = Math.round(w * POST_RATIO), bh = Math.round(h * POST_RATIO);
+  fxaaPass.uniforms['resolution'].value.set(1 / bw, 1 / bh);
+  gradePass.uniforms['uResolution'].value.set(bw, bh);
+}
+syncPostResolution(window.innerWidth, window.innerHeight);
 window.addEventListener('resize', () => {
   const w = window.innerWidth, h = window.innerHeight;
   camera.aspect = w / h; camera.updateProjectionMatrix();
   renderer.setSize(w, h); composer.setSize(w, h);
-  fxaaPass.uniforms['resolution'].value.set(1/w, 1/h); resizeHUD();
+  syncPostResolution(w, h); resizeHUD();
 });
 
+/* ═══════════════════ SHARED GLSL: SIMPLEX (matches SimplexNoise above) ═══════════════════ */
+// The permutation table is uploaded as vec4[64] so both vertex and fragment stages can
+// evaluate the *exact* same terrain height the CPU uses for collision. That is what lets
+// the ocean know where the coastline is.
+const permUniform = (() => {
+  const v = [];
+  for (let i = 0; i < 64; i++) v.push(new THREE.Vector4(
+    simplex.p[i*4], simplex.p[i*4+1], simplex.p[i*4+2], simplex.p[i*4+3]));
+  return v;
+})();
+
+const simplexGLSL = `
+uniform vec4 uPerm[64];
+float permAt(float i){
+  float k=mod(i,256.);int idx=int(k*.25);vec4 q=uPerm[idx];float c=mod(k,4.);
+  return c<1.?q.x:(c<2.?q.y:(c<3.?q.z:q.w));
+}
+float gradDot(float k,float x,float y){
+  float s1=1.-2.*mod(k,2.),s2=1.-2.*mod(floor(k*.5),2.);
+  if(k<4.)return s1*x+s2*y;
+  if(k<8.)return s1*x;
+  return s1*y;
+}
+float snoise(vec2 v){
+  const float F2=0.3660254037844386,G2=0.21132486540518713;
+  float s=(v.x+v.y)*F2,i=floor(v.x+s),j=floor(v.y+s),t=(i+j)*G2;
+  float x0=v.x-(i-t),y0=v.y-(j-t);
+  float i1=x0>y0?1.:0.,j1=1.-i1;
+  float x1=x0-i1+G2,y1=y0-j1+G2,x2=x0-1.+2.*G2,y2=y0-1.+2.*G2;
+  float ii=mod(i,256.),jj=mod(j,256.);
+  float gi0=mod(permAt(ii+permAt(jj)),12.);
+  float gi1=mod(permAt(ii+i1+permAt(jj+j1)),12.);
+  float gi2=mod(permAt(ii+1.+permAt(jj+1.)),12.);
+  float n0=0.,n1=0.,n2=0.,t0=.5-x0*x0-y0*y0;
+  if(t0>=0.){t0*=t0;n0=t0*t0*gradDot(gi0,x0,y0);}
+  float t1=.5-x1*x1-y1*y1;
+  if(t1>=0.){t1*=t1;n1=t1*t1*gradDot(gi1,x1,y1);}
+  float t2=.5-x2*x2-y2*y2;
+  if(t2>=0.){t2*=t2;n2=t2*t2*gradDot(gi2,x2,y2);}
+  return 70.*(n0+n1+n2);
+}
+float terrainRawGLSL(vec2 p){
+  float coarse=snoise(p*.00025)*500.+snoise(p*.0006)*200.;
+  if(coarse<-500.||coarse>260.)return coarse;
+  return coarse+snoise(p*.002)*60.+snoise(p*.008)*15.;
+}`;
+
+/* ═══════════════════ ATMOSPHERE ═══════════════════ */
+// One physically-shaped aerial-perspective model shared by *every* surface in the scene:
+// exponential height fog (so the haze thins as you climb instead of drowning the world in
+// white), inscatter that warms towards the sun, and a ground-bounce tint looking down.
+const SUN_ELEVATION = 21, SUN_AZIMUTH = 205;
+sunDirection.setFromSphericalCoords(1, THREE.MathUtils.degToRad(90 - SUN_ELEVATION), THREE.MathUtils.degToRad(SUN_AZIMUTH));
+
+const HAZE_SKY    = new THREE.Color(0x8fadc9);
+const HAZE_SUN    = new THREE.Color(0xffc98f);
+const HAZE_GROUND = new THREE.Color(0x7e8f9e);
+const HAZE_DENSITY = 0.000052, HAZE_HEIGHT = 1100, HAZE_BASE = 0;
+
+const atmoUniforms = {
+  uCamPos:     { value: new THREE.Vector3() },
+  uSunDir:     { value: sunDirection },
+  uHazeSky:    { value: HAZE_SKY },
+  uHazeSun:    { value: HAZE_SUN },
+  uHazeGround: { value: HAZE_GROUND },
+  uHazeDensity:{ value: HAZE_DENSITY },
+  uHazeHeight: { value: HAZE_HEIGHT },
+  uHazeBase:   { value: HAZE_BASE },
+  uPerm:       { value: permUniform }
+};
+
+const atmosphereGLSL = `
+uniform vec3 uCamPos,uSunDir,uHazeSky,uHazeSun,uHazeGround;
+uniform float uHazeDensity,uHazeHeight,uHazeBase;
+// Closed-form optical depth through an exponentially stratified atmosphere.
+float aerialDepth(float camY,float rayY,float dist){
+  float H=uHazeHeight;
+  float base=exp(-max(camY-uHazeBase,0.)/H);
+  float ry=(rayY>=0.?1.:-1.)*max(abs(rayY),1e-3);
+  return uHazeDensity*base*(H/ry)*(1.-exp(-ry*dist/H));
+}
+vec3 hazeColor(vec3 rayDir){
+  float sunAmt=max(dot(rayDir,uSunDir),0.);
+  vec3 h=mix(uHazeSky,uHazeSun,pow(sunAmt,8.)*.72);
+  return mix(h,uHazeGround,clamp(-rayDir.y,0.,1.)*.35);
+}
+vec3 applyAerial(vec3 color,vec3 camPos,vec3 rayDir,float dist){
+  float od=aerialDepth(camPos.y,rayDir.y,dist);
+  float f=1.-exp(-od*od);
+  return mix(color,hazeColor(rayDir),clamp(f,0.,1.));
+}
+float aerialTransmittance(vec3 camPos,vec3 rayDir,float dist){
+  float od=aerialDepth(camPos.y,rayDir.y,dist);
+  return exp(-od*od);
+}`;
+
+// Give every fog-enabled material the shared atmosphere, and run it *before* tone mapping
+// so haze participates in exposure and bloom instead of being pasted on in display space.
+THREE.ShaderChunk.fog_pars_vertex = `#ifdef USE_FOG
+  varying vec3 vFogViewPos;
+#endif`;
+THREE.ShaderChunk.fog_vertex = `#ifdef USE_FOG
+  vFogViewPos = mvPosition.xyz;
+#endif`;
+THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
+  uniform vec3 fogColor;
+  varying vec3 vFogViewPos;
+  ${atmosphereGLSL}
+#endif`;
+THREE.ShaderChunk.fog_fragment = ``;
+THREE.ShaderChunk.tonemapping_fragment = `
+#ifdef USE_FOG
+  {
+    float aerialDist = length(vFogViewPos);
+    vec3 aerialRay = normalize(vFogViewPos * mat3(viewMatrix));
+    gl_FragColor.rgb = applyAerial(gl_FragColor.rgb, cameraPosition, aerialRay, aerialDist);
+  }
+#endif
+#if defined( TONE_MAPPING )
+  gl_FragColor.rgb = toneMapping( gl_FragColor.rgb );
+#endif`;
+
+const _baseOnBeforeCompile = THREE.Material.prototype.onBeforeCompile;
+THREE.Material.prototype.onBeforeCompile = function (shader, renderer) {
+  if (this.fog) for (const k in atmoUniforms) shader.uniforms[k] = atmoUniforms[k];
+  _baseOnBeforeCompile.call(this, shader, renderer);
+};
+
 /* ═══════════════════ LIGHTING ═══════════════════ */
-scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a5f0b, 0.5));
-scene.add(new THREE.AmbientLight(0x304050, 0.4));
-const sunLight = new THREE.DirectionalLight(0xfff0dd, 2.0);
+// Ambient comes almost entirely from the sky environment map; the explicit fills are only
+// there to keep shadowed faces from going black.
+scene.add(new THREE.HemisphereLight(0xaecfee, 0x4a4436, 0.35));
+const sunLight = new THREE.DirectionalLight(0xffd9b0, 3.4);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(2048, 2048);
-sunLight.shadow.camera.near = 10; sunLight.shadow.camera.far = 3000;
-sunLight.shadow.camera.left = -500; sunLight.shadow.camera.right = 500;
-sunLight.shadow.camera.top = 500; sunLight.shadow.camera.bottom = -500;
-sunLight.shadow.bias = -0.001;
+sunLight.shadow.camera.near = 10; sunLight.shadow.camera.far = 4000;
+sunLight.shadow.camera.left = -900; sunLight.shadow.camera.right = 900;
+sunLight.shadow.camera.top = 900; sunLight.shadow.camera.bottom = -900;
+sunLight.shadow.bias = -0.0006; sunLight.shadow.normalBias = 1.2;
 scene.add(sunLight); scene.add(sunLight.target);
 
 /* ═══════════════════ ATMOSPHERIC SKY ═══════════════════ */
-const phi = THREE.MathUtils.degToRad(35), theta = THREE.MathUtils.degToRad(200);
-sunDirection.setFromSphericalCoords(1, phi, theta);
 function configureSky(skyObject) {
   const uniforms = skyObject.material.uniforms;
-  uniforms['turbidity'].value = 1.5;
-  uniforms['rayleigh'].value = 0.8;
-  uniforms['mieCoefficient'].value = 0.003;
-  uniforms['mieDirectionalG'].value = 0.8;
+  uniforms['turbidity'].value = 3.2;
+  uniforms['rayleigh'].value = 2.1;
+  uniforms['mieCoefficient'].value = 0.006;
+  uniforms['mieDirectionalG'].value = 0.82;
   uniforms['sunPosition'].value.copy(sunDirection);
 }
-const sky = new Sky(); sky.scale.setScalar(45000); configureSky(sky); scene.add(sky);
+const sky = new Sky(); sky.scale.setScalar(44000); configureSky(sky); scene.add(sky);
 sunLight.position.copy(sunDirection.clone().multiplyScalar(2000));
 
 const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({
-  map: createSunGlowTexture(), color: 0xffffee, transparent: true, opacity: 0.4,
-  blending: THREE.AdditiveBlending, depthWrite: false
+  map: createSunGlowTexture(), color: 0xfff0d8, transparent: true, opacity: 0.55,
+  blending: THREE.AdditiveBlending, depthWrite: false, fog: false
 }));
-sunSprite.scale.set(800, 800, 1);
+sunSprite.scale.set(2600, 2600, 1);
 sunSprite.position.copy(sunDirection.clone().multiplyScalar(20000));
 scene.add(sunSprite);
 
@@ -355,42 +529,190 @@ const pmrem = new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularSh
   scene.environment = pmrem.fromScene(ts, 0, .01, 1000).texture;
   sk.geometry.dispose(); sk.material.dispose(); pmrem.dispose(); }
 
-const fogColor = 0x6a8fba, FOG_DENSITY = 0.00008;
-scene.fog = new THREE.FogExp2(fogColor, FOG_DENSITY);
+// scene.fog exists only so THREE compiles USE_FOG into every material; its colour and
+// density are unused - the overridden fog chunks call applyAerial() instead.
+scene.fog = new THREE.FogExp2(HAZE_SKY.getHex(), HAZE_DENSITY);
 
-/* ═══════════════════ WATER SHADER ═══════════════════ */
-const alphaHashShader=`float alphaHash(vec2 p,float seed){
-  return fract(52.9829189*fract(dot(p+vec2(seed,seed*1.61803),vec2(.06711056,.00583715))));
-}`;
+/* ═══════════════════ OCEAN ═══════════════════ */
+const WATER_LEVEL = 0;
+
+// Camera-centred grid warped so vertices bunch up near the aircraft: real wave shape
+// underneath you, huge cheap quads out at the horizon, and no uniform-grid aliasing.
+function createOceanGeometry(segments, radius, falloff) {
+  const g = new THREE.PlaneGeometry(2, 2, segments, segments); g.rotateX(-Math.PI / 2);
+  const pos = g.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const u = pos.getX(i), v = pos.getZ(i), m = Math.max(Math.abs(u), Math.abs(v));
+    if (m < 1e-6) continue;
+    const k = Math.pow(m, falloff) / m * radius;
+    pos.setX(i, u * k); pos.setZ(i, v * k);
+  }
+  pos.needsUpdate = true; g.computeBoundingSphere(); return g;
+}
+
+const OCEAN_RADIUS = 40000;
 const waterMat = new THREE.ShaderMaterial({
-  side:THREE.DoubleSide,depthWrite:true,blending:THREE.NoBlending,
-  uniforms: { uTime:{value:0}, uSunDir:{value:sunDirection.clone()}, uSkyColor:{value:new THREE.Color(0x4a80b8)},
-    uDeepColor:{value:new THREE.Color(0x001020)}, uShallowColor:{value:new THREE.Color(0x0a4060)},
-    uFogColor:{value:new THREE.Color(fogColor)}, uFogDensity:{value:FOG_DENSITY}, uCamPos:{value:new THREE.Vector3()} },
-  vertexShader:`uniform float uTime;varying vec3 vWP;varying vec3 vN;varying float vFD;
-    float wg(vec2 p,float t,float f,float s,vec2 d,float a,inout vec2 gradient){
-      float phase=dot(p,d)*f+t*s;gradient+=cos(phase)*f*d*a;return sin(phase)*a;
+  side: THREE.FrontSide, depthWrite: true, blending: THREE.NoBlending, fog: false,
+  uniforms: Object.assign({
+    uTime:       { value: 0 },
+    uZenith:     { value: new THREE.Color(0x4a7cb8) },
+    uHorizon:    { value: new THREE.Color(0xa9c4dc) },
+    uSunGlow:    { value: new THREE.Color(0xffd9a8) },
+    uDeepColor:  { value: new THREE.Color(0x0a3050) },
+    uMidColor:   { value: new THREE.Color(0x13627f) },
+    uShoalColor: { value: new THREE.Color(0x2f9c9e) },
+    uSSSColor:   { value: new THREE.Color(0x1f8a70) },
+    uFoamColor:  { value: new THREE.Color(0xe9f2f5) },
+    uOceanRadius:{ value: OCEAN_RADIUS }
+  }, atmoUniforms),
+  vertexShader: `
+    uniform float uTime,uOceanRadius;uniform vec3 uCamPos;
+    varying vec3 vWorldPos;varying vec2 vSwellGrad;
+    varying float vViewDist,vSwellH,vDepth,vEdge;
+    ${simplexGLSL}
+    float swell(vec2 p,float t,float freq,float speed,vec2 dir,float amp,inout vec2 grad){
+      float ph=dot(p,dir)*freq+t*speed;
+      grad+=cos(ph)*freq*dir*amp;
+      return sin(ph)*amp;
     }
-    void main(){vec3 pos=position;float t=uTime;vec2 p=pos.xz,gradient=vec2(0.);float h=0.;
-    h+=wg(p,t,.008,.6,vec2(.8,.6),6.,gradient);h+=wg(p,t,.015,.9,vec2(-.5,.85),3.5,gradient);
-    h+=wg(p,t,.03,1.3,vec2(.7,-.7),1.8,gradient);h+=wg(p,t,.06,1.8,vec2(-.3,.95),.8,gradient);
-    h+=wg(p,t,.12,2.5,vec2(.9,.4),.3,gradient);pos.y+=h;
-    vec3 wN=normalize(vec3(-gradient.x,1.,-gradient.y));vN=normalize(normalMatrix*wN);
-    vec4 mv=modelViewMatrix*vec4(pos,1.);vFD=-mv.z;vWP=(modelMatrix*vec4(pos,1.)).xyz;gl_Position=projectionMatrix*mv;}`,
-  fragmentShader:`uniform vec3 uSunDir,uSkyColor,uDeepColor,uShallowColor,uFogColor,uCamPos;uniform float uFogDensity;
-    varying vec3 vWP,vN;varying float vFD;
-    ${alphaHashShader}
-    void main(){vec3 N=normalize(vN),V=normalize(uCamPos-vWP),L=normalize(uSunDir);
-    float fr=pow(1.-max(dot(V,N),0.),4.);fr=mix(.04,1.,fr);
-    vec3 R=reflect(-V,N);float sg=max(R.y*.5+.5,0.);vec3 refl=mix(uSkyColor*.7,uSkyColor*1.3,sg);
-    float sss=pow(max(dot(V,-L+N*.3),0.),3.)*.15;vec3 sc=vec3(0.,.5,.4)*sss;
-    vec3 wb=mix(uDeepColor,uShallowColor,fr*.3);vec3 H=normalize(L+V);float sp=pow(max(dot(N,H),0.),512.);
-    vec3 col=mix(wb,refl,fr)+vec3(1.,.95,.85)*sp*3.+sc;
-    float ff=1.-exp(-uFogDensity*uFogDensity*vFD*vFD);col=mix(col,uFogColor,clamp(ff,0.,1.));
-    if(alphaHash(gl_FragCoord.xy,0.)>.92)discard;gl_FragColor=vec4(col,1.);}`
+    void main(){
+      vec3 wp=(modelMatrix*vec4(position,1.)).xyz;
+      float planar=length(wp.xz-uCamPos.xz);
+      vEdge=smoothstep(uOceanRadius*.72,uOceanRadius*.99,planar);
+      // Exact CPU terrain height -> the ocean knows the coastline.
+      vDepth=-terrainRawGLSL(wp.xz);
+      float shoal=smoothstep(0.,90.,vDepth);             // waves flatten as they run ashore
+      float lod=1.-smoothstep(5000.,14000.,planar);      // drop displacement before it aliases
+      float amp=shoal*lod;
+      vec2 grad=vec2(0.);float h=0.;
+      h+=swell(wp.xz,uTime,.0068,.52,normalize(vec2( .86, .51)),6.2*amp,grad);
+      h+=swell(wp.xz,uTime,.0121,.74,normalize(vec2(-.42, .91)),2.7*amp,grad);
+      h+=swell(wp.xz,uTime,.0224,1.02,normalize(vec2( .71,-.70)),1.1*amp,grad);
+      wp.y+=h;
+      vSwellH=h;vSwellGrad=grad;vWorldPos=wp;
+      vec4 mv=viewMatrix*vec4(wp,1.);vViewDist=length(mv.xyz);
+      gl_Position=projectionMatrix*mv;
+    }`,
+  fragmentShader: `
+    uniform float uTime,uOceanRadius;
+    uniform vec3 uZenith,uHorizon,uSunGlow,uDeepColor,uMidColor,uShoalColor,uSSSColor,uFoamColor;
+    varying vec3 vWorldPos;varying vec2 vSwellGrad;
+    varying float vViewDist,vSwellH,vDepth,vEdge;
+    ${simplexGLSL}
+    ${atmosphereGLSL}
+
+    // One ripple octave. Octaves that are too fine to resolve at this distance are faded out
+    // of the normal and their slope energy is handed to roughness instead - that swap is what
+    // turns far-field water into a broad glitter path rather than a field of aliased sparkle.
+    float ripple(vec2 p,float freq,float speed,vec2 dir,float amp,float fadeNear,float fadeFar,
+                 float dist,inout vec2 grad,inout float lostSlope){
+      float vis=1.-smoothstep(fadeNear,fadeFar,dist);
+      float ph=dot(p,dir)*freq+uTime*speed;
+      float g=cos(ph)*freq*amp;
+      grad+=g*dir*vis;
+      lostSlope+=abs(g)*(1.-vis);
+      return sin(ph)*amp*vis;
+    }
+
+    vec3 skyDome(vec3 dir){
+      float up=clamp(dir.y,0.,1.);
+      vec3 c=mix(uHorizon,uZenith,pow(up,.55));
+      float sd=max(dot(dir,uSunDir),0.);
+      c+=uSunGlow*pow(sd,10.)*.5;
+      return mix(hazeColor(vec3(dir.x,max(dir.y,0.),dir.z))*.9,c,smoothstep(-.12,.06,dir.y));
+    }
+
+    void main(){
+      vec2 p0=vWorldPos.xz;
+      // Offsetting x by a function of z (and vice versa) makes straight wavefronts meander.
+      vec2 p=p0+vec2(sin(p0.y*.0043+1.7)+.6*sin(p0.y*.0111-2.3),
+                     sin(p0.x*.0037-0.6)+.6*sin(p0.x*.0097+1.1))*11.;
+      float dist=vViewDist;
+      vec2 grad=vSwellGrad;
+      float lost=0.,detail=0.;
+      detail+=ripple(p,.049,1.25,normalize(vec2( .92, .39)),1.45,5000.,13000.,dist,grad,lost);
+      detail+=ripple(p,.093,1.62,normalize(vec2(-.55, .84)), .80,2600., 7500.,dist,grad,lost);
+      detail+=ripple(p,.181,2.10,normalize(vec2( .38, .93)), .39,1300., 3800.,dist,grad,lost);
+      detail+=ripple(p,.352,2.74,normalize(vec2(-.88, .47)), .17, 620., 1800.,dist,grad,lost);
+      detail+=ripple(p,.683,3.55,normalize(vec2( .64,-.77)), .072,290.,  850.,dist,grad,lost);
+      detail+=ripple(p,1.327,4.6,normalize(vec2(-.26,-.97)), .029,130.,  400.,dist,grad,lost);
+      float shoal=smoothstep(0.,110.,vDepth);
+      grad*=mix(.35,1.,shoal);
+
+      vec3 N=normalize(vec3(-grad.x,1.,-grad.y));
+      vec3 V=normalize(uCamPos-vWorldPos);
+      vec3 L=normalize(uSunDir);
+      float NoV=max(dot(N,V),1e-3);
+
+      // Schlick, F0 = 0.02 for water (IOR 1.33).
+      float F=.02+.98*pow(1.-NoV,5.);
+
+      vec3 R=reflect(-V,N);
+      vec3 refl=skyDome(R);
+
+      // Sub-pixel slope that fell out of the normal widens the specular lobe with distance.
+      float rough=clamp(.014+lost*.80+smoothstep(400.,11000.,dist)*.07,.008,.30);
+      vec3 H=normalize(L+V);
+      float NoH=max(dot(N,H),0.),NoL=max(dot(N,L),0.);
+      float a=rough*rough,a2=a*a;
+      float dd=NoH*NoH*(a2-1.)+1.;
+      float D=a2/(3.14159265*dd*dd);
+      float vis=.5/max(mix(2.*NoL*NoV,NoL+NoV,a),1e-4);
+      vec3 sunSpec=vec3(1.,.94,.82)*D*vis*NoL*22.;
+
+      // Depth-graded body colour: turquoise over the shelf, deep navy offshore.
+      float dmix=1.-exp(-max(vDepth,0.)/115.);
+      vec3 body=mix(uShoalColor,uMidColor,smoothstep(0.,.55,dmix));
+      body=mix(body,uDeepColor,smoothstep(.5,1.,dmix));
+
+      // Light bleeding through the back of a wave.
+      float sss=pow(max(dot(V,-L),0.),2.5)*smoothstep(0.,4.,vSwellH+detail*2.)*.55;
+      body+=uSSSColor*sss*shoal;
+
+      vec3 col=mix(body,refl,F)+sunSpec;
+
+      // ── Foam ──
+      // Most of the ocean is neither steep enough to break nor shallow enough to surf, so
+      // gate the four noise octaves behind that test instead of paying for them everywhere.
+      float steep=length(vSwellGrad);
+      float capDrive=smoothstep(.046,.088,steep)*smoothstep(2.6,6.0,vSwellH);
+      float surfWidth=max(34.+vSwellH*4.,12.);
+      float surfBand=vDepth>0.?1.-smoothstep(0.,surfWidth,vDepth):0.;
+      float wash=vDepth>0.?1.-smoothstep(0.,115.,vDepth):0.;
+      float foam=0.;
+      if(capDrive>.002||wash>.002){
+        float nf =snoise(p*.021+vec2(uTime*.045,-uTime*.035))*.5+.5;   // ~300 m
+        float nf2=snoise(p*.085-vec2(uTime*.090, uTime*.060))*.5+.5;   //  ~74 m
+        float nf3=snoise(p*.310+vec2(-uTime*.20, uTime*.150))*.5+.5;   //  ~20 m
+        float nf4=snoise(p*1.05 -vec2(uTime*.42, uTime*.310))*.5+.5;   //   ~6 m
+        // Whitecaps ride fine-grained noise; weighting the coarse octaves instead turns them
+        // into floating white slabs.
+        float breakFine=nf*.16+nf2*.24+nf3*.32+nf4*.28;
+        float breakSurf=nf*.34+nf2*.40+nf3*.26;
+        float cap=capDrive*smoothstep(.50,.72,breakFine)*.85;
+        // Surf: a bright break over the bar, then a wider, fainter wash up the beach.
+        float surf=surfBand*smoothstep(.26,.58,breakSurf)+wash*.30*smoothstep(.44,.78,nf2);
+        foam=clamp(max(cap,surf)*(1.-vEdge),0.,1.);
+      }
+      // Foam is opaque white water - light it like a diffuse solid instead of desaturating
+      // the sea towards grey.
+      vec3 foamLit=uFoamColor*(.40+.75*NoL)+skyDome(vec3(0.,1.,0.))*.15;
+      col=mix(col,foamLit,foam);
+
+      // Wet-sand sheen right at the very edge.
+      col=mix(col,uFoamColor*.72,(1.-smoothstep(0.,4.,vDepth))*.35);
+
+      col=applyAerial(col,uCamPos,-V,dist);
+      col=mix(col,hazeColor(-V),vEdge);
+      gl_FragColor=vec4(col,1.);
+    }`
 });
-const waterGeo = new THREE.PlaneGeometry(50000, 50000, 200, 200); waterGeo.rotateX(-Math.PI/2);
-const water = new THREE.Mesh(waterGeo, waterMat); water.position.y = -1; water.receiveShadow = true; scene.add(water);
+// 256 rings is ample: the vertex stage only carries long-wavelength swell, and everything
+// finer than that is per-pixel, so denser geometry buys nothing but vertex cost.
+const waterGeo = createOceanGeometry(256, OCEAN_RADIUS, 2.4);
+const water = new THREE.Mesh(waterGeo, waterMat);
+water.position.y = WATER_LEVEL; water.frustumCulled = false;
+scene.add(water);
 
 /* ═══════════════════ CLOUDS ═══════════════════ */
 function createDynamicInstancedMesh(geometry,material,capacity){
@@ -398,54 +720,116 @@ function createDynamicInstancedMesh(geometry,material,capacity){
   mesh.count=0;mesh.frustumCulled=false;
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);scene.add(mesh);return mesh;
 }
+// Lumpy fbm-eroded puff rather than a stack of radial gradients, so the silhouette breaks up
+// the way cumulus does instead of reading as a soft grey disc.
+function createCloudTexture(){
+  const S=256,R=S*.5;
+  const lump=tileableFBM(S,5,3,20260912), erode=tileableFBM(S,4,6,777);
+  const data=new Uint8Array(S*S*4);
+  for(let y=0;y<S;y++)for(let x=0;x<S;x++){
+    const i=y*S+x;
+    const dx=(x-R+.5)/R, dy=(y-R+.5)/R;
+    const r=Math.sqrt(dx*dx+dy*dy*1.55);                  // squashed: wider than tall
+    const edge=r+(lump[i]-.5)*.62+(erode[i]-.5)*.22;      // push the rim in and out
+    let a=1-THREE.MathUtils.smoothstep(edge,.30,.74);
+    a*=.55+.45*lump[i];                                    // interior density variation
+    data[i*4]=255;data[i*4+1]=255;data[i*4+2]=255;
+    data[i*4+3]=Math.max(0,Math.min(255,a*255));
+  }
+  const tex=new THREE.DataTexture(data,S,S,THREE.RGBAFormat);
+  tex.minFilter=THREE.LinearMipmapLinearFilter;tex.magFilter=THREE.LinearFilter;
+  tex.generateMipmaps=true;tex.needsUpdate=true;
+  return tex;
+}
 const cloudTex = createCloudTexture();
 const cloudClusters = [], cloudPuffs = [];
-const CLOUD_POOL = 90, CLOUD_RANGE = 8000, MAX_CLOUD_INSTANCES = CLOUD_POOL * 7;
+const CLOUD_POOL = 110, CLOUD_RANGE = 11000, PUFFS_MAX = 11;
+const MAX_CLOUD_INSTANCES = CLOUD_POOL * PUFFS_MAX;
 const cloudGeometry = new THREE.PlaneGeometry(1, 1);
 const cloudOpacity = new THREE.InstancedBufferAttribute(new Float32Array(MAX_CLOUD_INSTANCES), 1);
 cloudOpacity.setUsage(THREE.DynamicDrawUsage);
 cloudGeometry.setAttribute('iOpacity', cloudOpacity);
-const cloudVertexShader=`attribute float iOpacity;varying vec2 vUv;varying float vOpacity,vFogDepth,vHashSeed;
-  void main(){vUv=uv;vOpacity=iOpacity;
-  vHashSeed=dot(instanceMatrix[3].xyz,vec3(.1031,.11369,.13787));
-  vec4 mvPosition=modelViewMatrix*instanceMatrix*vec4(0.,0.,0.,1.);
-  vec2 instanceScale=vec2(length(instanceMatrix[0].xyz),length(instanceMatrix[1].xyz));
-  mvPosition.xy+=position.xy*instanceScale;vFogDepth=-mvPosition.z;
-  gl_Position=projectionMatrix*mvPosition;}`;
+// iShade: 0 at the cloud base, 1 at the crown - drives the vertical light gradient.
+const cloudShade = new THREE.InstancedBufferAttribute(new Float32Array(MAX_CLOUD_INSTANCES), 1);
+cloudShade.setUsage(THREE.DynamicDrawUsage);
+cloudGeometry.setAttribute('iShade', cloudShade);
+
 const cloudMaterial = new THREE.ShaderMaterial({
-  uniforms: { uMap:{value:cloudTex}, uFogColor:{value:new THREE.Color(fogColor)}, uFogDensity:{value:FOG_DENSITY} },
-  vertexShader:cloudVertexShader,
-  fragmentShader:`uniform sampler2D uMap;uniform vec3 uFogColor;uniform float uFogDensity;
-    varying vec2 vUv;varying float vOpacity,vFogDepth,vHashSeed;
-    ${alphaHashShader}
-    void main(){vec4 cloud=texture2D(uMap,vUv);float textureAlpha=cloud.a,alpha=textureAlpha*vOpacity;
-    if(alpha<.002||alphaHash(gl_FragCoord.xy,vHashSeed)>alpha)discard;
-    cloud.rgb/=max(textureAlpha,.002);gl_FragColor=vec4(cloud.rgb,1.);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-    float ff=1.-exp(-uFogDensity*uFogDensity*vFogDepth*vFogDepth);
-    gl_FragColor.rgb=mix(gl_FragColor.rgb,uFogColor,clamp(ff,0.,1.));}`,
-  depthWrite:true,blending:THREE.NoBlending
+  uniforms: Object.assign({
+    uMap:      { value: cloudTex },
+    uLitColor: { value: new THREE.Color(0xfff4e2) },
+    uMidColor: { value: new THREE.Color(0xc8d2de) },
+    uDarkColor:{ value: new THREE.Color(0x76869b) }
+  }, atmoUniforms),
+  vertexShader:`attribute float iOpacity,iShade;
+    varying vec2 vUv;varying float vOpacity,vShade,vDist;varying vec3 vWorldPos;
+    void main(){vUv=uv;vOpacity=iOpacity;vShade=iShade;
+    vec4 center=instanceMatrix*vec4(0.,0.,0.,1.);
+    vec4 mvPosition=modelViewMatrix*center;
+    vec2 instanceScale=vec2(length(instanceMatrix[0].xyz),length(instanceMatrix[1].xyz));
+    mvPosition.xy+=position.xy*instanceScale;
+    vDist=-mvPosition.z;
+    vWorldPos=center.xyz;
+    gl_Position=projectionMatrix*mvPosition;}`,
+  fragmentShader:`uniform sampler2D uMap;uniform vec3 uLitColor,uMidColor,uDarkColor;
+    varying vec2 vUv;varying float vOpacity,vShade,vDist;varying vec3 vWorldPos;
+    ${atmosphereGLSL}
+    void main(){
+      float a=texture2D(uMap,vUv).a*vOpacity;
+      a*=1.-smoothstep(.86,1.,length(vUv*2.-1.));
+      if(a<.004)discard;
+      // Treat the billboard as a hemisphere so the sun actually models the puff.
+      vec2 d=vUv*2.-1.;
+      float r2=dot(d,d);
+      vec3 nCam=vec3(d,sqrt(max(1.-r2,0.)));
+      vec3 nWorld=normalize(nCam*mat3(viewMatrix));
+      float NoL=dot(nWorld,uSunDir);
+      vec3 col=mix(uDarkColor,uMidColor,smoothstep(-.85,.15,NoL));
+      col=mix(col,uLitColor,smoothstep(.05,.85,NoL));
+      // Crowns catch the light, bases sit in their own shadow.
+      col=mix(col*.72,col,smoothstep(0.,1.,vShade));
+      // Silver lining: forward scattering when you look towards the sun through thin edges.
+      vec3 viewDir=normalize(vWorldPos-uCamPos);
+      float forward=pow(max(dot(viewDir,uSunDir),0.),7.);
+      col+=uLitColor*forward*(1.-a)*1.35;
+      col=applyAerial(col,uCamPos,viewDir,vDist);
+      gl_FragColor=vec4(col*a,a);   // premultiplied
+    }`,
+  transparent:true, depthWrite:false, depthTest:true, fog:false,
+  blending:THREE.CustomBlending,
+  blendSrc:THREE.OneFactor, blendDst:THREE.OneMinusSrcAlphaFactor,
+  blendSrcAlpha:THREE.OneFactor, blendDstAlpha:THREE.OneMinusSrcAlphaFactor
 });
 const cloudMesh = createDynamicInstancedMesh(cloudGeometry,cloudMaterial,MAX_CLOUD_INSTANCES);
+cloudMesh.renderOrder = 5;
 const cloudMatrix = new THREE.Matrix4();
 function createCloudCluster() {
   const cluster = { position:new THREE.Vector3() };
-  const cnt = 3 + Math.floor(Math.random() * 5);
+  const cnt = 6 + Math.floor(Math.random() * (PUFFS_MAX - 5));
+  const spread = 420 + Math.random() * 700, lift = 150 + Math.random() * 260;
   for (let i = 0; i < cnt; i++) {
-    const opacity = .25 + Math.random() * .2, s = 200 + Math.random() * 500;
-    cloudPuffs.push({ cluster, opacity, size:s,
-      offset:new THREE.Vector3((Math.random()-.5)*s*.8,(Math.random()-.5)*30,(Math.random()-.5)*s*.8) });
+    // Big flat puffs low, smaller ones stacked on top: a cauliflower crown.
+    const t = i / (cnt - 1);
+    const s = (1 - t * .45) * (spread * (.55 + Math.random() * .5));
+    cloudPuffs.push({ cluster, size:s,
+      opacity: .55 + Math.random() * .35,
+      shade: t * (.7 + Math.random() * .3),
+      offset:new THREE.Vector3(
+        (Math.random()-.5) * spread * (1.35 - t),
+        t * lift + (Math.random()-.5) * 55,
+        (Math.random()-.5) * spread * (1.35 - t)) });
   }
-  cluster.position.set((Math.random()-.5)*CLOUD_RANGE*2,600+Math.random()*1800,(Math.random()-.5)*CLOUD_RANGE*2);
+  cluster.position.set((Math.random()-.5)*CLOUD_RANGE*2, 750+Math.random()*1900, (Math.random()-.5)*CLOUD_RANGE*2);
   return cluster;
 }
 function syncCloudInstances(){
   for(let i=0;i<cloudPuffs.length;i++){const puff=cloudPuffs[i],c=puff.cluster.position,o=puff.offset;
-    cloudMatrix.makeScale(puff.size,puff.size*.4,1).setPosition(c.x+o.x,c.y+o.y,c.z+o.z);
-    cloudMesh.setMatrixAt(i,cloudMatrix);cloudOpacity.setX(i,puff.opacity)}
+    cloudMatrix.makeScale(puff.size,puff.size*.62,1).setPosition(c.x+o.x,c.y+o.y,c.z+o.z);
+    cloudMesh.setMatrixAt(i,cloudMatrix);
+    cloudOpacity.setX(i,puff.opacity);cloudShade.setX(i,puff.shade)}
   cloudMesh.count=cloudPuffs.length;
-  if(cloudPuffs.length){cloudMesh.instanceMatrix.needsUpdate=true;cloudOpacity.needsUpdate=true}
+  if(cloudPuffs.length){cloudMesh.instanceMatrix.needsUpdate=true;
+    cloudOpacity.needsUpdate=true;cloudShade.needsUpdate=true}
 }
 function initClouds() {
   for (let i = 0; i < CLOUD_POOL; i++) cloudClusters.push(createCloudCluster());
@@ -462,48 +846,272 @@ function updateClouds(px, pz) {
   if(moved)syncCloudInstances();
 }
 
-/* ═══════════════════ TERRAIN ═══════════════════ */
-const CHUNK_SIZE=800, CHUNK_SEG_NEAR=24, CHUNK_SEG_FAR=8, CHUNK_HALF=14, CHUNK_NEAR=7;
-const terrainChunks = new Map();
-const terrainMaterial=new THREE.MeshStandardMaterial({vertexColors:true,roughness:.88,metalness:.02,flatShading:false,envMapIntensity:.3});
-let terrainChunkX=null,terrainChunkZ=null;
-function getTerrainHeight(x, z) { return Math.max(simplex.noise2D(x*.00025,z*.00025)*500+simplex.noise2D(x*.0006,z*.0006)*200+simplex.noise2D(x*.002,z*.002)*60+simplex.noise2D(x*.008,z*.008)*15, -8); }
-function setTerrainColor(colors, offset, y, ny) {
-  const slope = 1 - Math.abs(ny); let r, g, b;
-  if (y<2){r=.76;g=.7;b=.5}else if(y<40){const t=y/40;r=.76-t*.48;g=.7-t*.3;b=.5-t*.35}
-  else if(y<120){const t=(y-40)/80;r=.28+t*.2;g=.4-t*.08;b=.15+t*.13}
-  else if(y<250){const t=(y-120)/130;r=.48+t*.18;g=.32+t*.18;b=.28+t*.18}
-  else if(y<380){const t=(y-250)/130;r=.66+t*.22;g=.5+t*.35;b=.46+t*.42}
-  else{r=.9;g=.88;b=.92}
-  if(slope>.5&&y>30){const rb=Math.min((slope-.5)*2,1);r=r*(1-rb)+.45*rb;g=g*(1-rb)+.4*rb;b=b*(1-rb)+.38*rb}
-  colors[offset]=r;colors[offset+1]=g;colors[offset+2]=b;
+/* ═══════════════════ GROUND DETAIL TEXTURE ═══════════════════ */
+// Tileable value-noise fbm baked once into a DataTexture. Mip-mapped sampling gives the
+// ground per-pixel relief that survives at any distance without the shimmer procedural
+// noise would produce, and costs two texture fetches instead of a dozen noise evaluations.
+function tileableFBM(size, octaves, baseCells, seed) {
+  const out = new Float32Array(size * size);
+  let rng = seed >>> 0, amp = 1, norm = 0;
+  const rnd = () => { rng = (rng * 1664525 + 1013904223) >>> 0; return rng / 4294967296; };
+  for (let o = 0; o < octaves; o++) {
+    const cells = baseCells << o; if (cells > size) break;
+    const lat = new Float32Array(cells * cells);
+    for (let i = 0; i < lat.length; i++) lat[i] = rnd();
+    const step = size / cells;
+    for (let y = 0; y < size; y++) {
+      const fy = y / step, y0 = Math.floor(fy), ty = fy - y0, sy = ty * ty * (3 - 2 * ty);
+      const ry0 = (y0 % cells) * cells, ry1 = ((y0 + 1) % cells) * cells;
+      for (let x = 0; x < size; x++) {
+        const fx = x / step, x0 = Math.floor(fx), tx = fx - x0, sx = tx * tx * (3 - 2 * tx);
+        const cx0 = x0 % cells, cx1 = (x0 + 1) % cells;
+        const top = lat[ry0 + cx0] + (lat[ry0 + cx1] - lat[ry0 + cx0]) * sx;
+        const bot = lat[ry1 + cx0] + (lat[ry1 + cx1] - lat[ry1 + cx0]) * sx;
+        out[y * size + x] += amp * (top + (bot - top) * sy);
+      }
+    }
+    norm += amp; amp *= .5;
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= norm;
+  return out;
 }
+// RG = surface normal XY, B = macro blotching, A = fine grain.
+function createGroundDetailTexture() {
+  const S = 512, BUMP = 42;
+  const h = tileableFBM(S, 6, 4, 1337), macro = tileableFBM(S, 3, 2, 9001), fine = tileableFBM(S, 4, 8, 424242);
+  const data = new Uint8Array(S * S * 4);
+  const clamp255 = v => v < 0 ? 0 : v > 255 ? 255 : v;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const i = y * S + x;
+    const nx = (h[y * S + ((x - 1 + S) % S)] - h[y * S + ((x + 1) % S)]) * BUMP;
+    const ny = (h[((y - 1 + S) % S) * S + x] - h[((y + 1) % S) * S + x]) * BUMP;
+    data[i * 4] = clamp255((nx * .5 + .5) * 255);
+    data[i * 4 + 1] = clamp255((ny * .5 + .5) * 255);
+    data[i * 4 + 2] = clamp255(macro[i] * 255);
+    data[i * 4 + 3] = clamp255(fine[i] * 255);
+  }
+  const tex = new THREE.DataTexture(data, S, S, THREE.RGBAFormat);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  tex.needsUpdate = true;
+  return tex;
+}
+const groundDetailTex = createGroundDetailTexture();
+
+/* ═══════════════════ TERRAIN ═══════════════════ */
+const CHUNK_SIZE = 1000, CHUNK_HALF = 12;
+// Four LOD rings: real relief underfoot, cheap silhouettes at the horizon.
+const CHUNK_LOD = [[2, 40], [5, 20], [9, 10], [99, 5]];
+const chunkSegFor = d => { for (const [maxD, seg] of CHUNK_LOD) if (d <= maxD) return seg; return 5; };
+const terrainChunks = new Map();
+
+const terrainMaterial = new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: .93, metalness: 0, envMapIntensity: .55
+});
+terrainMaterial.userData.detailUniforms = {
+  uGroundDetail: { value: groundDetailTex },
+  uDetailScale:  { value: new THREE.Vector2(.021, .0027) },
+  uDetailBump:   { value: new THREE.Vector2(.85, .55) }
+};
+terrainMaterial.onBeforeCompile = (shader) => {
+  Object.assign(shader.uniforms, atmoUniforms, terrainMaterial.userData.detailUniforms);
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vGroundWorld;')
+    .replace('#include <begin_vertex>',
+      '#include <begin_vertex>\nvGroundWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      varying vec3 vGroundWorld;
+      uniform sampler2D uGroundDetail;
+      uniform vec2 uDetailScale, uDetailBump;`)
+    .replace('#include <color_fragment>', `#include <color_fragment>
+      vec4 gdFine  = texture2D(uGroundDetail, vGroundWorld.xz * uDetailScale.x);
+      vec4 gdMacro = texture2D(uGroundDetail, vGroundWorld.xz * uDetailScale.y);
+      // Break up the flat vertex-colour bands with two scales of blotching.
+      diffuseColor.rgb *= mix(.74, 1.26, gdMacro.b) * mix(.86, 1.14, gdFine.a);`)
+    .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+      roughnessFactor *= mix(.88, 1.08, gdFine.b);`)
+    .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+      {
+        // Perturb in world space, then convert back: mip-filtering flattens the bump with
+        // distance on its own, so nothing shimmers on far ridgelines.
+        vec3 gdN = normalize(normal * mat3(viewMatrix));
+        vec2 gdP = (gdFine.rg * 2.0 - 1.0) * uDetailBump.x + (gdMacro.rg * 2.0 - 1.0) * uDetailBump.y;
+        gdN = normalize(gdN + vec3(gdP.x, 0.0, gdP.y));
+        normal = normalize(mat3(viewMatrix) * gdN);
+      }`);
+};
+
+let terrainChunkX = null, terrainChunkZ = null;
+function terrainRaw(x, z) { return simplex.noise2D(x*.00025,z*.00025)*500+simplex.noise2D(x*.0006,z*.0006)*200+simplex.noise2D(x*.002,z*.002)*60+simplex.noise2D(x*.008,z*.008)*15; }
+// Rendered seabed: sinks well under the surface so the continental shelf reads as real depth.
+function getTerrainHeight(x, z) { return Math.max(terrainRaw(x, z), -260); }
+// Collision floor: open water counts as solid ground, so you ditch at the surface.
+function getGroundHeight(x, z) { return Math.max(terrainRaw(x, z), WATER_LEVEL); }
+
+// Authored in sRGB and converted to the linear working space - the previous palette fed
+// display-referred values straight to the renderer, which is what bleached the landscape.
+const BIOME = [
+  [-260, new THREE.Color(0x2d3d47)],  // seabed
+  [ -35, new THREE.Color(0x6f6a52)],  // submerged shelf
+  [   3, new THREE.Color(0xb6a179)],  // beach
+  [  34, new THREE.Color(0x5c7238)],  // coastal grass
+  [ 130, new THREE.Color(0x33502a)],  // forest
+  [ 260, new THREE.Color(0x4a5734)],  // upland heath
+  [ 400, new THREE.Color(0x6a6052)],  // exposed rock
+  [ 560, new THREE.Color(0x8c857b)],  // scree
+  [ 700, new THREE.Color(0xe4eaee)]   // snowfield
+];
+const ROCK_COLOR = new THREE.Color(0x615a51), SNOW_COLOR = new THREE.Color(0xe8edf1);
+const _bc = new THREE.Color();
+function setTerrainColor(colors, offset, y, ny, wx, wz) {
+  // Jitter the elevation used for biome lookup so the bands stop reading as contour lines.
+  const jitter = simplex.noise2D(wx*.0011, wz*.0011)*46 + simplex.noise2D(wx*.0037, wz*.0037)*17;
+  const h = y + jitter;
+  let i = BIOME.length - 1;
+  while (i > 0 && h < BIOME[i][0]) i--;
+  if (i >= BIOME.length - 1) _bc.copy(BIOME[BIOME.length - 1][1]);
+  else {
+    const [h0, c0] = BIOME[i], [h1, c1] = BIOME[i + 1];
+    _bc.copy(c0).lerp(c1, THREE.MathUtils.clamp((h - h0) / (h1 - h0), 0, 1));
+  }
+  // Anything steep sheds soil and reads as bare rock; snow only settles on gentle ground.
+  const slope = 1 - Math.abs(ny);
+  const rockAmt = THREE.MathUtils.smoothstep(slope, .32, .72) * THREE.MathUtils.smoothstep(y, 10, 70);
+  _bc.lerp(ROCK_COLOR, rockAmt * .85);
+  const snowAmt = THREE.MathUtils.smoothstep(h, 520, 760) * (1 - THREE.MathUtils.smoothstep(slope, .34, .66));
+  _bc.lerp(SNOW_COLOR, snowAmt);
+  colors[offset] = _bc.r; colors[offset+1] = _bc.g; colors[offset+2] = _bc.b;
+}
+
 function createTerrainChunk(cx, cz, seg) {
-  const key=`${cx},${cz}`; if(terrainChunks.has(key))return;
-  const geo=new THREE.PlaneGeometry(CHUNK_SIZE,CHUNK_SIZE,seg,seg); geo.rotateX(-Math.PI/2);
-  const pos=geo.attributes.position;
-  for(let i=0;i<pos.count;i++){const wx=pos.getX(i)+cx*CHUNK_SIZE,wz=pos.getZ(i)+cz*CHUNK_SIZE;pos.setY(i,getTerrainHeight(wx,wz))}
+  const key = `${cx},${cz}`;
+  const existing = terrainChunks.get(key);
+  if (existing) {
+    if (existing.userData.seg === seg) return;          // already at the right detail
+    scene.remove(existing); existing.geometry.dispose(); // otherwise rebuild at the new LOD
+  }
+  const geo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, seg, seg); geo.rotateX(-Math.PI/2);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const wx = pos.getX(i)+cx*CHUNK_SIZE, wz = pos.getZ(i)+cz*CHUNK_SIZE;
+    pos.setY(i, getTerrainHeight(wx, wz));
+  }
   geo.computeVertexNormals();
-  const colors=new Float32Array(pos.count*3), normals=geo.attributes.normal;
-  for(let i=0;i<pos.count;i++)setTerrainColor(colors,i*3,pos.getY(i),normals.getY(i));
-  geo.setAttribute('color',new THREE.BufferAttribute(colors,3));
-  const mesh=new THREE.Mesh(geo,terrainMaterial); mesh.position.set(cx*CHUNK_SIZE,0,cz*CHUNK_SIZE); mesh.receiveShadow=true;
-  scene.add(mesh); terrainChunks.set(key,mesh);
+  const colors = new Float32Array(pos.count*3), normals = geo.attributes.normal;
+  for (let i = 0; i < pos.count; i++)
+    setTerrainColor(colors, i*3, pos.getY(i), normals.getY(i),
+                    pos.getX(i)+cx*CHUNK_SIZE, pos.getZ(i)+cz*CHUNK_SIZE);
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const mesh = new THREE.Mesh(geo, terrainMaterial);
+  mesh.position.set(cx*CHUNK_SIZE, 0, cz*CHUNK_SIZE);
+  mesh.receiveShadow = true; mesh.castShadow = false;
+  mesh.userData.seg = seg;
+  scene.add(mesh); terrainChunks.set(key, mesh);
 }
 function updateTerrain(px, pz) {
-  const pcx=Math.round(px/CHUNK_SIZE),pcz=Math.round(pz/CHUNK_SIZE);
-  if(pcx===terrainChunkX&&pcz===terrainChunkZ)return;
-  const needed=new Set();
-  for(let dx=-CHUNK_HALF;dx<=CHUNK_HALF;dx++)for(let dz=-CHUNK_HALF;dz<=CHUNK_HALF;dz++){const cx=pcx+dx,cz=pcz+dz;const dist=Math.max(Math.abs(dx),Math.abs(dz));const seg=dist<=CHUNK_NEAR?CHUNK_SEG_NEAR:CHUNK_SEG_FAR;needed.add(`${cx},${cz}`);createTerrainChunk(cx,cz,seg)}
-  for(const[key,mesh]of terrainChunks)if(!needed.has(key)){scene.remove(mesh);mesh.geometry.dispose();terrainChunks.delete(key)}
-  terrainChunkX=pcx;terrainChunkZ=pcz;
+  const pcx = Math.round(px/CHUNK_SIZE), pcz = Math.round(pz/CHUNK_SIZE);
+  if (pcx === terrainChunkX && pcz === terrainChunkZ) return;
+  const needed = new Set();
+  for (let dx = -CHUNK_HALF; dx <= CHUNK_HALF; dx++)
+    for (let dz = -CHUNK_HALF; dz <= CHUNK_HALF; dz++) {
+      const cx = pcx+dx, cz = pcz+dz;
+      needed.add(`${cx},${cz}`);
+      createTerrainChunk(cx, cz, chunkSegFor(Math.max(Math.abs(dx), Math.abs(dz))));
+    }
+  for (const [key, mesh] of terrainChunks)
+    if (!needed.has(key)) { scene.remove(mesh); mesh.geometry.dispose(); terrainChunks.delete(key) }
+  terrainChunkX = pcx; terrainChunkZ = pcz;
+}
+
+/* ═══════════════════ AIRFRAME SURFACE ═══════════════════ */
+// Panel seams, rivet lines and grime baked once, then shared by every aircraft. Combat jets
+// are matte radar-absorbent paint, not chrome - the old metalness .75 / roughness .28 mirrored
+// the sky and turned every airframe into a featureless white silhouette.
+function createPanelMaps() {
+  const S = 512, c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d');
+  g.fillStyle = '#808080'; g.fillRect(0, 0, S, S);
+  let rng = 20260912;
+  const rnd = () => { rng = (rng * 1664525 + 1013904223) >>> 0; return rng / 4294967296; };
+  const seam = (x0, y0, x1, y1, w) => {
+    g.strokeStyle = '#4c4c4c'; g.lineWidth = w;
+    g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+    g.strokeStyle = '#9c9c9c'; g.lineWidth = w * .6;
+    g.beginPath(); g.moveTo(x0, y0 + w); g.lineTo(x1, y1 + w); g.stroke();
+  };
+  for (let i = 0, y = 0; y < S; i++) { y += 34 + rnd() * 58; seam(0, y, S, y, 1.6); }
+  for (let i = 0, x = 0; x < S; i++) { x += 52 + rnd() * 90; seam(x, 0, x, S, 1.4); }
+  // Access hatches.
+  for (let i = 0; i < 14; i++) {
+    const w = 26 + rnd() * 50, h = 20 + rnd() * 36, x = rnd() * (S - w), y = rnd() * (S - h);
+    g.strokeStyle = '#585858'; g.lineWidth = 1.3; g.strokeRect(x, y, w, h);
+  }
+  // Rivet rows along the seams.
+  g.fillStyle = '#606060';
+  for (let i = 0; i < 2600; i++) {
+    g.beginPath(); g.arc(rnd() * S, rnd() * S, .7, 0, 6.2832); g.fill();
+  }
+  const height = g.getImageData(0, 0, S, S).data;
+
+  const grime = tileableFBM(S, 5, 4, 5150);
+  const nrm = new Uint8Array(S * S * 4), rgh = new Uint8Array(S * S * 4);
+  const at = (x, y) => height[((y + S) % S * S + (x + S) % S) * 4] / 255;
+  const SCALE = 5.5;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const i = y * S + x;
+    const nx = (at(x - 1, y) - at(x + 1, y)) * SCALE, ny = (at(x, y - 1) - at(x, y + 1)) * SCALE;
+    const len = Math.hypot(nx, ny, 1);
+    nrm[i*4]   = (nx/len * .5 + .5) * 255;
+    nrm[i*4+1] = (ny/len * .5 + .5) * 255;
+    nrm[i*4+2] = (1/len * .5 + .5) * 255;
+    nrm[i*4+3] = 255;
+    // Seams and grime hold dirt, so they scatter more than the surrounding paint.
+    const dirt = grime[i] * .55 + (1 - at(x, y)) * .45;
+    const r = Math.max(0, Math.min(255, (.62 + dirt * .34) * 255));
+    rgh[i*4] = r; rgh[i*4+1] = r; rgh[i*4+2] = r; rgh[i*4+3] = 255;
+  }
+  const mk = (data) => {
+    const t = new THREE.DataTexture(data, S, S, THREE.RGBAFormat);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+    t.generateMipmaps = true; t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    t.repeat.set(3, 3);
+    t.needsUpdate = true; return t;
+  };
+  return { normal: mk(nrm), rough: mk(rgh) };
+}
+const panelMaps = createPanelMaps();
+function airframeMaterial(color, opts = {}) {
+  const m = new THREE.MeshStandardMaterial(Object.assign({
+    color, metalness: .12, roughness: .55, envMapIntensity: .75
+  }, opts));
+  m.normalMap = panelMaps.normal; m.normalScale = new THREE.Vector2(.9, .9);
+  m.roughnessMap = panelMaps.rough;
+  return m;
 }
 
 /* ═══════════════════ PLAYER JET ═══════════════════ */
-const bodyMat=new THREE.MeshStandardMaterial({color:0x6a737d,metalness:.75,roughness:.28,envMapIntensity:1.2});
-const darkMat=new THREE.MeshStandardMaterial({color:0x404850,metalness:.8,roughness:.3,envMapIntensity:1});
+const bodyMat = airframeMaterial(0x71787f);
+const darkMat = airframeMaterial(0x3d444b, { roughness: .62 });
 // Canopy rendered as opaque tinted glass (no transparency artifacts)
-const nozzleMatBase=new THREE.MeshStandardMaterial({color:0x555555,metalness:.9,roughness:.2,emissive:0x331800,emissiveIntensity:.5});
+const nozzleMatBase=airframeMaterial(0x3a3632,{metalness:.72,roughness:.44,envMapIntensity:.5});
+nozzleMatBase.side=THREE.DoubleSide;
+const nozzleLinerMat=new THREE.MeshStandardMaterial({color:0x17130f,metalness:.55,roughness:.85,
+  side:THREE.DoubleSide,envMapIntensity:.2});
+const nozzleGlowMat=new THREE.MeshBasicMaterial({color:0x1d0b04});
+const _nozzleCanGeo=new THREE.CylinderGeometry(.62,.82,2.2,20,1,true);_nozzleCanGeo.rotateX(Math.PI/2);
+const _nozzleLinerGeo=new THREE.CylinderGeometry(.40,.60,2.6,20,1,true);_nozzleLinerGeo.rotateX(Math.PI/2);
+const _nozzleCoreGeo=new THREE.CircleGeometry(.44,20);   // +Z normal, i.e. facing aft
+function buildNozzle(){
+  const grp=new THREE.Group();
+  grp.add(new THREE.Mesh(_nozzleCanGeo,nozzleMatBase));
+  const liner=new THREE.Mesh(_nozzleLinerGeo,nozzleLinerMat);liner.position.z=-.2;grp.add(liner);
+  const core=new THREE.Mesh(_nozzleCoreGeo,nozzleGlowMat);core.position.z=-1.;grp.add(core);
+  grp.userData.core=core;return grp;
+}
 function createPlayerJet(){
   const j=new THREE.Group();
   // Smooth nose cone
@@ -519,14 +1127,14 @@ function createPlayerJet(){
   const rrGeo=new THREE.CylinderGeometry(1.6,1.3,5,16);rrGeo.rotateX(Math.PI/2);
   const rr=new THREE.Mesh(rrGeo,darkMat);rr.position.z=8.5;rr.scale.set(1.1,.55,1);j.add(rr);
   // Cockpit canopy (opaque tinted - avoids transparency artifacts from chase cam)
-  const cpMat=new THREE.MeshStandardMaterial({color:0x1a3a5a,metalness:.9,roughness:.1,envMapIntensity:2});
+  const cpMat=new THREE.MeshStandardMaterial({color:0x14202e,metalness:1,roughness:.045,envMapIntensity:2.6});
   const cp=new THREE.Mesh(new THREE.SphereGeometry(.7,16,12,0,Math.PI*2,0,Math.PI*.4),cpMat);cp.position.set(0,.5,-5.5);cp.scale.set(.65,.4,1.4);j.add(cp);
   // Air intakes (smooth)
   const igGeo=new THREE.CylinderGeometry(.35,.4,4,12);igGeo.rotateX(Math.PI/2);
   const iL=new THREE.Mesh(igGeo,darkMat);iL.position.set(-1.6,-.4,-2);j.add(iL);const iR=iL.clone();iR.position.x=1.6;j.add(iR);
   const ws=new THREE.Shape();ws.moveTo(0,0);ws.lineTo(-12,-2.5);ws.lineTo(-10,-4.5);ws.lineTo(-2,-4);ws.lineTo(0,-2);
   const wg=new THREE.ExtrudeGeometry(ws,{depth:.2,bevelEnabled:true,bevelThickness:.06,bevelSize:.06,bevelSegments:3});
-  const wm=new THREE.MeshStandardMaterial({color:0x6a737d,metalness:.75,roughness:.25,envMapIntensity:1.2});
+  const wm=airframeMaterial(0x767d84,{roughness:.52});
   const wL=new THREE.Mesh(wg,wm);wL.rotation.set(Math.PI/2,0,0);wL.position.set(.2,0,1.5);j.add(wL);
   const wR=wL.clone();wR.scale.x=-1;wR.position.x=-.2;j.add(wR);
   // F-22-style twin tail fins rise above the fuselage and cant outward.
@@ -539,12 +1147,14 @@ function createPlayerJet(){
   const hg=new THREE.ExtrudeGeometry(hs,{depth:.12,bevelEnabled:true,bevelThickness:.04,bevelSize:.04,bevelSegments:2});
   const hL=new THREE.Mesh(hg,bodyMat);hL.rotation.set(Math.PI/2,0,0);hL.position.set(.5,.1,8);j.add(hL);
   const hR=hL.clone();hR.scale.x=-1;hR.position.x=-.5;j.add(hR);
-  const ng=new THREE.CylinderGeometry(.55,.75,2,16);ng.rotateX(Math.PI/2);
-  const nL=new THREE.Mesh(ng,nozzleMatBase.clone());nL.position.set(.7,0,11);j.add(nL);
-  const nR=new THREE.Mesh(ng,nozzleMatBase.clone());nR.position.set(-.7,0,11);j.add(nR);
+  // Exhaust cans: an open scorched ring, a dark liner, and a hot disc set back inside. The
+  // old solid cylinder showed the viewer its flat aft end cap - a painted mustard coin.
+  const nL=buildNozzle();nL.position.set(.7,0,11);j.add(nL);
+  const nR=buildNozzle();nR.position.set(-.7,0,11);j.add(nR);
   j.userData.nozzleL=nL;j.userData.nozzleR=nR;
+  j.userData.nozzleGlowL=nL.userData.core;j.userData.nozzleGlowR=nR.userData.core;
   const ag=new THREE.ConeGeometry(.7,6,8);ag.rotateX(-Math.PI/2);
-  const amL=new THREE.MeshBasicMaterial({color:0x4488ff,transparent:true,opacity:.75,depthWrite:false,blending:THREE.AdditiveBlending});
+  const amL=new THREE.MeshBasicMaterial({color:0x4488ff,transparent:true,opacity:.75,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});
   const aL=new THREE.Mesh(ag,amL);aL.position.set(.7,0,14);aL.visible=false;j.add(aL);
   const aR=new THREE.Mesh(ag,amL.clone());aR.position.set(-.7,0,14);aR.visible=false;j.add(aR);
   j.userData.abL=aL;j.userData.abR=aR;
@@ -563,9 +1173,9 @@ const player={minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,
   missileSide:1,prevVelocity:new THREE.Vector3(),prevPosition:playerJet.position.clone()};
 
 /* ═══════════════════ ENEMY JET ═══════════════════ */
-const eBMat=new THREE.MeshStandardMaterial({color:0x5a3030,metalness:.7,roughness:.3,envMapIntensity:1});
-const eDMat=new THREE.MeshStandardMaterial({color:0x3a2020,metalness:.8,roughness:.3});
-const eWMat=new THREE.MeshStandardMaterial({color:0x6a3838,metalness:.65,roughness:.3,envMapIntensity:1});
+const eBMat=airframeMaterial(0x6d3a33,{roughness:.56});
+const eDMat=airframeMaterial(0x3c2420,{roughness:.63});
+const eWMat=airframeMaterial(0x7a4139,{roughness:.53});
 const eGlowMat=new THREE.MeshBasicMaterial({color:0xff4400});
 function createEnemyJet(){
   const j=new THREE.Group();
@@ -613,10 +1223,10 @@ const missileBodyGeo=new THREE.CylinderGeometry(.22,.28,3,10);missileBodyGeo.rot
 const missileNoseGeo=new THREE.ConeGeometry(.28,.9,10);missileNoseGeo.rotateX(Math.PI/2);
 const missileFinGeo=new THREE.BoxGeometry(.9,.06,.8);
 const missileFlameGeo=new THREE.ConeGeometry(.3,2.6,8);missileFlameGeo.rotateX(-Math.PI/2);
-const missileBodyMat=new THREE.MeshStandardMaterial({color:0xe8edf2,metalness:.7,roughness:.22,emissive:0x333333,emissiveIntensity:.8});
-const missileFinMat=new THREE.MeshStandardMaterial({color:0x59616a,metalness:.65,roughness:.3});
-const missileFlameMat=new THREE.MeshBasicMaterial({color:0xffaa33,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending});
-const missileGlowMat=new THREE.SpriteMaterial({map:createSunGlowTexture(),color:0xff7722,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending});
+const missileBodyMat=new THREE.MeshStandardMaterial({color:0xd8dde2,metalness:.25,roughness:.4,envMapIntensity:.8,emissive:0x262626,emissiveIntensity:.8});
+const missileFinMat=new THREE.MeshStandardMaterial({color:0x4e555d,metalness:.2,roughness:.52,envMapIntensity:.7});
+const missileFlameMat=new THREE.MeshBasicMaterial({color:0xffaa33,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});
+const missileGlowMat=new THREE.SpriteMaterial({map:createSunGlowTexture(),color:0xff7722,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});
 function createMissileVisual(){
   const g=new THREE.Group();
   const body=new THREE.Mesh(missileBodyGeo,missileBodyMat);g.add(body);
@@ -641,33 +1251,81 @@ function spawnMissile(pos,dir,carrierVelocity,target,isEnemy=false,launchSide=0)
 
 const MAX_PARTICLES=600,MAX_TRAIL_PARTICLES=360,PARTICLE_EFFECT_RESERVE=160,freeParticles=[],activeParticles=[];
 let activeTrailParticles=0;
-const particleGeo=new THREE.SphereGeometry(1,5,5),smokeParticleGeo=particleGeo.clone();
-function createParticleMaterial(blending,hashed) {
+function createSmokeTexture(){
+  const S=128,R=S*.5,lump=tileableFBM(S,5,4,31337),data=new Uint8Array(S*S*4);
+  for(let y=0;y<S;y++)for(let x=0;x<S;x++){
+    const i=y*S+x,dx=(x-R+.5)/R,dy=(y-R+.5)/R;
+    const r=Math.sqrt(dx*dx+dy*dy)+(lump[i]-.5)*.5;
+    const a=(1-THREE.MathUtils.smoothstep(r,.10,.70))*(.5+.5*lump[i]);
+    data[i*4]=255;data[i*4+1]=255;data[i*4+2]=255;
+    data[i*4+3]=Math.max(0,Math.min(255,a*255));
+  }
+  const t=new THREE.DataTexture(data,S,S,THREE.RGBAFormat);
+  t.minFilter=THREE.LinearMipmapLinearFilter;t.magFilter=THREE.LinearFilter;
+  t.generateMipmaps=true;t.needsUpdate=true;return t;
+}
+function createGlowTexture(){
+  const S=64,R=S*.5,data=new Uint8Array(S*S*4);
+  for(let y=0;y<S;y++)for(let x=0;x<S;x++){
+    const i=y*S+x,dx=(x-R+.5)/R,dy=(y-R+.5)/R;
+    const a=Math.pow(Math.max(0,1-Math.sqrt(dx*dx+dy*dy)),2.2);
+    data[i*4]=255;data[i*4+1]=255;data[i*4+2]=255;data[i*4+3]=Math.round(a*255);
+  }
+  const t=new THREE.DataTexture(data,S,S,THREE.RGBAFormat);
+  t.minFilter=THREE.LinearMipmapLinearFilter;t.magFilter=THREE.LinearFilter;
+  t.generateMipmaps=true;t.needsUpdate=true;return t;
+}
+const smokeTex=createSmokeTexture(),glowTex=createGlowTexture();
+const particleGeo=new THREE.PlaneGeometry(1,1),smokeParticleGeo=new THREE.PlaneGeometry(1,1);
+// Smoke and fire are soft camera-facing billboards with real alpha. The old path drew
+// low-poly spheres through a stochastic-alpha discard, which needed a temporal filter to
+// resolve and without one punched a fixed screen-door pattern into every puff.
+function createParticleMaterial(blending,softSmoke) {
+  const smoke = !!softSmoke;
   return new THREE.ShaderMaterial({
-    defines:hashed?{HASHED_ALPHA:1}:{},
-    uniforms:{uFogColor:{value:new THREE.Color(fogColor)},uFogDensity:{value:FOG_DENSITY}},
+    defines: smoke ? { SOFT_SMOKE: 1 } : {},
+    uniforms: Object.assign({ uMap: { value: smoke ? smokeTex : glowTex } }, atmoUniforms),
     vertexShader:`attribute vec3 iColor;attribute float iOpacity,iHashSeed;
-      varying vec3 vColor;varying float vOpacity,vFogDepth,vHashSeed;
-      void main(){vColor=iColor;vOpacity=iOpacity;vHashSeed=iHashSeed;
-      vec4 mvPosition=modelViewMatrix*instanceMatrix*vec4(position,1.);
-      vFogDepth=-mvPosition.z;gl_Position=projectionMatrix*mvPosition;}`,
-    fragmentShader:`uniform vec3 uFogColor;uniform float uFogDensity;
-      varying vec3 vColor;varying float vOpacity,vFogDepth,vHashSeed;
-      #ifdef HASHED_ALPHA
-      ${alphaHashShader}
-      #endif
+      varying vec2 vUv;varying vec3 vColor,vWorldPos;varying float vOpacity,vDist,vSpin;
+      void main(){vUv=uv;vColor=iColor;vOpacity=iOpacity;vSpin=iHashSeed;
+      vec4 center=instanceMatrix*vec4(0.,0.,0.,1.);
+      vWorldPos=center.xyz;
+      vec4 mvPosition=modelViewMatrix*center;
+      // Sphere radius -> billboard diameter, so sizes carry over from the old geometry.
+      float s=length(instanceMatrix[0].xyz)*2.;
+      mvPosition.xy+=position.xy*s;
+      vDist=-mvPosition.z;gl_Position=projectionMatrix*mvPosition;}`,
+    fragmentShader:`uniform sampler2D uMap;
+      varying vec2 vUv;varying vec3 vColor,vWorldPos;varying float vOpacity,vDist,vSpin;
+      ${atmosphereGLSL}
       void main(){
-      #ifdef HASHED_ALPHA
-      if(vOpacity<.002||alphaHash(gl_FragCoord.xy,vHashSeed)>vOpacity)discard;
-      gl_FragColor=vec4(vColor,1.);
+      // Per-particle rotation keeps repeated puffs from stamping the same silhouette.
+      float c=cos(vSpin),sn=sin(vSpin);
+      vec2 uv=vec2(c*(vUv.x-.5)-sn*(vUv.y-.5),sn*(vUv.x-.5)+c*(vUv.y-.5))+.5;
+      float a=texture2D(uMap,uv).a*vOpacity;
+      a*=1.-smoothstep(.80,1.,length(vUv*2.-1.));
+      if(a<.004)discard;
+      vec3 ray=normalize(vWorldPos-uCamPos);
+      #ifdef SOFT_SMOKE
+        // Treat the billboard as a hemisphere so the sun models the puff.
+        vec2 d=vUv*2.-1.;
+        vec3 nWorld=normalize(vec3(d,sqrt(max(1.-dot(d,d),0.)))*mat3(viewMatrix));
+        float NoL=dot(nWorld,uSunDir);
+        vec3 col=vColor*mix(.62,1.55,smoothstep(-.9,.9,NoL));
+        col+=vec3(1.,.94,.84)*pow(max(dot(ray,uSunDir),0.),8.)*.7;
+        col=applyAerial(col,uCamPos,ray,vDist);
+        gl_FragColor=vec4(col*a,a);
       #else
-      gl_FragColor=vec4(vColor,vOpacity);
+        // Emissive: haze attenuates it rather than tinting it.
+        gl_FragColor=vec4(vColor*aerialTransmittance(uCamPos,ray,vDist),a);
       #endif
       #include <tonemapping_fragment>
       #include <colorspace_fragment>
-      float ff=1.-exp(-uFogDensity*uFogDensity*vFogDepth*vFogDepth);
-      gl_FragColor.rgb=mix(gl_FragColor.rgb,uFogColor,clamp(ff,0.,1.));}`,
-    transparent:!hashed,depthWrite:hashed,blending:hashed?THREE.NoBlending:blending
+      }`,
+    transparent:true, depthWrite:false, depthTest:true, fog:false,
+    blending: smoke ? THREE.CustomBlending : blending,
+    blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+    blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor
   });
 }
 function createParticleBatch(geometry,blending,hashed=false) {
@@ -687,7 +1345,7 @@ function spawnP(pos,vel,life,color,size,type='fire',isTrail=false){
   if(isTrail&&(activeTrailParticles>=MAX_TRAIL_PARTICLES||freeParticles.length<=PARTICLE_EFFECT_RESERVE))return;
   const p=freeParticles.pop();if(!p)return;
   p.position.copy(pos);p.velocity.copy(vel);p.life=life;p.maxLife=life;p.size=size;p.type=type;
-  p.color.set(color);p.opacity=type==='smoke'?.35:1;p.scale=size;p.hashSeed=Math.random()*1000;p.isTrail=isTrail;
+  p.color.set(color);p.opacity=type==='smoke'?.35:1;p.scale=size;p.hashSeed=Math.random()*6.2832;p.isTrail=isTrail;
   if(isTrail)activeTrailParticles++;activeParticles.push(p)}
 function releaseParticle(index){const p=activeParticles[index],last=activeParticles.pop();if(index<activeParticles.length)activeParticles[index]=last;
   if(p.isTrail){p.isTrail=false;activeTrailParticles--}freeParticles.push(p)}
@@ -713,7 +1371,7 @@ function resetParticlePool(){while(activeParticles.length){const p=activeParticl
 /* ═══════════════════ DEBRIS POOL ═══════════════════ */
 const MAX_DEBRIS=30,debrisPool=[];
 const debrisGeos=[new THREE.BoxGeometry(1.5,.5,1),new THREE.TetrahedronGeometry(.8),new THREE.BoxGeometry(.8,.3,2)];
-const debrisMat=new THREE.MeshStandardMaterial({color:0x555555,metalness:.6,roughness:.4});
+const debrisMat=airframeMaterial(0x4a4a48,{metalness:.35,roughness:.66});
 for(let i=0;i<MAX_DEBRIS;i++){const m=new THREE.Mesh(debrisGeos[i%3],debrisMat.clone());m.visible=false;m.userData={active:false,vel:new THREE.Vector3(),rotVel:new THREE.Vector3(),life:0};scene.add(m);debrisPool.push(m)}
 function spawnDebris(pos,count){for(let i=0;i<count;i++)for(const d of debrisPool)if(!d.userData.active){d.position.copy(pos);d.userData.vel.set((Math.random()-.5)*200,Math.random()*150+50,(Math.random()-.5)*200);d.userData.rotVel.set((Math.random()-.5)*10,(Math.random()-.5)*10,(Math.random()-.5)*10);d.userData.life=1.5+Math.random()*2;d.userData.active=true;d.visible=true;d.scale.setScalar(.8+Math.random()*1.5);d.material.color.setHex([0x555555,0x444444,0x666655,0x553333][Math.floor(Math.random()*4)]);break}}
 
@@ -729,7 +1387,7 @@ function spawnExplosion(pos, count) {
   if (count >= 30) spawnDebris(pos, 3 + Math.floor(Math.random()*3));
 }
 
-const speedLines=[];for(let i=0;i<80;i++){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));const m=new THREE.LineBasicMaterial({color:0xaaddff,transparent:true,opacity:.3,depthWrite:false,blending:THREE.AdditiveBlending});const l=new THREE.Line(g,m);l.visible=false;l.userData={active:false,life:0};scene.add(l);speedLines.push(l)}
+const speedLines=[];for(let i=0;i<80;i++){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));const m=new THREE.LineBasicMaterial({color:0xaaddff,transparent:true,opacity:.3,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});const l=new THREE.Line(g,m);l.visible=false;l.userData={active:false,life:0};scene.add(l);speedLines.push(l)}
 
 /* ═══════════════════ CONTRAILS ═══════════════════ */
 const contrailPos=[],CONTRAIL_MAX=120;
@@ -793,13 +1451,13 @@ function movingSphereHitTime(start,end,targetStart,targetEnd,radius){
 }
 function missileTerrainHitTime(start,end){
   const samples=Math.max(1,Math.ceil(start.distanceTo(end)/8));
-  if(start.y<=getTerrainHeight(start.x,start.z))return 0;
+  if(start.y<=getGroundHeight(start.x,start.z))return 0;
   let previousT=0;
   for(let i=1;i<=samples;i++){const t=i/samples;_missileTerrainProbe.lerpVectors(start,end,t);
-    if(_missileTerrainProbe.y<=getTerrainHeight(_missileTerrainProbe.x,_missileTerrainProbe.z)){
+    if(_missileTerrainProbe.y<=getGroundHeight(_missileTerrainProbe.x,_missileTerrainProbe.z)){
       let low=previousT,high=t;
       for(let j=0;j<6;j++){const mid=(low+high)*.5;_missileTerrainProbe.lerpVectors(start,end,mid);
-        if(_missileTerrainProbe.y<=getTerrainHeight(_missileTerrainProbe.x,_missileTerrainProbe.z))high=mid;else low=mid}
+        if(_missileTerrainProbe.y<=getGroundHeight(_missileTerrainProbe.x,_missileTerrainProbe.z))high=mid;else low=mid}
       return high}
     previousT=t}
   return Infinity;
@@ -876,7 +1534,7 @@ function updatePlayer(dt){
   _tmpV1.copy(player.velocity).multiplyScalar(dt);playerJet.position.add(_tmpV1);
   _tmpV1.copy(player.velocity).sub(player.prevVelocity).divideScalar(Math.max(dt,.001));
   gForce=_tmpV1.length()/9.81+1;
-  const gH=getTerrainHeight(playerJet.position.x,playerJet.position.z)+5;
+  const gH=getGroundHeight(playerJet.position.x,playerJet.position.z)+5;
   if(playerJet.position.y<gH){playerJet.position.y=gH;player.hp-=250*dt;screenShake=2}
   if(playerJet.position.y<3){playerJet.position.y=3;player.hp-=120*dt}
 
@@ -888,8 +1546,8 @@ function updatePlayer(dt){
     abL.material.color.setHSL(hue,1,lit);abR.material.color.setHSL(hue,1,lit);
     abL.material.opacity=.6+Math.random()*.3;abR.material.opacity=.6+Math.random()*.3}
   const nL=playerJet.userData.nozzleL,nR=playerJet.userData.nozzleR;
-  nL.material.emissive.setHSL(.08,1,Math.min(player.throttle*.4,.5));nL.material.emissiveIntensity=player.throttle*1.5;
-  nR.material.emissive.setHSL(.08,1,Math.min(player.throttle*.4,.5));nR.material.emissiveIntensity=player.throttle*1.5;
+  // Both cans share one glow material, so one write drives the pair.
+  nozzleGlowMat.color.setHSL(.065,1,.05+Math.min(player.throttle,1)*.45);
   // Thrust vectoring - nozzles deflect opposite to pitch direction
   const tvAngle=THREE.MathUtils.clamp(-player.pitchRate*0.5,-.35,.35);
   nL.rotation.x=tvAngle;nR.rotation.x=tvAngle;
@@ -980,7 +1638,7 @@ function beginEnemyAttack(e){
   const leadTime=Math.min(dist/(Math.max(e.currentSpeed,e.baseSpeed)+220)*e.skill,1.1);
   e.attackPoint.copy(playerJet.position).addScaledVector(player.velocity,leadTime)
     .addScaledVector(playerRight,e.passSide*(100+Math.random()*80));
-  e.attackPoint.y=Math.max(e.attackPoint.y+(Math.random()-.5)*100,getTerrainHeight(e.attackPoint.x,e.attackPoint.z)+100);
+  e.attackPoint.y=Math.max(e.attackPoint.y+(Math.random()-.5)*100,getGroundHeight(e.attackPoint.x,e.attackPoint.z)+100);
   const attackTravelTime=e.mesh.position.distanceTo(e.attackPoint)/enemyAttackSpeed(e);
   transitionEnemy(e,'attack',Math.max(4,attackTravelTime*1.25+2));
 }
@@ -1061,7 +1719,7 @@ function updateEnemies(dt){
       _eTarget.copy(playerJet.position).addScaledVector(playerFwd,500).addScaledVector(playerRight,e.passSide*220);
       _eTarget.y+=100;
       ensureEnemyHorizontalTargetDistance(_eTarget,playerRight,e.passSide,ENEMY_INBOUND_TARGET_DISTANCE);
-      _eTarget.y=Math.max(_eTarget.y,getTerrainHeight(_eTarget.x,_eTarget.z)+120);
+      _eTarget.y=Math.max(_eTarget.y,getGroundHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
       const catchupWeight=THREE.MathUtils.smoothstep(playerFwd.dot(toPN),-.2,.8);
       e.currentSpeed=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1+e.skill*.35;
@@ -1106,7 +1764,7 @@ function updateEnemies(dt){
         .addScaledVector(playerRight,e.passSide*e.repositionLateral);
       _eTarget.y+=e.repositionHeight;
       ensureEnemyHorizontalTargetDistance(_eTarget,playerRight,e.passSide,ENEMY_REPOSITION_TARGET_DISTANCE);
-      _eTarget.y=Math.max(_eTarget.y,getTerrainHeight(_eTarget.x,_eTarget.z)+120);
+      _eTarget.y=Math.max(_eTarget.y,getGroundHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
       e.currentSpeed=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=.75+e.skill*.35;
       const enemyAhead=playerBearing<-.65;
@@ -1128,7 +1786,7 @@ function updateEnemies(dt){
     _tmpQ.setFromAxisAngle(_axisZ,-bankAmount*.6);
     e.mesh.quaternion.multiply(_tmpQ).normalize();
     // Terrain avoidance
-    const h=getTerrainHeight(e.mesh.position.x,e.mesh.position.z);
+    const h=getGroundHeight(e.mesh.position.x,e.mesh.position.z);
     if(e.mesh.position.y<h+60)e.mesh.position.y=h+60;
     if(e.mesh.position.y<80)e.mesh.position.y+=80*dt;
     // Exhaust trail
@@ -1157,7 +1815,7 @@ function updateBullets(dt){for(const b of bulletPool){if(!b.userData.active)cont
   else{for(const e of enemies){if(!e.alive)continue;if(b.position.distanceTo(e.mesh.position)<14){
     e.hp-=10;e.wasHit=true;b.userData.active=false;b.visible=false;spawnExplosion(b.position,5);snd.hitMarker();
     if(e.hp<=0)killEnemy(e,100);break}}}
-  if(b.position.y<getTerrainHeight(b.position.x,b.position.z)){b.userData.active=false;b.visible=false}}}
+  if(b.position.y<getGroundHeight(b.position.x,b.position.z)){b.userData.active=false;b.visible=false}}}
 
 function updateMissiles(dt){
   let activeMissiles=0;for(const m of missilePool)if(m.userData.active)activeMissiles++;
@@ -1212,7 +1870,7 @@ function updateDebris(dt){for(const d of debrisPool){if(!d.userData.active)conti
   if(d.userData.life<=0){d.userData.active=false;d.visible=false;continue}
   d.userData.vel.y-=180*dt;d.position.addScaledVector(d.userData.vel,dt);
   d.rotation.x+=d.userData.rotVel.x*dt;d.rotation.y+=d.userData.rotVel.y*dt;d.rotation.z+=d.userData.rotVel.z*dt;
-  const h=getTerrainHeight(d.position.x,d.position.z);
+  const h=getGroundHeight(d.position.x,d.position.z);
   if(d.position.y<h){d.position.y=h;d.userData.vel.y*=-.3;d.userData.vel.x*=.7;d.userData.vel.z*=.7;
     for(let j=0;j<2;j++)spawnP(d.position,new THREE.Vector3((Math.random()-.5)*20,Math.random()*10,(Math.random()-.5)*20),.5+Math.random()*.5,0x222211,1.5+Math.random()*2,'smoke')}}}
 
@@ -1421,8 +2079,21 @@ document.getElementById('pause').addEventListener('click',()=>{togglePause()});
 updateTerrain(0,0);initClouds();
 
 /* ═══════════════════ MAIN LOOP ═══════════════════ */
+// Everything that has to sit on top of the viewer: the ocean grid, the sky dome, the sun,
+// the shadow frustum, and the camera position every atmosphere shader reads from.
+const _sunOffset = new THREE.Vector3();
+function updateWorldAnchors(elapsed){
+  atmoUniforms.uCamPos.value.copy(camera.position);
+  gradePass.uniforms.uTime.value = elapsed;
+  waterMat.uniforms.uTime.value = elapsed;
+  water.position.x = camera.position.x; water.position.z = camera.position.z;
+  sky.position.copy(camera.position);
+  sunSprite.position.copy(_sunOffset.copy(sunDirection).multiplyScalar(20000).add(camera.position));
+  sunLight.position.copy(_sunOffset.copy(sunDirection).multiplyScalar(1500).add(playerJet.position));
+  sunLight.target.position.copy(playerJet.position);
+}
 function animate(){requestAnimationFrame(animate);
-  if (paused) { drawHUD(); composer.render(); return; }
+  if (paused) { updateWorldAnchors(clock.getElapsedTime()); drawHUD(); composer.render(); return; }
   const dt=Math.min(clock.getDelta(),.05);const elapsed=clock.getElapsedTime();
   if(gameStarted&&!gameOver){
     gameTime+=dt;updatePlayer(dt);updateEnemies(dt);updateBullets(dt);updateMissiles(dt);
@@ -1430,12 +2101,6 @@ function animate(){requestAnimationFrame(animate);
     updateKillNotifications(dt);updateThreatDetection();updateCamera(dt);
     updateTerrain(playerJet.position.x,playerJet.position.z);updateClouds(playerJet.position.x,playerJet.position.z);
     checkGameOver();
-    water.position.x=playerJet.position.x;water.position.z=playerJet.position.z;
-    sky.position.copy(playerJet.position);
-    sunSprite.position.copy(sunDirection.clone().multiplyScalar(20000).add(playerJet.position));
-    sunLight.position.copy(sunDirection.clone().multiplyScalar(1000).add(playerJet.position));
-    sunLight.target.position.copy(playerJet.position);
-    waterMat.uniforms.uTime.value=elapsed;waterMat.uniforms.uCamPos.value.copy(camera.position);
     syncParticleBatches();
   } else if(gameOver&&deathCamTimer>0){
     deathCamTimer-=dt;deathCamAngle+=dt*1.5;const oD=60+((3-deathCamTimer)/3)*40;
@@ -1444,6 +2109,7 @@ function animate(){requestAnimationFrame(animate);
     syncParticleBatches();
     if(deathCamTimer<=0){document.getElementById('final-score').textContent=score;document.getElementById('game-over').style.display='flex'}
   }
+  updateWorldAnchors(elapsed);
   if(hitFlash>0){hitFlash-=1.2*dt;if(hitFlash<0)hitFlash=0}
   drawHUD();composer.render();}
 animate();

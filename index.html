@@ -74,6 +74,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { Sky } from 'three/addons/objects/Sky.js';
 
@@ -336,9 +337,14 @@ const GradeShader = {
 // Post runs at the drawing-buffer resolution. The composer used to sit at CSS pixels while
 // the canvas was at 2x, so the whole frame was rendered at half res and upscaled.
 const POST_RATIO = Math.min(window.devicePixelRatio, 1.5);
+const sceneDepthTexture = new THREE.DepthTexture(
+  Math.round(window.innerWidth * POST_RATIO), Math.round(window.innerHeight * POST_RATIO));
 composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(
   Math.round(window.innerWidth * POST_RATIO), Math.round(window.innerHeight * POST_RATIO),
-  { type: THREE.HalfFloatType }));
+  { type: THREE.HalfFloatType, depthTexture: sceneDepthTexture }));
+// EffectComposer never resets its ping-pong buffers between frames, so with an odd number of
+// swapping passes RenderPass alternates which target it draws into. Both therefore need a
+// depth attachment - clone() gives renderTarget2 its own, and it must be left in place.
 composer.setPixelRatio(POST_RATIO);
 composer.addPass(new RenderPass(scene, camera));
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.26, 0.45, 4.0);
@@ -361,6 +367,7 @@ window.addEventListener('resize', () => {
   const w = window.innerWidth, h = window.innerHeight;
   camera.aspect = w / h; camera.updateProjectionMatrix();
   renderer.setSize(w, h); composer.setSize(w, h);
+  reflectRT.setSize(Math.round(w * REFLECT_SCALE), Math.round(h * REFLECT_SCALE));
   syncPostResolution(w, h); syncOceanPixelAngle(); resizeHUD();
 });
 
@@ -580,19 +587,59 @@ function createCloudShadowTexture() {
   return tex;
 }
 const cloudShadowTex = createCloudShadowTexture();
+const CLOUD_BOTTOM_REF = 1050;   // condensation level, shared by the shadow offset and the layer
 // Shared so ground and sea are shaded by the same clouds; scrolled once per frame.
 const cloudShadowUniforms = {
   uCloudShadow:    { value: cloudShadowTex },
   uCloudShadowXf:  { value: new THREE.Vector3(0.000105, 0, 0) },  // scale, offsetX, offsetZ
-  uCloudShadowAmt: { value: 0.42 }
+  uCloudShadowAmt: { value: 0.42 },
+  // The mask is a mid-to-high field, so only its upper range counts as cloud. The volumetric
+  // layer and the ground shadow both read it through this same window, which is what keeps a
+  // cloud and the shadow it casts describing the same object. Measured against the field's
+  // own percentiles: this leaves roughly a third of the sky covered, scattered to broken.
+  uCloudCover:     { value: new THREE.Vector2(0.26, 0.47) },
+  // Second, finer tap into the same texture. The coarse tap alone has 5 km features - one
+  // cloud filling the whole sky - so it is demoted to a weather-scale gate and this one
+  // carves the individual cumulus cells inside it.
+  uCloudCellXf:    { value: new THREE.Vector3(2.3, 0.37, 0.61) },  // scale multiple, offset
+  // A cloud does not shade the ground directly beneath it: with the sun at 21 degrees the
+  // shadow lands kilometres downsun. This is the ground-to-cloud offset along the sun ray.
+  uCloudShadowOffset: { value: new THREE.Vector2(
+    sunDirection.x * (CLOUD_BOTTOM_REF + 300) / sunDirection.y,
+    sunDirection.z * (CLOUD_BOTTOM_REF + 300) / sunDirection.y) },
+  // Height and colour the sea reflects the cloud layer at. The volumetric clouds are a
+  // post-process, so they never reach the mirrored render pass and the water has to put
+  // them back analytically or it sits cloudless under a sky full of cloud.
+  uCloudRefY:      { value: CLOUD_BOTTOM_REF + 260 },
+  uCloudRefColor:  { value: new THREE.Color(0xeef4ff) }
 };
 const CLOUD_SHADOW_GLSL = `
 uniform sampler2D uCloudShadow;
-uniform vec3 uCloudShadowXf;
-uniform float uCloudShadowAmt;
+uniform vec3 uCloudShadowXf, uCloudCellXf, uCloudRefColor;
+uniform vec2 uCloudCover, uCloudShadowOffset;
+uniform float uCloudShadowAmt, uCloudRefY;
+// Fraction of the mask that counts as cloud, shared by the volumetric layer and the shadow.
+// Two taps of the one texture: the coarse one says where the weather is and the fine one
+// breaks that region into cells, so a cumulus is about a kilometre across rather than five.
+float cloudCoverFrom(float gate, float cell){
+  return smoothstep(uCloudCover.x, uCloudCover.y, cell * (0.35 + 0.65 * gate));
+}
+vec2 cloudCoverUV(vec2 worldXZ){ return worldXZ * uCloudShadowXf.x + uCloudShadowXf.yz; }
+// Surface shaders: screen-space derivatives are meaningful here, so let the mip chain filter.
+float cloudCoverAt(vec2 worldXZ){
+  vec2 uv = cloudCoverUV(worldXZ);
+  return cloudCoverFrom(texture2D(uCloudShadow, uv).r,
+                        texture2D(uCloudShadow, uv * uCloudCellXf.x + uCloudCellXf.yz).r);
+}
+// Raymarching: the UV comes from a loop variable, so its screen derivative is nonsense and
+// the implicit mip level jumps between quads - which prints the march as blocks. Pin it.
+float cloudCoverLod0(vec2 worldXZ){
+  vec2 uv = cloudCoverUV(worldXZ);
+  return cloudCoverFrom(textureLod(uCloudShadow, uv, 0.0).r,
+                        textureLod(uCloudShadow, uv * uCloudCellXf.x + uCloudCellXf.yz, 0.0).r);
+}
 float cloudShadowAt(vec2 worldXZ){
-  vec2 uv = worldXZ * uCloudShadowXf.x + uCloudShadowXf.yz;
-  return 1.0 - texture2D(uCloudShadow, uv).r * uCloudShadowAmt;
+  return 1.0 - cloudCoverAt(worldXZ + uCloudShadowOffset) * uCloudShadowAmt;
 }`;
 
 /* ═══════════════════ OCEAN ═══════════════════ */
@@ -626,11 +673,15 @@ const waterMat = new THREE.ShaderMaterial({
     uSSSColor:   { value: new THREE.Color(0x1f8a70) },
     uFoamColor:  { value: new THREE.Color(0xe9f2f5) },
     uOceanRadius:{ value: OCEAN_RADIUS },
-    uPixelAngle: { value: 0.002 }
+    uPixelAngle: { value: 0.002 },
+    uReflectTex:      { value: null },
+    uReflectMatrix:   { value: new THREE.Matrix4() },
+    uReflectStrength: { value: 0 }
   }, cloudShadowUniforms, atmoUniforms),
   vertexShader: `
     uniform float uTime,uOceanRadius;uniform vec3 uCamPos;
-    varying vec3 vWorldPos;varying vec2 vSwellGrad;
+    uniform mat4 uReflectMatrix;
+    varying vec3 vWorldPos;varying vec2 vSwellGrad;varying vec4 vReflectCoord;
     varying float vViewDist,vSwellH,vDepth,vEdge,vFold,vLee;
     ${simplexGLSL}
     ${swellConstGLSL}
@@ -688,13 +739,15 @@ const waterMat = new THREE.ShaderMaterial({
       vFold=fold;
       vLee=lee;
       vWorldPos=wp;
+      vReflectCoord=uReflectMatrix*vec4(base.x,0.,base.y,1.);
       vec4 mv=viewMatrix*vec4(wp,1.);vViewDist=length(mv.xyz);
       gl_Position=projectionMatrix*mv;
     }`,
   fragmentShader: `
     uniform float uTime,uOceanRadius,uPixelAngle;
     uniform vec3 uZenith,uHorizon,uSunGlow,uDeepColor,uMidColor,uShoalColor,uSSSColor,uFoamColor;
-    varying vec3 vWorldPos;varying vec2 vSwellGrad;
+    uniform sampler2D uReflectTex;uniform float uReflectStrength;
+    varying vec3 vWorldPos;varying vec2 vSwellGrad;varying vec4 vReflectCoord;
     varying float vViewDist,vSwellH,vDepth,vEdge,vFold,vLee;
     ${simplexGLSL}
     ${atmosphereGLSL}
@@ -744,6 +797,22 @@ const waterMat = new THREE.ShaderMaterial({
       float sd=max(dot(dir,uSunDir),0.);
       c+=uSunGlow*pow(sd,10.)*.5;
       return mix(hazeColor(vec3(dir.x,max(dir.y,0.),dir.z))*.9,c,smoothstep(-.12,.06,dir.y));
+    }
+
+    // Where a reflected ray pierces the cloud deck, tinted by the same coverage field the
+    // volumetric layer is carved from, so sea and sky agree about where the clouds are.
+    vec3 reflectedSky(vec3 dir,vec3 from){
+      vec3 c=skyDome(dir);
+      if(dir.y>.03){
+        float tc=(uCloudRefY-from.y)/dir.y;
+        if(tc>0.){
+          float cov=cloudCoverAt(from.xz+dir.xz*tc);
+          // Grazing reflections reach clouds tens of kilometres out, where haze has them.
+          cov*=1.-smoothstep(9000.,24000.,tc);
+          c=mix(c,uCloudRefColor,cov*.88);
+        }
+      }
+      return c;
     }
 
     void main(){
@@ -799,7 +868,17 @@ const waterMat = new THREE.ShaderMaterial({
       float F=.02+.98*pow(1.-NoV,5.);
 
       vec3 R=reflect(-V,N);
-      vec3 refl=skyDome(R);
+      vec3 refl=reflectedSky(R,vWorldPos);
+      // Mirror pass, distorted by the wave slope. Falls back to the sky dome wherever the
+      // sample would land off-screen, which is most of the far field.
+      if(uReflectStrength>0.){
+        vec2 ruv=vReflectCoord.xy/max(vReflectCoord.w,1e-4);
+        ruv+=grad*(0.9/max(dist*0.02,1.0));
+        vec2 edge=smoothstep(vec2(0.0),vec2(0.06),ruv)*(1.0-smoothstep(vec2(0.94),vec2(1.0),ruv));
+        float valid=edge.x*edge.y*step(0.0,vReflectCoord.w)*uReflectStrength;
+        vec3 planar=texture2D(uReflectTex,clamp(ruv,0.001,0.999)).rgb;
+        refl=mix(refl,planar,valid*(1.0-vEdge));
+      }
 
       // Sub-pixel slope that fell out of the normal widens the specular lobe with distance.
       float rough=clamp(.014+lost*.80+smoothstep(400.,11000.,dist)*.07,.008,.30);
@@ -984,6 +1063,15 @@ const cloudMaterial = new THREE.ShaderMaterial({
 });
 const cloudMesh = createDynamicInstancedMesh(cloudGeometry,cloudMaterial,MAX_CLOUD_INSTANCES);
 cloudMesh.renderOrder = 5;
+// Superseded by the raymarched layer below. The sprite field stays in the source as a
+// fallback: flip this to true and remove the volumetric pass to get it back.
+// The raymarched layer replaces this billboard field. One switch, in case the march turns
+// out to be too expensive on a given machine: the sprites are the fallback and cost almost
+// nothing, and everything else - the shadows on the ground, the reflection in the sea - is
+// driven by the shared coverage field either way.
+const USE_VOLUMETRIC_CLOUDS = true;
+const USE_SPRITE_CLOUDS = !USE_VOLUMETRIC_CLOUDS;
+cloudMesh.visible = USE_SPRITE_CLOUDS;
 const cloudMatrix = new THREE.Matrix4();
 function createCloudCluster() {
   const cluster = { position:new THREE.Vector3() };
@@ -1033,7 +1121,7 @@ function updateClouds(px, pz, dt) {
       c.position.set(px + Math.cos(a)*d, 1080 + Math.random()*220, pz + Math.sin(a)*d);
     }
   }
-  syncCloudInstances();
+  if (USE_SPRITE_CLOUDS) syncCloudInstances();
 }
 
 /* ═══════════════════ GROUND DETAIL TEXTURE ═══════════════════ */
@@ -1587,8 +1675,139 @@ function airframeMaterial(color, opts = {}) {
   return m;
 }
 
+/* ═══════════════════ AIRFRAME LOFTING ═══════════════════ */
+// Aircraft were a stack of cylinders and cones with a cone for a nose. Real airframes are
+// lofted: a series of cross-sections skinned into one continuous surface. Doing it properly
+// gives a chined fuselage that blends into its wing roots, and - because the skin carries its
+// own arc-length UVs - panel lines that follow the body instead of landing at random.
+
+// Superellipse ring. p=2 is an ellipse; higher powers square it off into the flat-bottomed,
+// chined cross-section a modern fighter actually has.
+function ellipseRing(halfW, halfH, power, yCentre, points) {
+  const ring = [], e = 2 / power;
+  for (let i = 0; i < points; i++) {
+    const a = (i / points) * Math.PI * 2 - Math.PI / 2;   // seam on the belly centreline
+    const c = Math.cos(a), s = Math.sin(a);
+    ring.push(new THREE.Vector2(
+      Math.sign(c) * Math.pow(Math.abs(c), e) * halfW,
+      Math.sign(s) * Math.pow(Math.abs(s), e) * halfH + yCentre));
+  }
+  return ring;
+}
+
+// Skin an ordered list of { z, ring } stations. Rings must share a point count.
+function loftSkin(stations, opts = {}) {
+  const closed = opts.closed !== false;
+  const uvScale = opts.uvScale || 8;
+  const n = stations[0].ring.length, m = stations.length;
+  const cols = closed ? n + 1 : n;              // duplicate seam column so UVs can wrap
+  const pos = [], uv = [], idx = [];
+  // Arc length along the body drives V, so panel density stays even as sections change size.
+  const vAt = [0];
+  for (let j = 1; j < m; j++) vAt[j] = vAt[j-1] + Math.abs(stations[j].z - stations[j-1].z);
+  for (let j = 0; j < m; j++) {
+    const st = stations[j];
+    let peri = 0;
+    for (let i = 0; i < cols; i++) {
+      const p = st.ring[i % n];
+      if (i > 0) { const q = st.ring[(i-1) % n]; peri += p.distanceTo(q); }
+      pos.push(p.x, p.y, st.z);
+      uv.push(peri / uvScale, vAt[j] / uvScale);
+    }
+  }
+  for (let j = 0; j < m - 1; j++)
+    for (let i = 0; i < cols - 1; i++) {
+      const a = j*cols + i, b = a + 1, c = a + cols, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  // The duplicated seam column would otherwise light as a crease down the belly.
+  if (closed) {
+    const nrm = g.attributes.normal;
+    for (let j = 0; j < m; j++) {
+      const a = j*cols, b = a + cols - 1;
+      const x = nrm.getX(a) + nrm.getX(b), y = nrm.getY(a) + nrm.getY(b), z = nrm.getZ(a) + nrm.getZ(b);
+      const l = Math.hypot(x, y, z) || 1;
+      nrm.setXYZ(a, x/l, y/l, z/l); nrm.setXYZ(b, x/l, y/l, z/l);
+    }
+    nrm.needsUpdate = true;
+  }
+  return g;
+}
+
+// Build a fuselage from [z, halfWidth, halfHeight, yCentre, power] rows.
+function loftFuselage(rows, points = 34) {
+  return loftSkin(rows.map(r => ({ z: r[0], ring: ellipseRing(r[1], r[2], r[4], r[3], points) })));
+}
+
+// Symmetric NACA-style thickness distribution, sampled denser at the leading edge where the
+// curvature is; a uniform sample there reads as a chiselled edge.
+// 18 samples left the aft two thirds of a wing as half a dozen long flat facets, and the
+// shading banded along every one of them. These meshes are a few hundred triangles; the
+// extra sections are free and the surface reads as a surface.
+function airfoilSection(chord, thickness, samples = 26) {
+  const pts = [];
+  const yt = x => 5 * thickness * (0.2969*Math.sqrt(x) - 0.1260*x - 0.3516*x*x + 0.2843*x*x*x - 0.1015*x*x*x*x);
+  for (let i = 0; i <= samples; i++) {             // upper surface, LE -> TE
+    const t = i / samples, x = t * t;
+    pts.push(new THREE.Vector2(x * chord, yt(x) * chord));
+  }
+  for (let i = samples - 1; i > 0; i--) {          // lower surface, TE -> LE
+    const t = i / samples, x = t * t;
+    pts.push(new THREE.Vector2(x * chord, -yt(x) * chord));
+  }
+  return pts;
+}
+
+// Loft a lifting surface from [spanPos, leadingEdgeZ, chord, thickness, height] stations.
+// `axis` 'x' lays it out as a wing or taileron, 'y' as a fin.
+function loftAerofoil(stations, axis = 'x', samples = 26) {
+  const n = stations.length;
+  const rings = stations.map(s => airfoilSection(s[2], s[3], samples));
+  const cols = rings[0].length;
+  const pos = [], uv = [], idx = [];
+  let span = [0];
+  for (let j = 1; j < n; j++) span[j] = span[j-1] + Math.abs(stations[j][0] - stations[j-1][0]);
+  for (let j = 0; j < n; j++) {
+    const st = stations[j];
+    for (let i = 0; i < cols; i++) {
+      const p = rings[j][i];
+      // p.x runs chordwise (+Z aft), p.y is thickness, normal to the surface plane.
+      if (axis === 'x') pos.push(st[0], st[4] + p.y, st[1] + p.x);
+      else              pos.push(st[4] + p.y, st[0], st[1] + p.x);
+      uv.push(p.x / 6, span[j] / 6);
+    }
+  }
+  for (let j = 0; j < n - 1; j++)
+    for (let i = 0; i < cols - 1; i++) {
+      const a = j*cols + i, b = a + 1, c = a + cols, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  // Cap the tip so the surface is closed.
+  const base = (n-1) * cols;
+  for (let i = 1; i < cols - 1; i++) idx.push(base, base + i, base + i + 1);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
 /* ═══════════════════ PLAYER JET ═══════════════════ */
-const bodyMat = airframeMaterial(0x71787f);
+// Two-tone, like the aircraft it is modelled on: pale grey fuselage over darker flying
+// surfaces. One flat colour over the whole airframe reads as plastic at any resolution.
+const bodyMat = airframeMaterial(0x7d848b);
+const wingMat = airframeMaterial(0x5d646c, { roughness: .52 });
+// Canopy glass: dark gold-tinted, kept opaque so the chase camera never sorts through it.
+const canopyMat = new THREE.MeshStandardMaterial({ color: 0x4a5f78, metalness: 1, roughness: .035, envMapIntensity: 3.0 });
+// Intake ducts are deep shadow with a little bounce, not painted metal.
+const intakeDuctMat = new THREE.MeshStandardMaterial({ color: 0x1b1f24, metalness: .3, roughness: .85, side: THREE.DoubleSide, envMapIntensity: .25 });
+const storeMat = airframeMaterial(0x8d9299, { roughness: .48 });
 const darkMat = airframeMaterial(0x3d444b, { roughness: .62 });
 // Canopy rendered as opaque tinted glass (no transparency artifacts)
 const nozzleMatBase=airframeMaterial(0x3a3632,{metalness:.72,roughness:.44,envMapIntensity:.5});
@@ -1608,56 +1827,161 @@ function buildNozzle(){
 }
 function createPlayerJet(){
   const j=new THREE.Group();
-  // Smooth nose cone
-  const noseGeo=new THREE.ConeGeometry(1.1,8,16);noseGeo.rotateX(Math.PI/2);
-  const nose=new THREE.Mesh(noseGeo,bodyMat);nose.position.set(0,0,-10);nose.scale.set(1.2,.55,1);j.add(nose);
-  // Forward fuselage (smooth oval cross-section)
-  const fwGeo=new THREE.CylinderGeometry(1.3,1.7,5,16);fwGeo.rotateX(Math.PI/2);
-  const fw=new THREE.Mesh(fwGeo,bodyMat);fw.position.set(0,0,-5);fw.scale.set(1.1,.6,1);j.add(fw);
-  // Main fuselage (wide flat oval body)
-  const mbGeo=new THREE.CylinderGeometry(1.7,1.7,11,16);mbGeo.rotateX(Math.PI/2);
-  const mb=new THREE.Mesh(mbGeo,bodyMat);mb.position.z=1.5;mb.scale.set(1.15,.55,1);j.add(mb);
-  // Rear fuselage (smooth engine housing)
-  const rrGeo=new THREE.CylinderGeometry(1.6,1.3,5,16);rrGeo.rotateX(Math.PI/2);
-  const rr=new THREE.Mesh(rrGeo,darkMat);rr.position.z=8.5;rr.scale.set(1.1,.55,1);j.add(rr);
-  // Cockpit canopy (opaque tinted - avoids transparency artifacts from chase cam)
-  const cpMat=new THREE.MeshStandardMaterial({color:0x14202e,metalness:1,roughness:.045,envMapIntensity:2.6});
-  const cp=new THREE.Mesh(new THREE.SphereGeometry(.7,16,12,0,Math.PI*2,0,Math.PI*.4),cpMat);cp.position.set(0,.5,-5.5);cp.scale.set(.65,.4,1.4);j.add(cp);
-  // Air intakes (smooth)
-  const igGeo=new THREE.CylinderGeometry(.35,.4,4,12);igGeo.rotateX(Math.PI/2);
-  const iL=new THREE.Mesh(igGeo,darkMat);iL.position.set(-1.6,-.4,-2);j.add(iL);const iR=iL.clone();iR.position.x=1.6;j.add(iR);
-  const ws=new THREE.Shape();ws.moveTo(0,0);ws.lineTo(-12,-2.5);ws.lineTo(-10,-4.5);ws.lineTo(-2,-4);ws.lineTo(0,-2);
-  const wg=new THREE.ExtrudeGeometry(ws,{depth:.2,bevelEnabled:true,bevelThickness:.06,bevelSize:.06,bevelSegments:3});
-  const wm=airframeMaterial(0x767d84,{roughness:.52});
-  const wL=new THREE.Mesh(wg,wm);wL.rotation.set(Math.PI/2,0,0);wL.position.set(.2,0,1.5);j.add(wL);
-  const wR=wL.clone();wR.scale.x=-1;wR.position.x=-.2;j.add(wR);
-  // F-22-style twin tail fins rise above the fuselage and cant outward.
-  const vsShape=new THREE.Shape();vsShape.moveTo(0,0);vsShape.lineTo(.8,3.2);vsShape.lineTo(2.6,4);vsShape.lineTo(4.2,0);
-  const vg=new THREE.ExtrudeGeometry(vsShape,{depth:.16,bevelEnabled:true,bevelThickness:.04,bevelSize:.04,bevelSegments:2});
-  vg.translate(0,0,-.08);vg.rotateY(Math.PI/2);
-  const vL=new THREE.Mesh(vg,bodyMat);vL.position.set(-1.25,.1,9.5);vL.rotation.z=.34;j.add(vL);
-  const vR=new THREE.Mesh(vg,bodyMat);vR.position.set(1.25,.1,9.5);vR.rotation.z=-.34;j.add(vR);
-  const hs=new THREE.Shape();hs.moveTo(0,0);hs.lineTo(-4,-.8);hs.lineTo(-3,-1.5);hs.lineTo(0,-1);
-  const hg=new THREE.ExtrudeGeometry(hs,{depth:.12,bevelEnabled:true,bevelThickness:.04,bevelSize:.04,bevelSegments:2});
-  const hL=new THREE.Mesh(hg,bodyMat);hL.rotation.set(Math.PI/2,0,0);hL.position.set(.5,.1,8);j.add(hL);
-  const hR=hL.clone();hR.scale.x=-1;hR.position.x=-.5;j.add(hR);
+
+  // One continuous skin from radome to tail: pointed and round at the nose, squaring off
+  // through the cockpit, then widening into the flat chined mid-body that carries the wing.
+  const fuse = loftFuselage([
+    //  z      halfW  halfH  yCentre power
+    [-14.0,   0.03,  0.03,   0.00,  2.0 ],
+    [-13.2,   0.20,  0.18,   0.00,  2.0 ],
+    [-11.8,   0.46,  0.41,   0.00,  2.2 ],
+    [-10.2,   0.72,  0.62,   0.02,  2.4 ],
+    [ -8.4,   0.98,  0.81,   0.05,  2.6 ],
+    [ -6.6,   1.20,  0.95,   0.08,  2.8 ],
+    [ -4.8,   1.38,  1.02,   0.08,  3.0 ],
+    [ -3.0,   1.66,  1.05,   0.04,  3.3 ],
+    [ -1.0,   2.08,  1.06,   0.00,  3.6 ],
+    [  1.2,   2.32,  1.06,  -0.02,  3.8 ],
+    [  3.8,   2.36,  1.03,  -0.02,  3.8 ],
+    [  6.2,   2.24,  0.98,   0.00,  3.6 ],
+    [  8.6,   2.00,  0.92,   0.02,  3.2 ],
+    [ 10.4,   1.74,  0.87,   0.02,  3.0 ],
+    [ 11.8,   1.48,  0.80,   0.00,  2.6 ],
+    [ 12.7,   1.30,  0.72,  -0.02,  2.3 ]
+  ]);
+  j.add(new THREE.Mesh(fuse, bodyMat));
+
+  // Leading-edge root extensions: the thin chines that run forward from the wing along the
+  // forebody. They are most of what makes a fighter read as a fighter from above.
+  const lerx = loftAerofoil([
+    [ 1.35, -9.2, 6.6, .045, .55],
+    [ 1.95, -8.0, 7.6, .050, .40],
+    [ 2.55, -6.4, 8.6, .055, .18]
+  ], 'x', 12);
+  const lerxL = new THREE.Mesh(lerx, bodyMat); j.add(lerxL);
+  const lerxR = new THREE.Mesh(lerx, bodyMat); lerxR.scale.x = -1; j.add(lerxR);
+
+  // Swept, tapered wing with washout at the tip.
+  const wingStations = [
+    [ 2.4, -3.4, 11.2, .058, -.28],
+    [ 4.6, -1.2,  8.9, .053, -.20],
+    [ 7.0,  1.0,  6.6, .048, -.08],
+    [ 9.4,  3.0,  4.4, .043,  .08],
+    [11.3,  4.5,  2.7, .038,  .24],
+    [12.1,  5.2,  1.9, .034,  .32]
+  ];
+  const wing = loftAerofoil(wingStations, 'x');
+  const wingL = new THREE.Mesh(wing, wingMat); j.add(wingL);
+  const wingR = new THREE.Mesh(wing, wingMat); wingR.scale.x = -1; j.add(wingR);
+
+  // Canted twin fins. Kept low: any taller and the chase camera looks straight into one.
+  const fin = loftAerofoil([
+    [0.15, 7.4, 4.5, .075, 0],
+    [1.35, 8.2, 3.8, .065, 0],
+    [2.55, 9.1, 2.9, .055, 0],
+    [3.55, 9.9, 2.0, .045, 0],
+    [4.15,10.5, 1.3, .038, 0]
+  ], 'y', 18);
+  const finL = new THREE.Mesh(fin, bodyMat);
+  finL.position.set(-1.30, 0.55, 0); finL.rotation.z = 0.31; j.add(finL);
+  const finR = new THREE.Mesh(fin, bodyMat);
+  finR.position.set( 1.30, 0.55, 0); finR.rotation.z = -0.31; j.add(finR);
+
+  // All-moving tailerons.
+  const taileron = loftAerofoil([
+    [1.9, 7.6, 4.3, .060, 0],
+    [3.4, 8.3, 3.5, .052, 0],
+    [4.8, 9.0, 2.6, .046, 0],
+    [5.8, 9.6, 1.8, .040, 0]
+  ], 'x', 12);
+  const tailL = new THREE.Mesh(taileron, wingMat); tailL.position.y = -.05; j.add(tailL);
+  const tailR = new THREE.Mesh(taileron, wingMat); tailR.scale.x = -1; tailR.position.y = -.05; j.add(tailR);
+
+  // Intakes: a lip ring with a dark duct receding inside, rather than a tube stuck on the side.
+  const intakeLip = loftFuselage([
+    [-5.10, 0.66, 0.74, 0, 2.8],
+    [-4.70, 0.80, 0.90, 0, 3.0],
+    [-2.20, 0.84, 0.94, 0, 3.0],
+    [ 0.60, 0.78, 0.86, 0, 2.8]
+  ], 18);
+  const intakeDuct = loftFuselage([
+    [-4.72, 0.70, 0.80, 0, 3.0],
+    [-3.00, 0.60, 0.68, 0, 2.8],
+    [-1.20, 0.50, 0.56, 0, 2.6]
+  ], 18);
+  for (const sx of [-1, 1]) {
+    const lip = new THREE.Mesh(intakeLip, bodyMat);
+    lip.position.set(sx * 1.86, -0.62, 0); lip.rotation.y = sx * -0.045; j.add(lip);
+    const duct = new THREE.Mesh(intakeDuct, intakeDuctMat);
+    duct.position.set(sx * 1.86, -0.62, 0); j.add(duct);
+  }
+
+  // Canopy: a lofted bubble with a frame rail, sitting in a recessed coaming.
+  const canopy = loftFuselage([
+    [-7.9, 0.05, 0.04, 0.00, 2.2],
+    [-7.2, 0.42, 0.30, 0.06, 2.4],
+    [-6.2, 0.66, 0.52, 0.10, 2.6],
+    [-5.0, 0.74, 0.60, 0.12, 2.8],
+    [-3.8, 0.72, 0.56, 0.10, 2.8],
+    [-2.9, 0.60, 0.40, 0.06, 2.6],
+    [-2.4, 0.44, 0.20, 0.02, 2.4]
+  ], 20);
+  const cp = new THREE.Mesh(canopy, canopyMat); cp.position.y = 0.86; j.add(cp);
+  const frame = loftFuselage([
+    [-5.05, 0.78, 0.64, 0.12, 2.8],
+    [-4.85, 0.79, 0.65, 0.12, 2.8]
+  ], 20);
+  const fr = new THREE.Mesh(frame, darkMat); fr.position.y = 0.86; j.add(fr);
+
+  // Radome dielectric band and a pitot boom - small cues that read as a real aircraft nose.
+  const band = loftFuselage([
+    [-11.9, 0.47, 0.42, 0, 2.2],
+    [-11.6, 0.50, 0.45, 0, 2.2]
+  ], 20);
+  j.add(new THREE.Mesh(band, darkMat));
+  const boom = new THREE.Mesh(new THREE.CylinderGeometry(.055, .03, 2.2, 6), darkMat);
+  boom.rotation.x = Math.PI / 2; boom.position.set(0, 0, -15.0); j.add(boom);
+
+  // Wing pylons and stores.
+  const pylon = new THREE.BoxGeometry(.15, .48, 1.9);
+  const storeBody = new THREE.CylinderGeometry(.17, .17, 3.6, 10); storeBody.rotateX(Math.PI/2);
+  const storeNose = new THREE.ConeGeometry(.17, 1.1, 10); storeNose.rotateX(-Math.PI/2);
+  const storeFin = new THREE.BoxGeometry(.03, .52, .60);
+  for (const sx of [-1, 1]) for (const [px, pz] of [[5.6, 1.2], [8.6, 3.1]]) {
+    const py = new THREE.Mesh(pylon, darkMat);
+    py.position.set(sx * px, -0.42, pz); j.add(py);
+    const st = new THREE.Mesh(storeBody, storeMat);
+    st.position.set(sx * px, -0.80, pz + 0.3); j.add(st);
+    const sn = new THREE.Mesh(storeNose, storeMat);
+    sn.position.set(sx * px, -0.80, pz - 2.05); j.add(sn);
+    for (let f = 0; f < 4; f++) {
+      const fin = new THREE.Mesh(storeFin, darkMat);
+      fin.position.set(sx * px, -0.80, pz + 1.85);
+      fin.rotation.z = f * Math.PI / 2 + Math.PI / 4;
+      j.add(fin);
+    }
+  }
+
   // Exhaust cans: an open scorched ring, a dark liner, and a hot disc set back inside. The
   // old solid cylinder showed the viewer its flat aft end cap - a painted mustard coin.
-  const nL=buildNozzle();nL.position.set(.7,0,11);j.add(nL);
-  const nR=buildNozzle();nR.position.set(-.7,0,11);j.add(nR);
+  const nL=buildNozzle();nL.position.set(.66,-.02,12.9);nL.scale.setScalar(1.18);j.add(nL);
+  const nR=buildNozzle();nR.position.set(-.66,-.02,12.9);nR.scale.setScalar(1.18);j.add(nR);
   j.userData.nozzleL=nL;j.userData.nozzleR=nR;
   j.userData.nozzleGlowL=nL.userData.core;j.userData.nozzleGlowR=nR.userData.core;
   const ag=new THREE.ConeGeometry(.7,6,8);ag.rotateX(-Math.PI/2);
   const amL=new THREE.MeshBasicMaterial({color:0x4488ff,transparent:true,opacity:.75,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});
-  const aL=new THREE.Mesh(ag,amL);aL.position.set(.7,0,14);aL.visible=false;j.add(aL);
-  const aR=new THREE.Mesh(ag,amL.clone());aR.position.set(-.7,0,14);aR.visible=false;j.add(aR);
+  const aL=new THREE.Mesh(ag,amL);aL.position.set(.66,-.02,15.9);aL.visible=false;j.add(aL);
+  const aR=new THREE.Mesh(ag,amL.clone());aR.position.set(-.66,-.02,15.9);aR.visible=false;j.add(aR);
   j.userData.abL=aL;j.userData.abR=aR;
-  const nvg=new THREE.SphereGeometry(.12,6,6);
-  const nr=new THREE.Mesh(nvg,new THREE.MeshBasicMaterial({color:0xff0000}));nr.position.set(-12,.1,0);j.add(nr);
-  const ng2m=new THREE.Mesh(nvg,new THREE.MeshBasicMaterial({color:0x00ff00}));ng2m.position.set(12,.1,0);j.add(ng2m);
-  const nw=new THREE.Mesh(nvg,new THREE.MeshBasicMaterial({color:0xffffff}));nw.position.set(0,2.5,10);j.add(nw);
-  const prl=new THREE.PointLight(0xff0000,2,30);prl.position.set(-12,.1,0);j.add(prl);
-  const pgl=new THREE.PointLight(0x00ff00,2,30);pgl.position.set(12,.1,0);j.add(pgl);
+
+  const nvg=new THREE.SphereGeometry(.13,6,6);
+  const tipL=new THREE.Vector3(-12.1,.32,5.6), tipR=new THREE.Vector3(12.1,.32,5.6);
+  const nr=new THREE.Mesh(nvg,new THREE.MeshBasicMaterial({color:0xff0000}));nr.position.copy(tipL);j.add(nr);
+  const ng2m=new THREE.Mesh(nvg,new THREE.MeshBasicMaterial({color:0x00ff00}));ng2m.position.copy(tipR);j.add(ng2m);
+  const nw=new THREE.Mesh(nvg,new THREE.MeshBasicMaterial({color:0xffffff}));nw.position.set(1.30,5.35,10.6);j.add(nw);
+  const prl=new THREE.PointLight(0xff0000,2,30);prl.position.copy(tipL);j.add(prl);
+  const pgl=new THREE.PointLight(0x00ff00,2,30);pgl.position.copy(tipR);j.add(pgl);
+
   j.traverse(c=>{if(c.isMesh){c.castShadow=true;c.receiveShadow=true}});
   j.scale.set(1.8,1.8,1.8);return j;
 }
@@ -1667,39 +1991,97 @@ const player={minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,
   missileSide:1,prevVelocity:new THREE.Vector3(),prevPosition:playerJet.position.clone()};
 
 /* ═══════════════════ ENEMY JET ═══════════════════ */
-const eBMat=airframeMaterial(0x6d3a33,{roughness:.56});
+const eBMat=airframeMaterial(0x74413a,{roughness:.56});
 const eDMat=airframeMaterial(0x3c2420,{roughness:.63});
-const eWMat=airframeMaterial(0x7a4139,{roughness:.53});
+const eWMat=airframeMaterial(0x56302b,{roughness:.53});
 const eGlowMat=new THREE.MeshBasicMaterial({color:0xff4400});
+const enemyCanopyMat = new THREE.MeshStandardMaterial({ color: 0x6a4a44, metalness: 1, roughness: .05, envMapIntensity: 2.6 });
 function createEnemyJet(){
   const j=new THREE.Group();
-  // Nose
-  const nGeo=new THREE.ConeGeometry(.8,5,16);nGeo.rotateX(Math.PI/2);
-  const n=new THREE.Mesh(nGeo,eBMat);n.position.z=-6;n.scale.set(1,.55,1);j.add(n);
-  // Fuselage
-  const fGeo=new THREE.CylinderGeometry(.8,1.2,10,16);fGeo.rotateX(Math.PI/2);
-  const f=new THREE.Mesh(fGeo,eBMat);f.position.z=0;f.scale.set(1,.55,1);j.add(f);
-  // Rear
-  const rGeo=new THREE.CylinderGeometry(1.1,.8,4,16);rGeo.rotateX(Math.PI/2);
-  const r=new THREE.Mesh(rGeo,eDMat);r.position.z=7;r.scale.set(1,.55,1);j.add(r);
-  // Prominent delta wings (bigger, easier to see)
-  const ws=new THREE.Shape();ws.moveTo(0,0);ws.lineTo(-11,-2);ws.lineTo(-9,-4);ws.lineTo(-1.5,-3.5);ws.lineTo(0,-1.5);
-  const ewg=new THREE.ExtrudeGeometry(ws,{depth:.2,bevelEnabled:true,bevelThickness:.05,bevelSize:.05,bevelSegments:2});
-  const wL=new THREE.Mesh(ewg,eWMat);wL.rotation.set(Math.PI/2,0,0);wL.position.set(.2,0,0);j.add(wL);
-  const wR=wL.clone();wR.scale.x=-1;wR.position.x=-.2;j.add(wR);
-  // Vertical stabilizer
-  const vsS=new THREE.Shape();vsS.moveTo(0,0);vsS.lineTo(0,3);vsS.lineTo(2,2);vsS.lineTo(2.5,0);
-  const vsG=new THREE.ExtrudeGeometry(vsS,{depth:.08,bevelEnabled:true,bevelThickness:.02,bevelSize:.02,bevelSegments:1});
-  const vs=new THREE.Mesh(vsG,eBMat);vs.position.set(0,0,5);vs.rotation.x=Math.PI/2;j.add(vs);
-  // Horizontal stabs
-  const hsS=new THREE.Shape();hsS.moveTo(0,0);hsS.lineTo(-3.5,-.6);hsS.lineTo(-2.5,-1.2);hsS.lineTo(0,-.8);
-  const hsG=new THREE.ExtrudeGeometry(hsS,{depth:.1,bevelEnabled:true,bevelThickness:.03,bevelSize:.03,bevelSegments:1});
-  const hsL=new THREE.Mesh(hsG,eWMat);hsL.rotation.set(Math.PI/2,0,0);hsL.position.set(.3,0,7);j.add(hsL);
-  const hsR=hsL.clone();hsR.scale.x=-1;hsR.position.x=-.3;j.add(hsR);
-  // Bright engine glow (visible from distance)
-  const nzGeo=new THREE.CylinderGeometry(.45,.65,1.2,16);nzGeo.rotateX(Math.PI/2);
-  const nz=new THREE.Mesh(nzGeo,eGlowMat);
-  nz.position.z=9;j.add(nz);
+
+  // Deliberately a different shape from the player's: a single-engine tailless delta with
+  // canards, so the two read apart instantly in a turning fight even as silhouettes.
+  const fuse = loftFuselage([
+    [-11.5,  0.03,  0.03,  0.00, 2.0],
+    [-10.8,  0.22,  0.20,  0.00, 2.0],
+    [ -9.4,  0.50,  0.46,  0.00, 2.1],
+    [ -7.8,  0.76,  0.68,  0.02, 2.3],
+    [ -6.0,  0.98,  0.86,  0.06, 2.5],
+    [ -4.2,  1.14,  0.96,  0.08, 2.7],
+    [ -2.0,  1.30,  1.00,  0.05, 2.9],
+    [  0.4,  1.42,  1.02,  0.00, 3.0],
+    [  3.0,  1.44,  1.00, -0.02, 3.0],
+    [  5.6,  1.36,  0.96,  0.00, 2.8],
+    [  8.0,  1.20,  0.90,  0.02, 2.6],
+    [  9.6,  1.02,  0.82,  0.03, 2.4],
+    [ 10.6,  0.90,  0.74,  0.03, 2.3]
+  ], 24);
+  j.add(new THREE.Mesh(fuse, eBMat));
+
+  // Cranked delta.
+  const wing = loftAerofoil([
+    [ 1.3, -4.6, 13.0, .055, -.22],
+    [ 3.6, -1.8, 10.2, .050, -.14],
+    [ 6.2,  1.2,  7.0, .045,  .00],
+    [ 8.6,  3.4,  4.4, .040,  .14],
+    [10.2,  4.8,  2.6, .035,  .26],
+    [10.9,  5.4,  1.8, .032,  .32]
+  ], 'x');
+  const wL = new THREE.Mesh(wing, eWMat); j.add(wL);
+  const wR = new THREE.Mesh(wing, eWMat); wR.scale.x = -1; j.add(wR);
+
+  // Canards up front - the giveaway that this is the hostile airframe.
+  const canard = loftAerofoil([
+    [1.25, -6.4, 3.2, .060, 0],
+    [2.60, -5.7, 2.5, .052, 0],
+    [3.80, -5.1, 1.7, .045, 0],
+    [4.50, -4.7, 1.1, .040, 0]
+  ], 'x', 12);
+  const cL = new THREE.Mesh(canard, eWMat); cL.position.y = .34; cL.rotation.z = -.06; j.add(cL);
+  const cR = new THREE.Mesh(canard, eWMat); cR.scale.x = -1; cR.position.y = .34; cR.rotation.z = .06; j.add(cR);
+
+  // Single tall fin.
+  const fin = loftAerofoil([
+    [0.10, 4.6, 5.0, .080, 0],
+    [1.70, 5.5, 4.0, .068, 0],
+    [3.20, 6.5, 3.0, .056, 0],
+    [4.50, 7.4, 2.0, .046, 0],
+    [5.20, 8.0, 1.3, .038, 0]
+  ], 'y', 18);
+  const fn = new THREE.Mesh(fin, eBMat); fn.position.y = .62; j.add(fn);
+
+  const canopy = loftFuselage([
+    [-6.9, 0.05, 0.04, 0.00, 2.2],
+    [-6.2, 0.38, 0.28, 0.06, 2.4],
+    [-5.2, 0.58, 0.48, 0.10, 2.6],
+    [-4.1, 0.62, 0.52, 0.10, 2.7],
+    [-3.1, 0.54, 0.38, 0.06, 2.6],
+    [-2.5, 0.38, 0.18, 0.02, 2.4]
+  ], 18);
+  const cp = new THREE.Mesh(canopy, enemyCanopyMat); cp.position.y = 0.80; j.add(cp);
+
+  // Belly intake with a recessed duct.
+  const lip = loftFuselage([
+    [-5.4, 0.72, 0.42, 0, 3.0],
+    [-5.0, 0.86, 0.52, 0, 3.2],
+    [-2.4, 0.88, 0.54, 0, 3.2]
+  ], 16);
+  const li = new THREE.Mesh(lip, eBMat); li.position.y = -0.86; j.add(li);
+  const duct = loftFuselage([
+    [-5.02, 0.76, 0.44, 0, 3.2],
+    [-3.40, 0.62, 0.38, 0, 3.0],
+    [-2.00, 0.50, 0.30, 0, 2.8]
+  ], 16);
+  const du = new THREE.Mesh(duct, intakeDuctMat); du.position.y = -0.86; j.add(du);
+
+  // Single exhaust can, matching the player's construction so both catch light the same way.
+  const nz = buildNozzle(); nz.position.set(0, .03, 10.9); nz.scale.setScalar(1.32);
+  j.add(nz);
+  j.userData.nozzleGlow = nz.userData.core;
+  // Enemies do not modulate throttle, so give the can a fixed hot core.
+  const glow = new THREE.Mesh(new THREE.CircleGeometry(.52, 18), eGlowMat);
+  glow.position.set(0, .03, 10.3); j.add(glow);
+
   j.traverse(c=>{if(c.isMesh){c.castShadow=true;c.receiveShadow=true}});
   j.scale.set(2,2,2);return j;
 }
@@ -1973,7 +2355,14 @@ function emitMissileTrail(m,activeMissiles){
 function addKillNotification(sv){killNotifications.push({text:'ENEMY DESTROYED',score:sv,timer:2.5,maxTimer:2.5})}
 
 /* ═══════════════════ CAMERA ═══════════════════ */
-const camOff=new THREE.Vector3(0,7,28),camLookOff=new THREE.Vector3(0,1.5,-25);
+// The airframe is about 47 m nose to tail. At the old 28-unit offset the camera sat five
+// metres off the tailpipes, so in steady flight a fin stood across the middle of the
+// screen; only the lag during a hard turn ever pulled it clear.
+// Frame-rate independent smoothing factor. lerp(a, b, k*dt) only approximates this for small
+// dt: it makes the feel depend on the frame rate, and past k*dt = 2 it does not converge at
+// all but oscillates away, so one long frame throws whatever it is smoothing across the map.
+const smoothT = (k, dt) => 1 - Math.exp(-k * dt);
+const camOff=new THREE.Vector3(0,10.5,46),camLookOff=new THREE.Vector3(0,2.5,-32);
 const camPos=new THREE.Vector3(),camLook=new THREE.Vector3();let camInit=false;
 function updateCamera(dt){
   if(gameOver && deathCamTimer>0)return;
@@ -1988,7 +2377,7 @@ function updateCamera(dt){
   const baseFOV=68+12*player.throttle;
   let targetFOV=baseFOV;
   if(fovPulse>0){targetFOV-=fovPulse*8;fovPulse-=dt*2;if(fovPulse<0)fovPulse=0}
-  camera.fov=THREE.MathUtils.lerp(camera.fov,targetFOV,dt*3);
+  camera.fov=THREE.MathUtils.lerp(camera.fov,targetFOV,smoothT(3,dt));
   camera.updateProjectionMatrix();
 }
 
@@ -2023,7 +2412,7 @@ function updatePlayer(dt){
   _qY.setFromAxisAngle(_axisY,player.yawRate*dt);
   playerJet.quaternion.multiply(_qY).multiply(_qP).multiply(_qR).normalize();
   _fwd.set(0,0,-1).applyQuaternion(playerJet.quaternion);
-  _tmpV1.copy(_fwd).multiplyScalar(speed);player.velocity.lerp(_tmpV1,dt*2);
+  _tmpV1.copy(_fwd).multiplyScalar(speed);player.velocity.lerp(_tmpV1,smoothT(2,dt));
   if(playerJet.position.y>5)player.velocity.y-=18*dt;
   _tmpV1.copy(player.velocity).multiplyScalar(dt);playerJet.position.add(_tmpV1);
   _tmpV1.copy(player.velocity).sub(player.prevVelocity).divideScalar(Math.max(dt,.001));
@@ -2572,6 +2961,351 @@ document.getElementById('pause').addEventListener('click',()=>{togglePause()});
 /* ═══════════════════ INIT ═══════════════════ */
 updateTerrain(0,0);initClouds();
 
+
+
+/* ═══════════════════ VOLUMETRIC CLOUDS ═══════════════════ */
+// Billboards can only ever be flat cards that turn to face you; they cannot be flown through,
+// cannot self-shadow, and give away their sprite edges against a bright sky. This raymarches
+// an actual cloud layer instead. Density comes from the same 2D coverage map that shades the
+// ground, so a cloud and the shadow it casts are guaranteed to be the same cloud.
+
+// Tileable 3D value-noise fbm, used to erode the coverage into billows and wisps.
+function tileableFBM3(size, octaves, baseCells, seed) {
+  const out = new Float32Array(size * size * size);
+  let rng = seed >>> 0, amp = 1, norm = 0;
+  const rnd = () => { rng = (rng * 1664525 + 1013904223) >>> 0; return rng / 4294967296; };
+  for (let o = 0; o < octaves; o++) {
+    const c = baseCells << o; if (c > size) break;
+    const lat = new Float32Array(c * c * c);
+    for (let i = 0; i < lat.length; i++) lat[i] = rnd();
+    const step = size / c;
+    for (let z = 0; z < size; z++) {
+      const fz = z/step, z0 = Math.floor(fz), tz = fz-z0, sz = tz*tz*(3-2*tz);
+      const zA = (z0 % c)*c*c, zB = ((z0+1) % c)*c*c;
+      for (let y = 0; y < size; y++) {
+        const fy = y/step, y0 = Math.floor(fy), ty = fy-y0, sy = ty*ty*(3-2*ty);
+        const yA = (y0 % c)*c, yB = ((y0+1) % c)*c;
+        const row = z*size*size + y*size;
+        for (let x = 0; x < size; x++) {
+          const fx = x/step, x0 = Math.floor(fx), tx = fx-x0, sx = tx*tx*(3-2*tx);
+          const xA = x0 % c, xB = (x0+1) % c;
+          const a = lat[zA+yA+xA] + (lat[zA+yA+xB] - lat[zA+yA+xA])*sx;
+          const b = lat[zA+yB+xA] + (lat[zA+yB+xB] - lat[zA+yB+xA])*sx;
+          const cc= lat[zB+yA+xA] + (lat[zB+yA+xB] - lat[zB+yA+xA])*sx;
+          const d = lat[zB+yB+xA] + (lat[zB+yB+xB] - lat[zB+yB+xA])*sx;
+          const e = a + (b-a)*sy, f = cc + (d-cc)*sy;
+          out[row + x] += amp * (e + (f-e)*sz);
+        }
+      }
+    }
+    norm += amp; amp *= .5;
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= norm;
+  return out;
+}
+
+function createCloudNoise3D() {
+  const S = 48;
+  const base = tileableFBM3(S, 3, 2, 1471), mid = tileableFBM3(S, 3, 4, 90210), fine = tileableFBM3(S, 2, 8, 5150);
+  const data = new Uint8Array(S*S*S*4);
+  for (let i = 0; i < S*S*S; i++) {
+    data[i*4]   = base[i] * 255;
+    data[i*4+1] = mid[i]  * 255;
+    data[i*4+2] = fine[i] * 255;
+    data[i*4+3] = 255;
+  }
+  const t = new THREE.Data3DTexture(data, S, S, S);
+  t.format = THREE.RGBAFormat;
+  t.minFilter = t.magFilter = THREE.LinearFilter;
+  t.wrapS = t.wrapT = t.wrapR = THREE.RepeatWrapping;
+  t.unpackAlignment = 1;
+  t.needsUpdate = true;
+  return t;
+}
+
+const CLOUD_SCALE = 0.5;          // raymarch resolution relative to the post buffer
+// A fair-weather cumulus is wider than it is tall. The cells this coverage field carves are
+// roughly a kilometre across, so the layer has to stay thin or every cloud comes out a spire.
+const CLOUD_BOTTOM = CLOUD_BOTTOM_REF, CLOUD_TOP = 1780;
+
+const cloudMarchShader = {
+  uniforms: Object.assign({
+    tDiffuse:     { value: null },
+    tDepth:       { value: null },
+    uNoise3D:     { value: null },
+    uInvProjView: { value: new THREE.Matrix4() },
+    uCamFwd:      { value: new THREE.Vector3() },
+    uNear:        { value: 1 },
+    uFar:         { value: 45000 },
+    uTime:        { value: 0 },
+    uCloudBottom: { value: CLOUD_BOTTOM },
+    uCloudTop:    { value: CLOUD_TOP },
+    uErode:       { value: 0.62 },
+    // Optical depth per metre at full density: about 2 across a kilometre of cloud.
+    uDensity:     { value: 0.0026 },
+    uLitColor:    { value: new THREE.Color(0xfff6e8) },
+    uDarkColor:   { value: new THREE.Color(0x6d7d93) }
+  }, cloudShadowUniforms, atmoUniforms),
+  vertexShader: `varying vec2 vUv;
+    void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+  fragmentShader: `
+    layout(location = 0) out vec4 outColor;
+    uniform sampler2D tDiffuse, tDepth;
+    uniform sampler3D uNoise3D;
+    uniform mat4 uInvProjView;
+    uniform vec3 uCamFwd, uLitColor, uDarkColor;
+    uniform float uNear, uFar, uTime, uCloudBottom, uCloudTop, uErode, uDensity;
+    varying vec2 vUv;
+    ${atmosphereGLSL}
+    ${CLOUD_SHADOW_GLSL}
+
+    #define PRIMARY_STEPS 40
+    #define LIGHT_STEPS 4
+    // Beyond this the step size gets too coarse to resolve a cloud, and haze has taken over.
+    const float MAX_MARCH = 12000.0;
+
+    float hash12(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+    // Henyey-Greenstein: forward-scattering is what makes a cloud edge glow when the sun is
+    // behind it, and it is most of the difference between "cloud" and "grey blob".
+    float henyeyGreenstein(float c, float g){
+      float g2 = g*g;
+      return (1.0 - g2) / (12.566370614 * pow(1.0 + g2 - 2.0*g*c, 1.5));
+    }
+
+    // dw fades out the erosion detail with range. Past a few kilometres the step is longer
+    // than the wisps it is trying to resolve, and sampling them anyway prints the march as
+    // static; a smooth threshold there costs one texture fetch less and reads as distance.
+    float cloudDensity(vec3 p, float dw){
+      float h = (p.y - uCloudBottom) / (uCloudTop - uCloudBottom);
+      if (h < 0.0 || h > 1.0) return 0.0;
+      float cover = cloudCoverLod0(p.xz);
+      if (cover <= 0.01) return 0.0;
+      // A cumulus is roughly as tall as the cell is strong: the rim of one barely clears the
+      // condensation level while its core towers. Without this the height is the same
+      // everywhere and every cloud comes out an extruded prism with a flat top.
+      float hn = h / (0.14 + 0.86 * cover);
+      if (hn > 1.0) return 0.0;
+      // Flat condensation base, heaped and thinning towards the top.
+      float profile = smoothstep(0.0, 0.09, hn) * (1.0 - smoothstep(0.55, 1.0, hn));
+      if (profile <= 0.01) return 0.0;
+      float shape = profile * smoothstep(0.0, 0.62, cover);
+      if (shape <= 0.01) return 0.0;
+      float detail = 0.46;
+      if (dw > 0.02) {
+        vec3 np = p * 0.00042 + vec3(uTime * 0.0016, uTime * 0.0006, -uTime * 0.0011);
+        vec3 n = texture(uNoise3D, np).rgb;
+        detail = mix(0.46, n.r * 0.58 + n.g * 0.28 + n.b * 0.14, dw);
+      }
+      // Remap rather than subtract: the core of a cloud survives and only its fringe erodes
+      // into wisps. Plain subtraction deletes the whole field once detail exceeds coverage.
+      float thresh = detail * uErode;
+      return clamp((shape - thresh) / max(1.0 - thresh, 0.05), 0.0, 1.0);
+    }
+
+    void main(){
+      vec4 clip = uInvProjView * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
+      vec3 rayDir = normalize(clip.xyz / clip.w - uCamPos);
+
+      // Stop the march at whatever the scene already drew, so terrain occludes cloud.
+      float dz = texture2D(tDepth, vUv).x;
+      float sceneDist = MAX_MARCH;
+      if (dz < 1.0) {
+        float ndc = dz * 2.0 - 1.0;
+        float viewZ = (2.0 * uNear * uFar) / (uFar + uNear - ndc * (uFar - uNear));
+        sceneDist = viewZ / max(dot(rayDir, uCamFwd), 1e-3);
+      }
+
+      float invY = 1.0 / (abs(rayDir.y) < 1e-4 ? (rayDir.y >= 0.0 ? 1e-4 : -1e-4) : rayDir.y);
+      float t0 = (uCloudBottom - uCamPos.y) * invY;
+      float t1 = (uCloudTop    - uCamPos.y) * invY;
+      float tEnter = max(min(t0, t1), 0.0);
+      float tExit  = min(max(t0, t1), min(sceneDist, MAX_MARCH));
+      if (tExit <= tEnter) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+
+      float dt = (tExit - tEnter) / float(PRIMARY_STEPS);
+      float t = tEnter + dt * hash12(vUv * 1024.0);    // jitter, or the layer bands visibly
+      float cosSun = dot(rayDir, uSunDir);
+      // Two lobes: the forward one is the silver lining round a cloud with the sun behind it,
+      // the mild backward one is the glow off a cloud lit from over your shoulder.
+      float phase = mix(henyeyGreenstein(cosSun, 0.62), henyeyGreenstein(cosSun, -0.20), 0.35);
+      vec3 scatter = vec3(0.0);
+      float transmittance = 1.0;
+      float thick = uCloudTop - uCloudBottom;
+
+      for (int i = 0; i < PRIMARY_STEPS; i++) {
+        vec3 p = uCamPos + rayDir * t;
+        float dw = 1.0 - smoothstep(2600.0, 8000.0, t);
+        float dens = cloudDensity(p, dw);
+        if (dens > 0.002) {
+          // Cone-ish light march: short steps close in, where occlusion actually shapes the
+          // cloud, doubling outwards so four taps still reach across a whole cumulus.
+          float toLight = 0.0, ls = thick * 0.10, lt = ls * 0.5;
+          for (int k = 0; k < LIGHT_STEPS; k++) {
+            toLight += cloudDensity(p + uSunDir * lt, dw) * ls;
+            lt += ls; ls *= 1.9;
+          }
+          float od  = toLight * uDensity;
+          float sun = exp(-od);
+          // Most of a cumulus's brightness is light that bounced many times inside it, which
+          // single scattering misses entirely. A softened shadow term stands in for it: deep
+          // cores stay dark, everything within a scattering length or two of daylight lifts.
+          float ms  = pow(sun, 0.35);
+          float hh  = clamp((p.y - uCloudBottom) / thick, 0.0, 1.0);
+          // Cumulus are brilliant on top and grey underneath - the base sees only the sky
+          // and the ground bounce, never the sun.
+          float vert = 0.40 + 0.60 * hh;
+          // Capped: looking straight into the sun the forward lobe runs to twenty times the
+          // ambient term, which tone-maps to a featureless white hole across half the sky.
+          vec3 lum = uLitColor * (min(sun * phase * 12.0, 4.6) + ms * 0.40 * vert)
+                   + uDarkColor * (0.34 * vert);
+          float dTrans = exp(-dens * dt * uDensity);
+          scatter += transmittance * (1.0 - dTrans) * lum;
+          transmittance *= dTrans;
+          if (transmittance < 0.012) break;
+        }
+        t += dt;
+      }
+
+      // Haze the cloud by how far away it is, same model the rest of the scene uses.
+      float od = aerialDepth(uCamPos.y, rayDir.y, tEnter);
+      float haze = clamp(1.0 - exp(-od * od), 0.0, 1.0);
+      scatter = mix(scatter, hazeColor(rayDir) * (1.0 - transmittance), haze);
+      outColor = vec4(scatter, transmittance);
+    }`
+};
+
+const cloudCompositeShader = {
+  uniforms: { tDiffuse: { value: null }, tClouds: { value: null },
+              uCloudTexel: { value: new THREE.Vector2() } },
+  vertexShader: `varying vec2 vUv;
+    void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+  fragmentShader: `uniform sampler2D tDiffuse, tClouds;uniform vec2 uCloudTexel;varying vec2 vUv;
+    void main(){
+      // Four taps on a rotated grid. Forty steps cannot resolve a cloud edge cleanly and the
+      // per-pixel jitter that hides the banding shows up as static; this averages it out for
+      // about a pixel of softness, which a cloud can afford.
+      vec4 c = texture2D(tClouds, vUv + uCloudTexel * vec2( 0.4,  0.9))
+             + texture2D(tClouds, vUv + uCloudTexel * vec2(-0.9,  0.4))
+             + texture2D(tClouds, vUv + uCloudTexel * vec2(-0.4, -0.9))
+             + texture2D(tClouds, vUv + uCloudTexel * vec2( 0.9, -0.4));
+      c *= 0.25;                                 // rgb = in-scattered light, a = transmittance
+      gl_FragColor = vec4(texture2D(tDiffuse, vUv).rgb * c.a + c.rgb, 1.0);
+    }`
+};
+
+class VolumetricCloudPass extends Pass {
+  constructor(width, height) {
+    super();
+    this.marchMaterial = new THREE.ShaderMaterial(cloudMarchShader);
+    this.marchMaterial.glslVersion = THREE.GLSL3;   // sampler3D needs GLSL ES 3.00
+    this.compositeMaterial = new THREE.ShaderMaterial(cloudCompositeShader);
+    this.marchQuad = new FullScreenQuad(this.marchMaterial);
+    this.compositeQuad = new FullScreenQuad(this.compositeMaterial);
+    this.cloudRT = new THREE.WebGLRenderTarget(
+      Math.max(1, Math.round(width * CLOUD_SCALE)), Math.max(1, Math.round(height * CLOUD_SCALE)),
+      { type: THREE.HalfFloatType, depthBuffer: false, generateMipmaps: false });
+    this.compositeMaterial.uniforms.uCloudTexel.value.set(
+      1 / this.cloudRT.width, 1 / this.cloudRT.height);
+    this.marchMaterial.uniforms.uNoise3D.value = createCloudNoise3D();
+  }
+  setSize(width, height) {
+    const w = Math.max(1, Math.round(width * CLOUD_SCALE));
+    const h = Math.max(1, Math.round(height * CLOUD_SCALE));
+    this.cloudRT.setSize(w, h);
+    this.compositeMaterial.uniforms.uCloudTexel.value.set(1 / w, 1 / h);
+  }
+  render(renderer, writeBuffer, readBuffer) {
+    const u = this.marchMaterial.uniforms;
+    u.tDepth.value = readBuffer.depthTexture;
+    u.uNear.value = camera.near; u.uFar.value = camera.far;
+    camera.getWorldDirection(u.uCamFwd.value);
+    u.uInvProjView.value.multiplyMatrices(camera.matrixWorld, camera.projectionMatrixInverse);
+    renderer.setRenderTarget(this.cloudRT);
+    renderer.clear();
+    this.marchQuad.render(renderer);
+    this.compositeMaterial.uniforms.tDiffuse.value = readBuffer.texture;
+    this.compositeMaterial.uniforms.tClouds.value = this.cloudRT.texture;
+    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
+    if (this.clear) renderer.clear();
+    this.compositeQuad.render(renderer);
+  }
+}
+
+const volumetricClouds = new VolumetricCloudPass(
+  Math.round(window.innerWidth * POST_RATIO), Math.round(window.innerHeight * POST_RATIO));
+// Straight after the scene and before bloom, so a sunlit edge blooms like the rest of it.
+if (USE_VOLUMETRIC_CLOUDS) composer.insertPass(volumetricClouds, 1);
+
+/* ═══════════════════ WATER REFLECTION ═══════════════════ */
+// The sea reflected an analytic sky dome and nothing else, so a hill beside a bay left no
+// trace in the water. This renders the world once more from a camera mirrored through the
+// surface, at half resolution, and the water samples it projectively. An oblique near plane
+// clips everything below the waterline out of that pass so submerged ground is not reflected.
+const REFLECT_SCALE = 0.5;
+const reflectRT = new THREE.WebGLRenderTarget(
+  Math.round(window.innerWidth * REFLECT_SCALE), Math.round(window.innerHeight * REFLECT_SCALE),
+  { type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    depthBuffer: true, generateMipmaps: false });
+waterMat.uniforms.uReflectTex.value = reflectRT.texture;
+const reflectCam = new THREE.PerspectiveCamera();
+const reflectTextureMatrix = new THREE.Matrix4();
+const _rTarget = new THREE.Vector3(), _rUp = new THREE.Vector3(), _rFwd = new THREE.Vector3();
+const _rPlane = new THREE.Plane(), _rClip = new THREE.Vector4(), _rQ = new THREE.Vector4();
+const _rNormal = new THREE.Vector3(0, 1, 0);
+const REFLECT_CLIP_BIAS = 0.004;
+
+function renderWaterReflection() {
+  // Below the surface, or so close to it that the mirror degenerates, there is nothing useful
+  // to reflect. High up you are looking almost straight down, where Fresnel leaves barely any
+  // reflection to see, so the pass fades out and then stops being rendered at all.
+  const alt = camera.position.y - WATER_LEVEL;
+  const strength = alt < 2 ? 0 : 1 - THREE.MathUtils.smoothstep(alt, 1700, 2800);
+  waterMat.uniforms.uReflectStrength.value = strength;
+  if (strength <= 0.001) return;
+
+  const h = WATER_LEVEL;
+  reflectCam.position.set(camera.position.x, 2 * h - camera.position.y, camera.position.z);
+  camera.getWorldDirection(_rFwd);
+  _rTarget.copy(camera.position).add(_rFwd);
+  _rTarget.y = 2 * h - _rTarget.y;
+  _rUp.set(0, 1, 0).applyQuaternion(camera.quaternion); _rUp.y = -_rUp.y;
+  reflectCam.up.copy(_rUp);
+  reflectCam.lookAt(_rTarget);
+  reflectCam.near = camera.near; reflectCam.far = camera.far;
+  reflectCam.fov = camera.fov; reflectCam.aspect = camera.aspect;
+  reflectCam.updateProjectionMatrix();
+  reflectCam.updateMatrixWorld();
+
+  // World position -> reflection texture coordinates, biased into 0..1.
+  reflectTextureMatrix.set(.5, 0, 0, .5,  0, .5, 0, .5,  0, 0, .5, .5,  0, 0, 0, 1);
+  reflectTextureMatrix.multiply(reflectCam.projectionMatrix);
+  reflectTextureMatrix.multiply(reflectCam.matrixWorldInverse);
+  waterMat.uniforms.uReflectMatrix.value.copy(reflectTextureMatrix);
+
+  // Oblique near plane on the waterline (Lengyel), so the pass cannot see below the surface.
+  _rPlane.setFromNormalAndCoplanarPoint(_rNormal, _rTarget.set(0, h, 0));
+  _rPlane.applyMatrix4(reflectCam.matrixWorldInverse);
+  _rClip.set(_rPlane.normal.x, _rPlane.normal.y, _rPlane.normal.z, _rPlane.constant);
+  const pm = reflectCam.projectionMatrix;
+  _rQ.set((Math.sign(_rClip.x) + pm.elements[8]) / pm.elements[0],
+          (Math.sign(_rClip.y) + pm.elements[9]) / pm.elements[5],
+          -1, (1 + pm.elements[10]) / pm.elements[14]);
+  _rClip.multiplyScalar(2 / _rClip.dot(_rQ));
+  pm.elements[2] = _rClip.x; pm.elements[6] = _rClip.y;
+  pm.elements[10] = _rClip.z + 1 - REFLECT_CLIP_BIAS; pm.elements[14] = _rClip.w;
+
+  const prevShadowAuto = renderer.shadowMap.autoUpdate;
+  renderer.shadowMap.autoUpdate = false;      // the main pass already built this frame's map
+  water.visible = false;
+  renderer.setRenderTarget(reflectRT);
+  renderer.clear();
+  renderer.render(scene, reflectCam);
+  renderer.setRenderTarget(null);
+  water.visible = true;
+  renderer.shadowMap.autoUpdate = prevShadowAuto;
+}
+
 /* ═══════════════════ MAIN LOOP ═══════════════════ */
 // Everything that has to sit on top of the viewer: the ocean grid, the sky dome, the sun,
 // the shadow frustum, and the camera position every atmosphere shader reads from.
@@ -2586,15 +3320,19 @@ function updateWorldAnchors(elapsed){
     -CLOUD_WIND.y * elapsed * 0.000105);
   atmoUniforms.uCamPos.value.copy(camera.position);
   gradePass.uniforms.uTime.value = elapsed;
+  volumetricClouds.marchMaterial.uniforms.uTime.value = elapsed;
   waterMat.uniforms.uTime.value = elapsed;
   water.position.x = camera.position.x; water.position.z = camera.position.z;
   sky.position.copy(camera.position);
   // The Preetham model has no notion of the viewer's altitude, so climbing left the sky the
   // same pale ground-level wash. Thinning the air above you as you climb deepens it the way
   // it actually does.
-  const thin = 1 - THREE.MathUtils.clamp(camera.position.y / 9000, 0, .62);
-  sky.material.uniforms['turbidity'].value = SKY_TURBIDITY * thin;
-  sky.material.uniforms['rayleigh'].value = SKY_RAYLEIGH * thin;
+  // Aerosols live in the boundary layer, so climbing out of it strips the milkiness from the
+  // sky while Rayleigh scattering - the part that makes it blue - barely changes. Thinning
+  // both, as this did, drained the colour out of exactly the altitudes that should deepen.
+  const aer = 1 - THREE.MathUtils.clamp(camera.position.y / 6500, 0, .80);
+  sky.material.uniforms['turbidity'].value = SKY_TURBIDITY * (0.20 + 0.80 * aer);
+  sky.material.uniforms['rayleigh'].value = SKY_RAYLEIGH * (1 + 0.30 * (1 - aer));
   sunSprite.position.copy(_sunOffset.copy(sunDirection).multiplyScalar(20000).add(camera.position));
   sunLight.position.copy(_sunOffset.copy(sunDirection).multiplyScalar(1500).add(playerJet.position));
   sunLight.target.position.copy(playerJet.position);
@@ -2620,6 +3358,7 @@ function animate(){requestAnimationFrame(animate);
   stepVegetationBuild();
   updateWorldAnchors(elapsed);
   if(hitFlash>0){hitFlash-=1.2*dt;if(hitFlash<0)hitFlash=0}
+  renderWaterReflection();
   drawHUD();composer.render();}
 animate();
 </script>

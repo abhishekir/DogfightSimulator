@@ -1,0 +1,4 @@
+# Normalise every text file to LF, in the repo and in the working tree.
+# Enforced by git so it does not depend on whichever tool last wrote the file:
+# a mix of conventions once turned a routine change into a whole-file diff.
+* text=auto eol=lf

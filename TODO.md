@@ -17,11 +17,10 @@ accident.
   binaries.
 - **Three.js r163**, loaded from jsDelivr through an import map. WebGL2 only,
   so shaders are GLSL ES 3.00.
-- **Line endings are CRLF.** Keep them. Most editors do this automatically;
-  scripted edits often do not. Rewriting the file with LF makes git report a
-  whole-file replacement and the diff becomes unreviewable, which has already
-  happened once. Check with `git diff --stat` before committing: if the
-  insertion count equals the file's line count, you have done it.
+- **Line endings are LF**, declared in `.gitattributes`. Do not convert them by
+  hand. If `git diff --stat` ever reports an insertion count equal to the
+  file's line count, something has rewritten the file in the other convention
+  and the diff is no longer reviewable.
 - **Post chain** (`EffectComposer`): scene render, then the volumetric cloud
   pass, then bloom, output, FXAA, and a grade pass that does lens falloff,
   lateral chromatic aberration, an S-curve and grain. The cloud pass is inserted

@@ -9,19 +9,12 @@ detail behind everything below; read it before starting work.**
   suite, no assets. Open the file in a browser and it runs. Keep it that way: if
   you need a texture or a sound, generate it procedurally at load, as
   `createPanelMaps`, `createCloudNoise3D` and `class SoundEngine` already do.
-- **Line endings are CRLF.** Scripted edits usually rewrite files as LF, which
-  turns the diff into a whole-file replacement and makes review impossible. This
-  has already happened once. After editing, verify:
-
-  ```
-  git diff --stat          # insertions must NOT equal the file's line count
-  grep -c $'\r' index.html # must equal the line count
-  ```
-
-  Note: `index.html` currently fails that check — a run of scripted edits
-  converted it to LF and restoring it is still an open decision (see TODO.md).
-  `TODO.md` and this file are CRLF. Until `index.html` is restored, match the
-  file you are editing rather than converting anything.
+- **Line endings are LF**, declared in `.gitattributes` (`* text=auto eol=lf`)
+  so git enforces it rather than it depending on whichever tool last wrote the
+  file. Do not convert anything by hand. The repo was briefly a mix of LF and
+  CRLF, which turned one routine change into a whole-file diff and made it
+  unreviewable; if you ever see `git diff --stat` report an insertion count
+  equal to the file's line count, that is what has happened.
 
 - **Three.js r163**, via import map from jsDelivr. WebGL2 only, so shaders are
   GLSL ES 3.00.

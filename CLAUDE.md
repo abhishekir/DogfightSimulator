@@ -38,7 +38,18 @@ detail behind everything below; read it before starting work.**
 
 ## Verifying changes
 
-There is no test suite, and rendering work cannot be checked by reading a diff.
+There is one automated check. `node .github/smoke-test.mjs` loads the game in a
+headless browser, starts it, and fails on an uncaught exception, a console
+error (which is how a shader that will not compile shows up), a failed request
+(which is how a dead CDN URL shows up), an overlay that never dismisses
+(meaning the module did not run to the end), or a frame with too little
+variance to be a rendered scene. It runs on every push and pull request. Offline,
+set `SMOKE_VENDOR_DIR` to a local three.js package directory and
+`SMOKE_PLAYWRIGHT` to a playwright install; in CI both are left unset, because
+fetching the pinned CDN URLs for real is part of what is being tested.
+
+It is a smoke test, not a test suite. It proves the game still starts and draws.
+Everything below is still on you.
 
 - Drive it headless: Chromium with `--use-angle=swiftshader`, a generated copy
   of `index.html` with the spawn point and camera overridden, screenshot after a

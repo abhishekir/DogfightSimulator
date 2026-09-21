@@ -1,0 +1,68 @@
+name: smoke test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The game has no unit tests and rendering cannot be checked by reading a diff,
+# but a syntax error, a shader that will not compile, a CDN URL that has stopped
+# resolving, an exception in the first frames or a scene that draws nothing are
+# all mechanically detectable. That is what this job is for.
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Installed outside the checkout so the repository stays exactly what it
+      # claims to be: one game file and its documentation, no package manifest.
+      - name: Install Playwright
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw"
+          cd "$RUNNER_TEMP/pw"
+          npm init -y > /dev/null
+          npm install --no-fund --no-audit playwright@1.56.1
+          npx playwright install --with-deps chromium
+
+      # SMOKE_VENDOR_DIR is deliberately unset: fetching the pinned jsDelivr URLs
+      # for real is part of what is being tested, since the game depends on them
+      # at runtime and nothing else would notice if they stopped resolving.
+      - name: Run smoke test
+        env:
+          SMOKE_PLAYWRIGHT: ${{ runner.temp }}/pw/node_modules/playwright/index.mjs
+          SMOKE_SETTLE_MS: '25000'
+        run: node .github/smoke-test.mjs
+
+      - name: Upload failure screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-failure
+          path: .github/smoke-failure.png
+          if-no-files-found: ignore
+
+  line-endings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # .gitattributes declares LF. A tool that rewrites a file in the other
+      # convention turns a small change into a whole-file diff and makes review
+      # impossible, which has happened here before.
+      - name: Check for CRLF in tracked files
+        run: |
+          bad=$(git grep -I --files-with-matches $'\r' -- . || true)
+          if [ -n "$bad" ]; then
+            echo "These tracked files contain CRLF line endings, but .gitattributes declares LF:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "all tracked text files are LF"

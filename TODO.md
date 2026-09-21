@@ -290,3 +290,10 @@ would be worth a lot and avoids most of the dynamic-shadowing problem.
   `updateMissiles`) are clamped with `Math.min(..., 1)`, which is safe from
   divergence but still frame-rate dependent. Use `smoothT` for anything new.
 - There is no volume control, no mute, and no settings of any kind.
+- **The HUD labels airspeed in knots but prints metres per second.** `drawHUD`
+  uses `player.velocity.length()` directly for the `IAS` readout while deriving
+  `MACH` from the same figure as `spd / 343` — which is correct for m/s, so the
+  Mach number is right and the knots label is not. At full throttle it reads
+  450 kt where it means roughly 875. Converting (`* 1.94384`) is the realistic
+  fix and keeps Mach consistent, but it changes a number the player reads, so
+  it is a deliberate call rather than a silent correction.

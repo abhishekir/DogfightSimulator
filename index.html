@@ -345,7 +345,13 @@ composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(
 // EffectComposer never resets its ping-pong buffers between frames, so with an odd number of
 // swapping passes RenderPass alternates which target it draws into. Both therefore need a
 // depth attachment - clone() gives renderTarget2 its own, and it must be left in place.
+// setPixelRatio multiplies the composer's stored width and height, and passing an explicit
+// render target sets those from the target's pixel dimensions - which are already scaled by
+// POST_RATIO. Left alone that squares the ratio, so a HiDPI display renders post at 2.25x CSS
+// instead of 1.5x, and silently drops to the intended size at the first window resize. Seed
+// the stored size from CSS pixels so both paths agree.
 composer.setPixelRatio(POST_RATIO);
+composer.setSize(window.innerWidth, window.innerHeight);
 composer.addPass(new RenderPass(scene, camera));
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.26, 0.45, 4.0);
 composer.addPass(bloomPass);
@@ -1838,11 +1844,13 @@ const nozzleGlowMat=new THREE.MeshBasicMaterial({color:0x1d0b04});
 const _nozzleCanGeo=new THREE.CylinderGeometry(.62,.82,2.2,20,1,true);_nozzleCanGeo.rotateX(Math.PI/2);
 const _nozzleLinerGeo=new THREE.CylinderGeometry(.40,.60,2.6,20,1,true);_nozzleLinerGeo.rotateX(Math.PI/2);
 const _nozzleCoreGeo=new THREE.CircleGeometry(.44,20);   // +Z normal, i.e. facing aft
-function buildNozzle(){
+// glowMat is a parameter because it is written every frame from the player's throttle: shared
+// with the enemies, every hostile exhaust in the sky pulsed in time with the player's engine.
+function buildNozzle(glowMat = nozzleGlowMat){
   const grp=new THREE.Group();
   grp.add(new THREE.Mesh(_nozzleCanGeo,nozzleMatBase));
   const liner=new THREE.Mesh(_nozzleLinerGeo,nozzleLinerMat);liner.position.z=-.2;grp.add(liner);
-  const core=new THREE.Mesh(_nozzleCoreGeo,nozzleGlowMat);core.position.z=-1.;grp.add(core);
+  const core=new THREE.Mesh(_nozzleCoreGeo,glowMat);core.position.z=-1.;grp.add(core);
   grp.userData.core=core;return grp;
 }
 function createPlayerJet(){
@@ -2184,7 +2192,7 @@ function createEnemyJet(){
   const eShroudGeo = new THREE.CylinderGeometry(1.00, .94, 1.8, 20, 1, true);
   eShroudGeo.rotateX(Math.PI / 2);
   const esh = new THREE.Mesh(eShroudGeo, eBMat); esh.position.set(0, .03, 10.6); j.add(esh);
-  const nz = buildNozzle(); nz.position.set(0, .03, 11.1); nz.scale.setScalar(1.10);
+  const nz = buildNozzle(eGlowMat); nz.position.set(0, .03, 11.1); nz.scale.setScalar(1.10);
   j.add(nz);
   j.userData.nozzleGlow = nz.userData.core;
   // Enemies do not modulate throttle, so give the can a fixed hot core.

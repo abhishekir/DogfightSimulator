@@ -47,13 +47,15 @@ detail behind everything below; read it before starting work.**
 
 There is one automated check. `node .github/smoke-test.mjs` loads the game in a
 headless browser, starts it, and fails on an uncaught exception, a console
-error (which is how a shader that will not compile shows up), a failed request
-(which is how a dead CDN URL shows up), an overlay that never dismisses
-(meaning the module did not run to the end), or a frame with too little
-variance to be a rendered scene. It runs on every push and pull request. Offline,
-set `SMOKE_VENDOR_DIR` to a local three.js package directory and
-`SMOKE_PLAYWRIGHT` to a playwright install; in CI both are left unset, because
-fetching the pinned CDN URLs for real is part of what is being tested.
+error (which is how a shader that will not compile shows up), a WebGL error
+(which Chrome logs as a warning, and which is how a draw call the GPU refused
+shows up — a feedback loop, say), a failed request (which is how a dead CDN URL
+shows up), an overlay that never dismisses (meaning the module did not run to
+the end), or a frame too flat or too dark to be the rendered world. It runs on
+every push and pull request. Offline, set `SMOKE_VENDOR_DIR` to a local three.js
+package directory and `SMOKE_PLAYWRIGHT` to a playwright install; in CI both are
+left unset, because fetching the pinned CDN URLs for real is part of what is
+being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
 Everything below is still on you.

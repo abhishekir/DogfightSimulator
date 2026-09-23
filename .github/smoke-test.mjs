@@ -4,8 +4,9 @@
  *
  * There is no unit test suite here and rendering cannot be checked by reading a
  * diff, but a whole class of failure is mechanically detectable: a syntax error, a
- * shader that will not compile, a CDN URL that has stopped resolving, an exception
- * in the first frames, or a scene that draws nothing at all. This catches those.
+ * shader that will not compile, a draw call WebGL refuses, a CDN URL that has stopped
+ * resolving, an exception in the first frames, or a scene that draws nothing at all.
+ * This catches those.
  *
  *   node .github/smoke-test.mjs
  *
@@ -62,8 +63,16 @@ if (VENDOR) {
   });
 }
 
+// Chrome reports a draw call the GPU refused - a feedback loop, an incomplete framebuffer,
+// a bad uniform - as a console *warning*, and the frame carries on without it. That is how a
+// broken post pass shows up, and it throws nothing, so those warnings count as failures too.
+// Driver performance notes ("GPU stall due to ReadPixels") use the same channel and do not.
+const GL_ERROR = /\bGL_INVALID_\w+|WebGL: INVALID_\w+|GL_OUT_OF_MEMORY|CONTEXT_LOST/;
 page.on('pageerror', e => problems.push(`uncaught exception: ${e.message}`));
-page.on('console', m => { if (m.type() === 'error') problems.push(`console.error: ${m.text()}`); });
+page.on('console', m => {
+  if (m.type() === 'error') problems.push(`console.error: ${m.text()}`);
+  else if (m.type() === 'warning' && GL_ERROR.test(m.text())) problems.push(`WebGL error: ${m.text()}`);
+});
 page.on('requestfailed', r => problems.push(`request failed: ${r.url()} (${r.failure()?.errorText})`));
 page.on('response', r => { if (r.status() >= 400) problems.push(`HTTP ${r.status()}: ${r.url()}`); });
 
@@ -122,11 +131,16 @@ try {
   }, shot);
   await probe.close();
 
-  // Margins measured against the real thing and against a deliberately blanked
-  // build: a working frame gives ~62 buckets and stddev ~80, a cleared one that
-  // still draws the HUD gives 4 and 5.4.
+  // Margins measured against the real thing and against broken builds. A working frame
+  // gives ~62 buckets, mean 90-100 and stddev ~80; a cleared one that still draws the
+  // HUD gives 4 buckets and stddev 5.4. Variance alone is not enough: when the cloud
+  // composite failed, the world came out black with only the effects drawn over it -
+  // exhaust, smoke, tree billboards - which still gave 63 buckets and stddev 29, but a
+  // mean of 14.
   check('frame is not blank', stats.buckets >= 16 && stats.stddev >= 12,
         `only ${stats.buckets} luminance buckets, stddev ${stats.stddev.toFixed(1)} - the scene looks blank`);
+  check('world is lit', stats.mean >= 40,
+        `mean luminance ${stats.mean.toFixed(1)} - the sky and ground did not draw`);
 
   console.log('\nchecks');
   for (const c of checks) console.log(`  ${c.ok ? 'pass' : 'FAIL'}  ${c.name}${c.ok || !c.detail ? '' : ' - ' + c.detail}`);
@@ -146,8 +160,10 @@ try {
 }
 
 if (problems.length) {
-  console.error(`\n${problems.length} problem(s):`);
-  for (const p of [...new Set(problems)]) console.error(`  - ${p}`);
+  // A per-frame error repeats every frame until the browser stops reporting it.
+  const unique = [...new Set(problems)];
+  console.error(`\n${unique.length} problem(s):`);
+  for (const p of unique) console.error(`  - ${p}`);
   process.exit(1);
 }
 console.log('\nsmoke test passed');

@@ -7,9 +7,10 @@ on:
   workflow_dispatch:
 
 # The game has no unit tests and rendering cannot be checked by reading a diff,
-# but a syntax error, a shader that will not compile, a CDN URL that has stopped
-# resolving, an exception in the first frames or a scene that draws nothing are
-# all mechanically detectable. That is what this job is for.
+# but a syntax error, a shader that will not compile, a draw call WebGL refuses,
+# a CDN URL that has stopped resolving, an exception in the first frames or a
+# scene that draws nothing are all mechanically detectable. That is what this job
+# is for.
 jobs:
   smoke:
     runs-on: ubuntu-latest

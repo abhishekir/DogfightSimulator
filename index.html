@@ -3458,6 +3458,10 @@ function updateWorldAnchors(elapsed){
     -CLOUD_WIND.x * elapsed * 0.000105,
     -CLOUD_WIND.y * elapsed * 0.000105);
   atmoUniforms.uCamPos.value.copy(camera.position);
+  // The FOV moves every frame with throttle and the fire pulse (60-80 degrees), so the
+  // ocean's pixel footprint has to follow it here; computed only at load and resize, it
+  // ran up to a quarter too small at full throttle and fine ripples aliased back in.
+  syncOceanPixelAngle();
   gradePass.uniforms.uTime.value = elapsed;
   volumetricClouds.marchMaterial.uniforms.uTime.value = elapsed;
   waterMat.uniforms.uTime.value = elapsed;

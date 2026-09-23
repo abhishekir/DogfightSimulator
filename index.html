@@ -1416,6 +1416,20 @@ function createTerrainChunk(cx, cz, seg) {
 // each frame on it; the old chunk stays on screen until its replacement is ready, so raising
 // detail never opens a hole.
 const terrainQueue = [];
+// Streaming assumes the aircraft moves a chunk at a time: an out-of-range chunk is dropped at
+// once while its replacement trickles in at a few per frame, which is invisible when the
+// replacement is the same ground at a new level of detail. A restart is not that. It
+// teleports the aircraft back to the spawn point, usually far from where it died, and none of
+// the ground there has a predecessor - so for hundreds of frames there was open sea where the
+// land should be. Build the whole view range at once instead, the way the first load does;
+// the restart click is already a pause in play.
+function rebuildWorldAround(px, pz) {
+  terrainChunkX = terrainChunkZ = null;           // updateTerrain treats this as a first load
+  updateTerrain(px, pz);
+  while (vegQueue.length) { const [cx, cz] = vegQueue.shift(); buildVegChunk(cx, cz); }
+  syncVegInstances(vegChunkX, vegChunkZ); vegDirty = false;
+}
+
 function stepTerrainBuild() {
   if (!terrainQueue.length) return;
   const deadline = performance.now() + 4;
@@ -3058,6 +3072,7 @@ function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.
   player.rollRate=player.pitchRate=player.yawRate=0;player.fireCooldown=player.missileCooldown=0;
   player.missileAmmo=MAX_MISSILE_AMMO;player.missileSide=1;
   playerJet.position.set(0,350,0);player.prevPosition.copy(playerJet.position);playerJet.quaternion.identity();playerJet.visible=true;
+  rebuildWorldAround(playerJet.position.x,playerJet.position.z);
   score=0;kills=0;gameTime=0;gameOver=false;paused=false;camInit=false;screenShake=0;hitFlash=0;gForce=1;fovPulse=0;
   lockTarget=null;lockProgress=0;incomingThreat=false;
   waveNumber=1;waveTotal=0;waveSpawned=0;waveKilled=0;waveState='intermission';waveTimer=3;waveSpawnDelay=0;

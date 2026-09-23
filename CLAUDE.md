@@ -30,6 +30,13 @@ detail behind everything below; read it before starting work.**
   shadow term, and by the water's analytic cloud reflection. Changing it changes
   all three together — that is what keeps a cloud, its shadow and its reflection
   describing the same cloud.
+- **Transparent effects go on the effects layer.** The cloud march stops at the
+  depth buffer, so anything drawn with `depthWrite: false` — smoke, fire,
+  exhaust, trails, tree billboards — is invisible to it, and left on layer 0 it
+  gets cloud composited over it however near it is. Put the object on
+  `FX_LAYER` with `asEffect()` and dim its material by the cloud in front of it
+  with `fxCloudFront()` (`fxCloudAware()` does that for built-in additive
+  materials); `EffectsPass` then draws it after the clouds.
 - **Use `smoothT(k, dt)` for smoothing, never `lerp(a, b, k * dt)`.** The latter
   is frame-rate dependent and diverges outright once `k * dt` exceeds 2, which a
   single long frame is enough to trigger.

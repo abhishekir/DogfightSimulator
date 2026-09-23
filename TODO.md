@@ -22,9 +22,12 @@ accident.
   file's line count, something has rewritten the file in the other convention
   and the diff is no longer reviewable.
 - **Post chain** (`EffectComposer`): scene render, then the volumetric cloud
-  pass, then bloom, output, FXAA, and a grade pass that does lens falloff,
-  lateral chromatic aberration, an S-curve and grain. The cloud pass is inserted
-  at index 1 so sunlit cloud edges bloom with everything else.
+  pass, then `EffectsPass`, then bloom, output, FXAA, and a grade pass that does
+  lens falloff, lateral chromatic aberration, an S-curve and grain. The cloud
+  pass is inserted at index 1 so sunlit cloud edges bloom with everything else.
+  `EffectsPass` draws the effects layer (everything transparent that writes no
+  depth) over the cloud composite, because the march cannot see what is not in
+  the depth buffer.
 - **Atmosphere is shared by every material.** `ShaderChunk` fog hooks are
   overridden globally and `THREE.Material.prototype.onBeforeCompile` injects the
   shared uniforms, so terrain, water, aircraft and clouds all use one aerial

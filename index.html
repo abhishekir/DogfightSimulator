@@ -344,7 +344,12 @@ composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(
   { type: THREE.HalfFloatType, depthTexture: sceneDepthTexture }));
 // EffectComposer never resets its ping-pong buffers between frames, so with an odd number of
 // swapping passes RenderPass alternates which target it draws into. Both therefore need a
-// depth attachment - clone() gives renderTarget2 its own, and it must be left in place.
+// depth attachment, and separate ones: the cloud composite reads the scene's depth from one
+// and copies it into the other. clone() does not give renderTarget2 one of its own - its
+// DepthTexture shares the original's Source, and three.js allocates GL textures per Source,
+// so both targets had the same depth buffer and that copy was a feedback loop WebGL refused.
+composer.renderTarget2.depthTexture = new THREE.DepthTexture(
+  Math.round(window.innerWidth * POST_RATIO), Math.round(window.innerHeight * POST_RATIO));
 // setPixelRatio multiplies the composer's stored width and height, and passing an explicit
 // render target sets those from the target's pixel dimensions - which are already scaled by
 // POST_RATIO. Left alone that squares the ratio, so a HiDPI display renders post at 2.25x CSS
@@ -650,6 +655,60 @@ float cloudCoverLod0(vec2 worldXZ){
 float cloudShadowAt(vec2 worldXZ){
   return 1.0 - cloudCoverAt(worldXZ + uCloudShadowOffset) * uCloudShadowAmt;
 }`;
+
+/* ═══════════════════ EFFECTS LAYER ═══════════════════ */
+// The volumetric cloud march stops at the scene depth, and transparent effects - exhaust,
+// smoke, fire, contrails, tree billboards - write none, so the march ran straight through
+// them and the composite laid cloud over an afterburner thirty metres from the camera.
+// Effects live on their own layer instead and are drawn after the composite (EffectsPass),
+// each pixel dimmed by only the part of the cloud that lies in front of it. The march
+// records where along each ray it found cloud, and the fraction of that span in front of
+// the fragment gives the fraction of the optical depth; that is exact when density is
+// uniform along the ray, and at the two ends that matter - wholly in front, wholly
+// behind - regardless.
+const FX_LAYER = 2;
+const fxCloudUniforms = {
+  uFxOn:       { value: 0 },          // 0 wherever there is no cloud march to read
+  uFxCloud:    { value: null },       // rgb = in-scattered light, a = transmittance
+  uFxRange:    { value: null },       // xy = view depth, km, where the cloud starts and ends
+  uFxInvRes:   { value: new THREE.Vector2(1, 1) },
+  uFxNearFar:  { value: new THREE.Vector2(1, 45000) }
+};
+const FX_CLOUD_GLSL = `
+  uniform float uFxOn;
+  uniform sampler2D uFxCloud, uFxRange;
+  uniform vec2 uFxInvRes, uFxNearFar;
+  // The stretch of cloud between the camera and this fragment: rgb is the light it
+  // scatters towards the camera, a its transmittance.
+  vec4 fxCloudFront(){
+    if (uFxOn < 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
+    vec2 suv = gl_FragCoord.xy * uFxInvRes;
+    float n = uFxNearFar.x, f = uFxNearFar.y;
+    float viewKm = 2.0 * n * f / (f + n - (gl_FragCoord.z * 2.0 - 1.0) * (f - n)) * 0.001;
+    vec2 span = texture2D(uFxRange, suv).xy;
+    vec4 c = texture2D(uFxCloud, suv);
+    float k = clamp((viewKm - span.x) / max(span.y - span.x, 1e-3), 0.0, 1.0);
+    float T = max(c.a, 1e-4), Tf = pow(T, k);
+    return vec4(c.rgb * (1.0 - Tf) / max(1.0 - T, 1e-4), Tf);
+  }`;
+// Additive:       dst + T_f * a * rgb             -> scale alpha by T_f.
+// Premultiplied:  dst * (1 - a) + T_f * rgb + a * S_f, where S_f is the front stretch's own
+// light, which the composite already put in dst and the effect must not then cover up.
+const FX_ADDITIVE_GLSL = 'gl_FragColor.a *= fxCloudFront().a;';
+const FX_PREMULTIPLIED_GLSL =
+  '{ vec4 fxc = fxCloudFront(); gl_FragColor.rgb = gl_FragColor.rgb * fxc.a + fxc.rgb * gl_FragColor.a; }';
+function asEffect(object) { object.layers.set(FX_LAYER); return object; }
+// For built-in additive materials. clone() does not carry onBeforeCompile across, so a clone
+// has to go through here again.
+function fxCloudAware(material) {
+  material.onBeforeCompile = function (shader, renderer) {
+    THREE.Material.prototype.onBeforeCompile.call(this, shader, renderer);
+    Object.assign(shader.uniforms, fxCloudUniforms);
+    shader.fragmentShader = FX_CLOUD_GLSL + shader.fragmentShader.replace(
+      '#include <fog_fragment>', '#include <fog_fragment>\n' + FX_ADDITIVE_GLSL);
+  };
+  return material;
+}
 
 /* ═══════════════════ OCEAN ═══════════════════ */
 const WATER_LEVEL = 0;
@@ -1503,7 +1562,7 @@ const vegMaterial = new THREE.ShaderMaterial({
     uMap:      { value: canopyTex },
     uFadeNear: { value: VEG_FADE_NEAR },
     uFadeFar:  { value: VEG_FADE_FAR }
-  }, atmoUniforms, cloudShadowUniforms),
+  }, atmoUniforms, cloudShadowUniforms, fxCloudUniforms),
   vertexShader: `attribute vec3 iTint;
     varying vec2 vUv;varying vec3 vTint,vWorldPos;varying float vDist;
     void main(){vUv=uv;vTint=iTint;
@@ -1518,6 +1577,7 @@ const vegMaterial = new THREE.ShaderMaterial({
     varying vec2 vUv;varying vec3 vTint,vWorldPos;varying float vDist;
     ${atmosphereGLSL}
     ${CLOUD_SHADOW_GLSL}
+    ${FX_CLOUD_GLSL}
     void main(){
       vec4 tex=texture2D(uMap,vUv);
       float a=tex.a*(1.-smoothstep(uFadeNear,uFadeFar,vDist));
@@ -1532,13 +1592,14 @@ const vegMaterial = new THREE.ShaderMaterial({
       vec3 col=vTint*tex.r*(.72+.95*max(NoL,0.)*cloudShadowAt(vWorldPos.xz)+.18*max(-NoL,0.));
       col=applyAerial(col,uCamPos,normalize(vWorldPos-uCamPos),vDist);
       gl_FragColor=vec4(col*a,a);   // premultiplied
+      ${FX_PREMULTIPLIED_GLSL}
     }`,
   transparent:true, depthWrite:false, depthTest:true, fog:false,
   blending:THREE.CustomBlending,
   blendSrc:THREE.OneFactor, blendDst:THREE.OneMinusSrcAlphaFactor,
   blendSrcAlpha:THREE.OneFactor, blendDstAlpha:THREE.OneMinusSrcAlphaFactor
 });
-const vegMesh = createDynamicInstancedMesh(vegGeometry, vegMaterial, MAX_VEG);
+const vegMesh = asEffect(createDynamicInstancedMesh(vegGeometry, vegMaterial, MAX_VEG));
 vegMesh.renderOrder = 2;
 
 const vegChunks = new Map();      // "cx,cz" -> flat array of [x,y,z,size,r,g,b]
@@ -2070,9 +2131,9 @@ function createPlayerJet(){
   j.userData.nozzleL=nL;j.userData.nozzleR=nR;
   j.userData.nozzleGlowL=nL.userData.core;j.userData.nozzleGlowR=nR.userData.core;
   const ag=new THREE.ConeGeometry(.7,6,8);ag.rotateX(-Math.PI/2);
-  const amL=new THREE.MeshBasicMaterial({color:0x4488ff,transparent:true,opacity:.75,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});
-  const aL=new THREE.Mesh(ag,amL);aL.position.set(.66,-.02,15.9);aL.visible=false;j.add(aL);
-  const aR=new THREE.Mesh(ag,amL.clone());aR.position.set(-.66,-.02,15.9);aR.visible=false;j.add(aR);
+  const amL=fxCloudAware(new THREE.MeshBasicMaterial({color:0x4488ff,transparent:true,opacity:.75,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));
+  const aL=asEffect(new THREE.Mesh(ag,amL));aL.position.set(.66,-.02,15.9);aL.visible=false;j.add(aL);
+  const aR=asEffect(new THREE.Mesh(ag,fxCloudAware(amL.clone())));aR.position.set(-.66,-.02,15.9);aR.visible=false;j.add(aR);
   j.userData.abL=aL;j.userData.abR=aR;
 
   const nvg=new THREE.SphereGeometry(.13,6,6);
@@ -2232,16 +2293,16 @@ const missileFinGeo=new THREE.BoxGeometry(.9,.06,.8);
 const missileFlameGeo=new THREE.ConeGeometry(.3,2.6,8);missileFlameGeo.rotateX(-Math.PI/2);
 const missileBodyMat=new THREE.MeshStandardMaterial({color:0xd8dde2,metalness:.25,roughness:.4,envMapIntensity:.8,emissive:0x262626,emissiveIntensity:.8});
 const missileFinMat=new THREE.MeshStandardMaterial({color:0x4e555d,metalness:.2,roughness:.52,envMapIntensity:.7});
-const missileFlameMat=new THREE.MeshBasicMaterial({color:0xffaa33,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});
-const missileGlowMat=new THREE.SpriteMaterial({map:createSunGlowTexture(),color:0xff7722,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});
+const missileFlameMat=fxCloudAware(new THREE.MeshBasicMaterial({color:0xffaa33,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));
+const missileGlowMat=fxCloudAware(new THREE.SpriteMaterial({map:createSunGlowTexture(),color:0xff7722,transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));
 function createMissileVisual(){
   const g=new THREE.Group();
   const body=new THREE.Mesh(missileBodyGeo,missileBodyMat);g.add(body);
   const nose=new THREE.Mesh(missileNoseGeo,missileBodyMat);nose.position.z=1.85;g.add(nose);
   const finH=new THREE.Mesh(missileFinGeo,missileFinMat);finH.position.z=-1;g.add(finH);
   const finV=finH.clone();finV.rotation.z=Math.PI/2;g.add(finV);
-  const flame=new THREE.Mesh(missileFlameGeo,missileFlameMat);flame.position.z=-2.5;g.add(flame);
-  const glow=new THREE.Sprite(missileGlowMat);glow.position.z=-3.2;glow.scale.set(7,7,1);g.add(glow);
+  const flame=asEffect(new THREE.Mesh(missileFlameGeo,missileFlameMat));flame.position.z=-2.5;g.add(flame);
+  const glow=asEffect(new THREE.Sprite(missileGlowMat));glow.position.z=-3.2;glow.scale.set(7,7,1);g.add(glow);
   g.visible=false;g.userData={active:false,vel:new THREE.Vector3(),launchDir:new THREE.Vector3(),life:0,target:null,isEnemy:false,tracking:false,
     trackEnergy:0,age:0,launchSpeed:0,maxSpeed:0,trailDistance:0,prevPos:new THREE.Vector3(),flame,glow};
   return g;
@@ -2291,7 +2352,7 @@ function createParticleMaterial(blending,softSmoke) {
   const smoke = !!softSmoke;
   return new THREE.ShaderMaterial({
     defines: smoke ? { SOFT_SMOKE: 1 } : {},
-    uniforms: Object.assign({ uMap: { value: smoke ? smokeTex : glowTex } }, atmoUniforms),
+    uniforms: Object.assign({ uMap: { value: smoke ? smokeTex : glowTex } }, atmoUniforms, fxCloudUniforms),
     vertexShader:`attribute vec3 iColor;attribute float iOpacity,iHashSeed;
       varying vec2 vUv;varying vec3 vColor,vWorldPos;varying float vOpacity,vDist,vSpin;
       void main(){vUv=uv;vColor=iColor;vOpacity=iOpacity;vSpin=iHashSeed;
@@ -2305,6 +2366,7 @@ function createParticleMaterial(blending,softSmoke) {
     fragmentShader:`uniform sampler2D uMap;
       varying vec2 vUv;varying vec3 vColor,vWorldPos;varying float vOpacity,vDist,vSpin;
       ${atmosphereGLSL}
+      ${FX_CLOUD_GLSL}
       void main(){
       // Per-particle rotation keeps repeated puffs from stamping the same silhouette.
       float c=cos(vSpin),sn=sin(vSpin);
@@ -2326,6 +2388,11 @@ function createParticleMaterial(blending,softSmoke) {
         // Emissive: haze attenuates it rather than tinting it.
         gl_FragColor=vec4(vColor*aerialTransmittance(uCamPos,ray,vDist),a);
       #endif
+      #ifdef SOFT_SMOKE
+        ${FX_PREMULTIPLIED_GLSL}
+      #else
+        ${FX_ADDITIVE_GLSL}
+      #endif
       #include <tonemapping_fragment>
       #include <colorspace_fragment>
       }`,
@@ -2346,6 +2413,7 @@ function createParticleBatch(geometry,blending,hashed=false) {
 }
 const smokeParticleBatch=createParticleBatch(smokeParticleGeo,THREE.NormalBlending,true);
 const fireParticleBatch=createParticleBatch(particleGeo,THREE.AdditiveBlending);
+asEffect(smokeParticleBatch.mesh);asEffect(fireParticleBatch.mesh);
 for(let i=0;i<MAX_PARTICLES;i++)freeParticles.push({position:new THREE.Vector3(),velocity:new THREE.Vector3(),color:new THREE.Color(),
   opacity:0,scale:1,hashSeed:0,life:0,maxLife:1,size:1,type:'fire',isTrail:false,camD2:0});
 function spawnP(pos,vel,life,color,size,type='fire',isTrail=false){
@@ -2403,7 +2471,7 @@ function spawnExplosion(pos, count) {
   if (count >= 30) spawnDebris(pos, 3 + Math.floor(Math.random()*3));
 }
 
-const speedLines=[];for(let i=0;i<80;i++){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));const m=new THREE.LineBasicMaterial({color:0xaaddff,transparent:true,opacity:.3,depthWrite:false,blending:THREE.AdditiveBlending,fog:false});const l=new THREE.Line(g,m);l.visible=false;l.userData={active:false,life:0};scene.add(l);speedLines.push(l)}
+const speedLines=[];for(let i=0;i<80;i++){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));const m=fxCloudAware(new THREE.LineBasicMaterial({color:0xaaddff,transparent:true,opacity:.3,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));const l=asEffect(new THREE.Line(g,m));l.visible=false;l.userData={active:false,life:0};scene.add(l);speedLines.push(l)}
 
 /* ═══════════════════ CONTRAILS ═══════════════════ */
 const contrailPos=[],CONTRAIL_MAX=120;
@@ -2411,9 +2479,10 @@ const cGeo=new THREE.BufferGeometry(),cVerts=new Float32Array(CONTRAIL_MAX*3),cA
 cGeo.setAttribute('position',new THREE.BufferAttribute(cVerts,3));
 cGeo.setAttribute('alpha',new THREE.BufferAttribute(cAlphas,1));
 const cMat=new THREE.ShaderMaterial({transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+  uniforms:Object.assign({},fxCloudUniforms),
   vertexShader:`attribute float alpha;varying float vA;void main(){vA=alpha;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);gl_PointSize=mix(1.,4.,alpha);}`,
-  fragmentShader:`varying float vA;void main(){gl_FragColor=vec4(.9,.93,1.,vA*.4);}`});
-scene.add(new THREE.Points(cGeo,cMat));
+  fragmentShader:`varying float vA;${FX_CLOUD_GLSL}void main(){gl_FragColor=vec4(.9,.93,1.,vA*.4);${FX_ADDITIVE_GLSL}}`});
+scene.add(asEffect(new THREE.Points(cGeo,cMat)));
 let contrailTimer=0;
 
 /* ═══════════════════ ENEMIES ═══════════════════ */
@@ -3196,6 +3265,7 @@ const cloudMarchShader = {
     void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
   fragmentShader: `
     layout(location = 0) out vec4 outColor;
+    layout(location = 1) out vec4 outRange;    // view depth, km, of the cloud along the ray
     uniform sampler2D tDiffuse, tDepth;
     uniform sampler3D uNoise3D;
     uniform mat4 uInvProjView;
@@ -3276,7 +3346,9 @@ const cloudMarchShader = {
       float t1 = (uCloudTop    - uCamPos.y) * invY;
       float tEnter = max(min(t0, t1), 0.0);
       float tExit  = min(max(t0, t1), min(sceneDist, MAX_MARCH));
-      if (tExit <= tEnter) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+      if (tExit <= tEnter) {
+        outColor = vec4(0.0, 0.0, 0.0, 1.0); outRange = vec4(60.0, 60.0, 0.0, 1.0); return;
+      }
 
       float dt = (tExit - tEnter) / float(PRIMARY_STEPS);
       float t = tEnter + dt * hash12(vUv * 1024.0);    // jitter, or the layer bands visibly
@@ -3293,11 +3365,14 @@ const cloudMarchShader = {
       vec3 scatter = vec3(0.0);
       float transmittance = 1.0;
       float thick = uCloudTop - uCloudBottom;
+      float tFront = -1.0, tLast = 0.0;
 
       for (int i = 0; i < PRIMARY_STEPS; i++) {
         vec3 p = uCamPos + rayDir * t;
         float dens = cloudDensity(p, dw);
         if (dens > 0.002) {
+          if (tFront < 0.0) tFront = t;
+          tLast = t;
           // Cone-ish light march: short steps close in, where occlusion actually shapes the
           // cloud, doubling outwards so four taps still reach across a whole cumulus.
           float toLight = 0.0, ls = thick * 0.10, lt = ls * 0.5;
@@ -3335,15 +3410,27 @@ const cloudMarchShader = {
       float haze = clamp(1.0 - exp(-od * od), 0.0, 1.0);
       scatter = mix(scatter, hazeColor(rayDir) * (1.0 - transmittance), haze);
       outColor = vec4(scatter, transmittance);
+      // Where this ray found no cloud, the stretch of the layer it crossed stands in. The
+      // effects read transmittance filtered and this unfiltered, so along a cloud edge a
+      // clear texel lends its span to a pixel dimmed by the cloud next to it - and that
+      // cloud lies somewhere inside the same layer. A "no cloud here" marker instead let
+      // effects behind the edge show through undimmed in a line round every silhouette.
+      if (tFront < 0.0) { tFront = tEnter; tLast = tExit; }
+      else { tFront = max(tFront - 0.5 * dt, 0.0); tLast += 0.5 * dt; }
+      float toViewKm = max(dot(rayDir, uCamFwd), 1e-3) * 0.001;
+      outRange = vec4(tFront * toViewKm, tLast * toViewKm, 0.0, 1.0);
     }`
 };
 
 const cloudCompositeShader = {
-  uniforms: { tDiffuse: { value: null }, tClouds: { value: null },
+  uniforms: { tDiffuse: { value: null }, tClouds: { value: null }, tDepth: { value: null },
               uCloudTexel: { value: new THREE.Vector2() } },
+  // Copies the scene depth into the target it writes, for EffectsPass to test against. WebGL
+  // drops depth writes whenever the depth test is off, hence ALWAYS rather than disabled.
+  depthTest: true, depthWrite: true, depthFunc: THREE.AlwaysDepth,
   vertexShader: `varying vec2 vUv;
     void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
-  fragmentShader: `uniform sampler2D tDiffuse, tClouds;uniform vec2 uCloudTexel;varying vec2 vUv;
+  fragmentShader: `uniform sampler2D tDiffuse, tClouds, tDepth;uniform vec2 uCloudTexel;varying vec2 vUv;
     void main(){
       // Four taps on a rotated grid. Forty steps cannot resolve a cloud edge cleanly and the
       // per-pixel jitter that hides the banding shows up as static; this averages it out for
@@ -3354,6 +3441,7 @@ const cloudCompositeShader = {
              + texture2D(tClouds, vUv + uCloudTexel * vec2( 0.9, -0.4));
       c *= 0.25;                                 // rgb = in-scattered light, a = transmittance
       gl_FragColor = vec4(texture2D(tDiffuse, vUv).rgb * c.a + c.rgb, 1.0);
+      gl_FragDepth = texture2D(tDepth, vUv).x;
     }`
 };
 
@@ -3367,7 +3455,11 @@ class VolumetricCloudPass extends Pass {
     this.compositeQuad = new FullScreenQuad(this.compositeMaterial);
     this.cloudRT = new THREE.WebGLRenderTarget(
       Math.max(1, Math.round(width * CLOUD_SCALE)), Math.max(1, Math.round(height * CLOUD_SCALE)),
-      { type: THREE.HalfFloatType, depthBuffer: false, generateMipmaps: false });
+      { type: THREE.HalfFloatType, depthBuffer: false, generateMipmaps: false, count: 2 });
+    // The cloud span is a hard boundary; interpolating it across an edge would invent depths.
+    this.cloudRT.textures[1].minFilter = this.cloudRT.textures[1].magFilter = THREE.NearestFilter;
+    fxCloudUniforms.uFxCloud.value = this.cloudRT.textures[0];
+    fxCloudUniforms.uFxRange.value = this.cloudRT.textures[1];
     this.compositeMaterial.uniforms.uCloudTexel.value.set(
       1 / this.cloudRT.width, 1 / this.cloudRT.height);
     this.marchMaterial.uniforms.uNoise3D.value = createCloudNoise3D();
@@ -3389,6 +3481,7 @@ class VolumetricCloudPass extends Pass {
     this.marchQuad.render(renderer);
     this.compositeMaterial.uniforms.tDiffuse.value = readBuffer.texture;
     this.compositeMaterial.uniforms.tClouds.value = this.cloudRT.texture;
+    this.compositeMaterial.uniforms.tDepth.value = readBuffer.depthTexture;
     renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
     if (this.clear) renderer.clear();
     this.compositeQuad.render(renderer);
@@ -3398,7 +3491,27 @@ class VolumetricCloudPass extends Pass {
 const volumetricClouds = new VolumetricCloudPass(
   Math.round(window.innerWidth * POST_RATIO), Math.round(window.innerHeight * POST_RATIO));
 // Straight after the scene and before bloom, so a sunlit edge blooms like the rest of it.
-if (USE_VOLUMETRIC_CLOUDS) composer.insertPass(volumetricClouds, 1);
+// Draws the effects layer over the cloud composite, into the same buffer, against the depth
+// the composite carried across.
+class EffectsPass extends Pass {
+  constructor(scene, camera) { super(); this.scene = scene; this.camera = camera; this.needsSwap = false; }
+  render(renderer, writeBuffer, readBuffer) {
+    const cam = this.camera, mask = cam.layers.mask;
+    const autoClear = renderer.autoClear, shadowAuto = renderer.shadowMap.autoUpdate;
+    fxCloudUniforms.uFxOn.value = 1;
+    fxCloudUniforms.uFxInvRes.value.set(1 / readBuffer.width, 1 / readBuffer.height);
+    fxCloudUniforms.uFxNearFar.value.set(cam.near, cam.far);
+    cam.layers.set(FX_LAYER);
+    renderer.autoClear = false; renderer.shadowMap.autoUpdate = false;
+    renderer.setRenderTarget(this.renderToScreen ? null : readBuffer);
+    renderer.render(this.scene, cam);
+    renderer.autoClear = autoClear; renderer.shadowMap.autoUpdate = shadowAuto;
+    cam.layers.mask = mask;
+  }
+}
+const effectsPass = new EffectsPass(scene, camera);
+if (USE_VOLUMETRIC_CLOUDS) { composer.insertPass(volumetricClouds, 1); composer.insertPass(effectsPass, 2); }
+else camera.layers.enable(FX_LAYER);    // no march to sit behind: draw them with everything else
 
 /* ═══════════════════ WATER REFLECTION ═══════════════════ */
 // The sea reflected an analytic sky dome and nothing else, so a hill beside a bay left no
@@ -3412,6 +3525,7 @@ const reflectRT = new THREE.WebGLRenderTarget(
     depthBuffer: true, generateMipmaps: false });
 waterMat.uniforms.uReflectTex.value = reflectRT.texture;
 const reflectCam = new THREE.PerspectiveCamera();
+reflectCam.layers.enable(FX_LAYER);
 const reflectTextureMatrix = new THREE.Matrix4();
 const _rTarget = new THREE.Vector3(), _rUp = new THREE.Vector3(), _rFwd = new THREE.Vector3();
 const _rPlane = new THREE.Plane(), _rClip = new THREE.Vector4(), _rQ = new THREE.Vector4();
@@ -3463,6 +3577,7 @@ function renderWaterReflection() {
   water.visible = false;
   renderer.setRenderTarget(reflectRT);
   renderer.clear();
+  fxCloudUniforms.uFxOn.value = 0;
   renderer.render(scene, reflectCam);
   renderer.setRenderTarget(null);
   water.visible = true;

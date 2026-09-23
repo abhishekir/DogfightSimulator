@@ -2347,7 +2347,7 @@ function createParticleBatch(geometry,blending,hashed=false) {
 const smokeParticleBatch=createParticleBatch(smokeParticleGeo,THREE.NormalBlending,true);
 const fireParticleBatch=createParticleBatch(particleGeo,THREE.AdditiveBlending);
 for(let i=0;i<MAX_PARTICLES;i++)freeParticles.push({position:new THREE.Vector3(),velocity:new THREE.Vector3(),color:new THREE.Color(),
-  opacity:0,scale:1,hashSeed:0,life:0,maxLife:1,size:1,type:'fire',isTrail:false});
+  opacity:0,scale:1,hashSeed:0,life:0,maxLife:1,size:1,type:'fire',isTrail:false,camD2:0});
 function spawnP(pos,vel,life,color,size,type='fire',isTrail=false){
   if(isTrail&&(activeTrailParticles>=MAX_TRAIL_PARTICLES||freeParticles.length<=PARTICLE_EFFECT_RESERVE))return;
   const p=freeParticles.pop();if(!p)return;
@@ -2366,10 +2366,19 @@ function writeParticleBatch(batch,particles){
   if(particles.length){batch.mesh.instanceMatrix.needsUpdate=true;batch.colors.needsUpdate=true;batch.opacities.needsUpdate=true;batch.hashSeeds.needsUpdate=true;
     if(batch.mesh.material.transparent)batch.mesh.computeBoundingSphere()}
 }
+// Smoke is premultiplied-over with no depth write, which composites correctly only when drawn
+// far to near - and an instanced batch draws in index order, so the list has to be sorted.
+// Unsorted, a far puff drawn after a near one covered it, and every swap-remove from the pool
+// reshuffled the order, which is what made trails flicker. Fire is additive, so its order
+// does not matter and it is left alone.
+const farToNear=(a,b)=>b.camD2-a.camD2;
 function syncParticleBatches(){
   smokeRenderParticles.length=0;fireRenderParticles.length=0;
   for(const p of activeParticles){if(p.type==='smoke')smokeRenderParticles.push(p);
     else fireRenderParticles.push(p)}
+  const cp=camera.position;
+  for(const p of smokeRenderParticles)p.camD2=p.position.distanceToSquared(cp);
+  smokeRenderParticles.sort(farToNear);
   writeParticleBatch(smokeParticleBatch,smokeRenderParticles);writeParticleBatch(fireParticleBatch,fireRenderParticles);
 }
 function resetParticlePool(){while(activeParticles.length){const p=activeParticles.pop();p.isTrail=false;freeParticles.push(p)}

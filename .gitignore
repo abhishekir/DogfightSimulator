@@ -1,0 +1,2 @@
+# Written by .github/smoke-test.mjs when a check fails; CI uploads it as an artifact.
+.github/smoke-failure.png

@@ -2849,7 +2849,7 @@ const ENEMY_INBOUND_TARGET_DISTANCE=600,ENEMY_REPOSITION_TARGET_DISTANCE=800;
 function smoothLookAt(mesh, target, dt, turnSpeed) {
   _eLook.lookAt(mesh.position, target, _axisY);
   _eDesired.setFromRotationMatrix(_eLook);
-  mesh.quaternion.slerp(_eDesired, Math.min(dt * turnSpeed, 1));
+  mesh.quaternion.slerp(_eDesired, smoothT(turnSpeed, dt));
 }
 function ensureEnemyHorizontalTargetDistance(target,right,side,minDistance){
   _eTargetOffset.subVectors(target,playerJet.position);
@@ -3056,7 +3056,7 @@ function updateMissiles(dt){
   const motor=Math.min(u.age/.45,1),desiredSpeed=THREE.MathUtils.lerp(u.launchSpeed,u.maxSpeed,motor);
   if(u.vel.lengthSq()>0)u.vel.setLength(desiredSpeed);
   if(u.age<.5){_missileSteer.copy(u.launchDir).multiplyScalar(desiredSpeed);
-    u.vel.lerp(_missileSteer,Math.min(dt*6,1));
+    u.vel.lerp(_missileSteer,smoothT(6,dt));
     if(u.vel.lengthSq()<1e-8)u.vel.copy(_missileSteer);else u.vel.setLength(desiredSpeed)}
   const tgt=u.target;
   if(tgt&&tgt.alive&&u.tracking){
@@ -3066,7 +3066,7 @@ function updateMissiles(dt){
     // Drain tracking energy based on turn angle - sharp turns drain faster
     u.trackEnergy-=offAngle*dt*1.2;
     if(u.trackEnergy<=0||offAngle>1.2){u.tracking=false}// lost lock - flies straight
-    else{const spd=u.vel.length(),turnRate=Math.min(dt*(2.2+motor*1.8),1);
+    else{const spd=u.vel.length(),turnRate=smoothT(2.2+motor*1.8,dt);
       u.vel.lerp(toT.multiplyScalar(spd),turnRate).normalize().multiplyScalar(spd)}
   }
   _tmpV1.copy(m.position).add(u.vel);m.lookAt(_tmpV1);
@@ -3174,7 +3174,8 @@ function drawHUD(){
   const lpX=25,lpY=h-220;hud.fillStyle='rgba(0,15,30,.5)';hud.fillRect(lpX-8,lpY-8,190,200);hud.strokeStyle='rgba(0,255,200,.12)';hud.strokeRect(lpX-8,lpY-8,190,200);
   hud.font='10px Courier New';hud.fillStyle='#0aa';hud.fillText('FLIGHT DATA',lpX+45,lpY+5);
   hud.font='12px Courier New';hud.fillStyle='#0ff';
-  const alt=Math.round(playerJet.position.y),spd=Math.round(player.velocity.length()),thr=Math.round(player.throttle*100),mach=(spd/343).toFixed(2);
+  // velocity is in m/s: knots for the readout, Mach from the raw figure.
+  const alt=Math.round(playerJet.position.y),mps=player.velocity.length(),spd=Math.round(mps*1.94384),thr=Math.round(player.throttle*100),mach=(mps/SPEED_OF_SOUND).toFixed(2);
   hud.fillText(`ALT   ${String(alt).padStart(5)} m`,lpX,lpY+28);hud.fillText(`IAS   ${String(spd).padStart(5)} kts`,lpX,lpY+46);
   hud.fillText(`MACH  ${mach.padStart(5)}`,lpX,lpY+64);hud.fillText(`THR   ${String(thr).padStart(4)}%`,lpX,lpY+82);
   hud.fillText(`HDG   ${String(hdg).padStart(4)}`,lpX,lpY+100);

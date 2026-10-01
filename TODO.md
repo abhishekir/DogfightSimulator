@@ -317,15 +317,6 @@ would be worth a lot and avoids most of the dynamic-shadowing problem.
   it; at normal frame rates it drains. If you make the aircraft faster, re-check
   that.
 - **`lerp(a, b, k * dt)` is frame-rate dependent** and diverges outright once
-  `k * dt` exceeds 2, which one long frame is enough to trigger. Two instances
-  were fixed with the `smoothT` helper; two more (in `smoothLookAt` and
-  `updateMissiles`) are clamped with `Math.min(..., 1)`, which is safe from
-  divergence but still frame-rate dependent. Use `smoothT` for anything new.
+  `k * dt` exceeds 2, which one long frame is enough to trigger. Every instance
+  now goes through `smoothT`; use it for anything new.
 - There is no settings screen. Volume and mute are keys only (see 1f).
-- **The HUD labels airspeed in knots but prints metres per second.** `drawHUD`
-  uses `player.velocity.length()` directly for the `IAS` readout while deriving
-  `MACH` from the same figure as `spd / 343` — which is correct for m/s, so the
-  Mach number is right and the knots label is not. At full throttle it reads
-  450 kt where it means roughly 875. Converting (`* 1.94384`) is the realistic
-  fix and keeps Mach consistent, but it changes a number the player reads, so
-  it is a deliberate call rather than a silent correction.

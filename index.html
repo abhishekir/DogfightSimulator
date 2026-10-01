@@ -37,6 +37,7 @@ canvas{display:block}
     <span>← / →</span> — Roll Left / Right<br>
     <span>SPACE</span> — Fire Cannons<br>
     <span>F (hold)</span> — Lock &amp; Fire Missile<br>
+    <span>− / +</span> — Volume &nbsp; <span>M</span> — Mute<br>
     <span>ESC</span> — Pause
   </div>
   <div class="start-msg">[ CLICK TO LAUNCH ]</div>
@@ -55,6 +56,7 @@ canvas{display:block}
     <span>← / →</span> — Roll Left / Right<br>
     <span>SPACE</span> — Fire Cannons<br>
     <span>F (hold)</span> — Lock &amp; Fire Missile<br>
+    <span>− / +</span> — Volume &nbsp; <span>M</span> — Mute<br>
     <span>ESC</span> — Resume
   </div>
   <div class="start-msg">[ CLICK TO RESUME ]</div>
@@ -86,15 +88,51 @@ const simplex = new SimplexNoise(42);
 function createSunGlowTexture(){const s=256,c=document.createElement('canvas');c.width=s;c.height=s;const ctx=c.getContext('2d');const g=ctx.createRadialGradient(128,128,0,128,128,128);g.addColorStop(0,'rgba(255,255,240,1)');g.addColorStop(.15,'rgba(255,230,180,0.7)');g.addColorStop(.4,'rgba(255,200,100,0.2)');g.addColorStop(.7,'rgba(255,150,50,0.05)');g.addColorStop(1,'rgba(255,100,20,0)');ctx.fillStyle=g;ctx.fillRect(0,0,s,s);return new THREE.CanvasTexture(c)}
 
 /* ═══════════════════ SOUND ENGINE ═══════════════════ */
+// World units are metres, so distances and speeds here are in metres and metres per second.
+const SPEED_OF_SOUND = 343;
+const AUDIO_SETTINGS_KEY = 'skystrike.audio';
+// Chromium's DynamicsCompressorNode adds makeup gain of its own, sized from threshold and
+// ratio: measured at -3 dB / 20:1 it lifts everything below threshold by 1.71 dB. Trimming
+// that back off leaves the limiter doing only what it is for, turning peaks down.
+const LIMITER_MAKEUP_TRIM = Math.pow(10, -1.71 / 20);
+const _sndToL = new THREE.Vector3(), _sndFwd = new THREE.Vector3(), _sndUp = new THREE.Vector3();
 class SoundEngine {
-  constructor() { this.ctx = null; this.noiseBuffer = null; }
+  constructor() {
+    this.ctx = null; this.noiseBuffer = null;
+    this.voices = [];
+    this.listenerPos = new THREE.Vector3(); this.listenerVel = new THREE.Vector3(); this._listenerPlaced = false;
+    this._fireDuck = 1;
+    this.volume = 1; this.muted = false;
+    try {
+      const s = JSON.parse(localStorage.getItem(AUDIO_SETTINGS_KEY));
+      if (s && Number.isFinite(s.volume)) this.volume = THREE.MathUtils.clamp(s.volume, 0, 1);
+      if (s) this.muted = !!s.muted;
+    } catch {}
+  }
   init() {
     if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     this.ctx = ctx;
     try {
-      this.master = ctx.createGain(); this.master.gain.value = 0.45;
-      this.master.connect(ctx.destination);
+      // Every sound feeds one of four buses so the groups can be balanced against each other:
+      // engines (the player's engine and the wind over the airframe), weapons, world
+      // (explosions) and cockpit (tones heard on the headset). The buses sum at the mix level,
+      // then pass through a safety limiter and finally the player's volume.
+      this.output = ctx.createGain(); this.output.gain.value = this._outputLevel();
+      this.output.connect(ctx.destination);
+      const trim = ctx.createGain(); trim.gain.value = LIMITER_MAKEUP_TRIM; trim.connect(this.output);
+      this.limiter = ctx.createDynamicsCompressor();
+      this.limiter.threshold.value = -3; this.limiter.knee.value = 0; this.limiter.ratio.value = 20;
+      this.limiter.attack.value = 0.003; this.limiter.release.value = 0.25;
+      this.limiter.connect(trim);
+      this.master = ctx.createGain(); this.master.gain.value = 0.45; this.master.connect(this.limiter);
+      // Gunfire and nearby blasts duck the engine bus, so they punch through it.
+      this.blastDuck = ctx.createGain(); this.blastDuck.connect(this.master);
+      this.fireDuck = ctx.createGain(); this.fireDuck.connect(this.blastDuck);
+      this.buses = {
+        engines: this._bus(this.fireDuck, 1), weapons: this._bus(this.master, 1),
+        world: this._bus(this.master, 1), cockpit: this._bus(this.master, 1)
+      };
       this.noiseBuffer = this._noise(2);
       this._setupEngine(); this._setupWind(); this._setupCannon();
       this._setupLock(); this._setupWarn();
@@ -104,6 +142,7 @@ class SoundEngine {
       throw error;
     }
   }
+  _bus(dest, level) { const g = this.ctx.createGain(); g.gain.value = level; g.connect(dest); return g; }
   _noise(dur) {
     const len = this.ctx.sampleRate * dur;
     const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
@@ -112,51 +151,54 @@ class SoundEngine {
     return buf;
   }
   _noiseSrc() { const s = this.ctx.createBufferSource(); s.buffer = this.noiseBuffer; s.loop = true; s.start(); return s; }
+  // The player's own engine, the wind, the cannon and the cockpit tones are heard through the
+  // airframe or the headset, not across the sky, so they stay dry: no panner, no distance.
   _setupEngine() {
+    const bus = this.buses.engines;
     // Jet rumble - filtered noise for low-end turbofan roar
     this.rumbleSrc = this._noiseSrc();
     this.rumbleFilter = this.ctx.createBiquadFilter(); this.rumbleFilter.type = 'lowpass'; this.rumbleFilter.frequency.value = 200; this.rumbleFilter.Q.value = 1.5;
     this.rumbleGain = this.ctx.createGain(); this.rumbleGain.gain.value = 0;
-    this.rumbleSrc.connect(this.rumbleFilter); this.rumbleFilter.connect(this.rumbleGain); this.rumbleGain.connect(this.master);
+    this.rumbleSrc.connect(this.rumbleFilter); this.rumbleFilter.connect(this.rumbleGain); this.rumbleGain.connect(bus);
     // Turbine whine - primary high-pitched sine that scales with throttle
     this.turbineOsc = this.ctx.createOscillator(); this.turbineOsc.type = 'sine'; this.turbineOsc.frequency.value = 800;
     this.turbineFilter = this.ctx.createBiquadFilter(); this.turbineFilter.type = 'bandpass'; this.turbineFilter.frequency.value = 1200; this.turbineFilter.Q.value = 2;
     this.turbineGain = this.ctx.createGain(); this.turbineGain.gain.value = 0;
-    this.turbineOsc.connect(this.turbineFilter); this.turbineFilter.connect(this.turbineGain); this.turbineGain.connect(this.master);
+    this.turbineOsc.connect(this.turbineFilter); this.turbineFilter.connect(this.turbineGain); this.turbineGain.connect(bus);
     this.turbineOsc.start();
     // Compressor harmonic - upper spool whine
     this.compOsc = this.ctx.createOscillator(); this.compOsc.type = 'sine'; this.compOsc.frequency.value = 2400;
     this.compGain = this.ctx.createGain(); this.compGain.gain.value = 0;
-    this.compOsc.connect(this.compGain); this.compGain.connect(this.master); this.compOsc.start();
+    this.compOsc.connect(this.compGain); this.compGain.connect(bus); this.compOsc.start();
     // Afterburner - broadband noise roar
     this.abSrc = this._noiseSrc();
     this.abFilter = this.ctx.createBiquadFilter(); this.abFilter.type = 'bandpass'; this.abFilter.frequency.value = 800; this.abFilter.Q.value = 0.5;
     this.abGain = this.ctx.createGain(); this.abGain.gain.value = 0;
-    this.abSrc.connect(this.abFilter); this.abFilter.connect(this.abGain); this.abGain.connect(this.master);
+    this.abSrc.connect(this.abFilter); this.abFilter.connect(this.abGain); this.abGain.connect(bus);
   }
   _setupWind() {
     this.windSrc = this._noiseSrc();
     this.windFilter = this.ctx.createBiquadFilter(); this.windFilter.type = 'bandpass'; this.windFilter.frequency.value = 500; this.windFilter.Q.value = 0.3;
     this.windGain = this.ctx.createGain(); this.windGain.gain.value = 0;
-    this.windSrc.connect(this.windFilter); this.windFilter.connect(this.windGain); this.windGain.connect(this.master);
+    this.windSrc.connect(this.windFilter); this.windFilter.connect(this.windGain); this.windGain.connect(this.buses.engines);
   }
   _setupCannon() {
     this.cannonSrc = this._noiseSrc();
     this.cannonFilter = this.ctx.createBiquadFilter(); this.cannonFilter.type = 'bandpass'; this.cannonFilter.frequency.value = 1800; this.cannonFilter.Q.value = 2;
     this.cannonGain = this.ctx.createGain(); this.cannonGain.gain.value = 0;
-    this.cannonSrc.connect(this.cannonFilter); this.cannonFilter.connect(this.cannonGain); this.cannonGain.connect(this.master);
+    this.cannonSrc.connect(this.cannonFilter); this.cannonFilter.connect(this.cannonGain); this.cannonGain.connect(this.buses.weapons);
   }
   _setupLock() {
     this.lockOsc = this.ctx.createOscillator(); this.lockOsc.type = 'sine'; this.lockOsc.frequency.value = 400;
     this.lockFilter = this.ctx.createBiquadFilter(); this.lockFilter.type = 'bandpass'; this.lockFilter.frequency.value = 500; this.lockFilter.Q.value = 5;
     this.lockGain = this.ctx.createGain(); this.lockGain.gain.value = 0;
-    this.lockOsc.connect(this.lockFilter); this.lockFilter.connect(this.lockGain); this.lockGain.connect(this.master); this.lockOsc.start();
+    this.lockOsc.connect(this.lockFilter); this.lockFilter.connect(this.lockGain); this.lockGain.connect(this.buses.cockpit); this.lockOsc.start();
     this._lockBeepT = 0; this._lockBeepOn = false;
   }
   _setupWarn() {
     this.warnOsc = this.ctx.createOscillator(); this.warnOsc.type = 'sine'; this.warnOsc.frequency.value = 1600;
     this.warnGain = this.ctx.createGain(); this.warnGain.gain.value = 0;
-    this.warnOsc.connect(this.warnGain); this.warnGain.connect(this.master); this.warnOsc.start();
+    this.warnOsc.connect(this.warnGain); this.warnGain.connect(this.buses.cockpit); this.warnOsc.start();
   }
   update(throttle, speed, firing, lockProg, threat, dt) {
     if (!this.ctx) return;
@@ -179,6 +221,9 @@ class SoundEngine {
     this.windFilter.frequency.value = 300 + sn * 2200; this.windGain.gain.value = sn * 0.13;
     // Cannon
     this.cannonGain.gain.value = firing ? 0.12 : this.cannonGain.gain.value * Math.pow(0.85, dt * 60);
+    // Engines sit back a few dB under sustained fire: fast in, slower out.
+    this._fireDuck += ((firing ? 0.75 : 1) - this._fireDuck) * smoothT(firing ? 30 : 6, dt);
+    this.fireDuck.gain.value = this._fireDuck;
     // Lock tone - PRF increases as lock progresses (realistic seeker head)
     if (lockProg > 0 && lockProg < 1) {
       this._lockBeepT += dt;
@@ -193,34 +238,113 @@ class SoundEngine {
     // Threat warning - pulsing tone
     this.warnGain.gain.value = threat ? (Math.sin(performance.now() * 0.025) > 0 ? 0.05 : 0) : 0;
   }
+  // Once per rendered frame, after the camera has moved: put the listener at the camera and
+  // re-place every live world-space voice relative to it.
+  updateListener(cam, dt) {
+    if (!this.ctx) return;
+    const L = this.ctx.listener, p = cam.position;
+    if (this._listenerPlaced && dt > 0) {
+      this.listenerVel.subVectors(p, this.listenerPos).divideScalar(dt);
+      // A restart or a cut to the death camera teleports the listener; that is not motion,
+      // and read as motion it would Doppler-shift everything audible for a frame.
+      if (this.listenerVel.lengthSq() > 1500 * 1500) this.listenerVel.set(0, 0, 0);
+    } else this.listenerVel.set(0, 0, 0);
+    this.listenerPos.copy(p); this._listenerPlaced = true;
+    _sndFwd.set(0, 0, -1).applyQuaternion(cam.quaternion); _sndUp.set(0, 1, 0).applyQuaternion(cam.quaternion);
+    if (L.positionX) {
+      L.positionX.value = p.x; L.positionY.value = p.y; L.positionZ.value = p.z;
+      L.forwardX.value = _sndFwd.x; L.forwardY.value = _sndFwd.y; L.forwardZ.value = _sndFwd.z;
+      L.upX.value = _sndUp.x; L.upY.value = _sndUp.y; L.upZ.value = _sndUp.z;
+    } else {
+      // Firefox has no AudioParams on the listener.
+      L.setPosition(p.x, p.y, p.z);
+      L.setOrientation(_sndFwd.x, _sndFwd.y, _sndFwd.z, _sndUp.x, _sndUp.y, _sndUp.z);
+    }
+    const now = this.ctx.currentTime;
+    for (let i = this.voices.length - 1; i >= 0; i--) {
+      const v = this.voices[i];
+      if (now > v.end) { v.pan.disconnect(); this.voices.splice(i, 1); continue; }
+      if (v.follow) {
+        // A pool entry is reused once it is released, so stop following at the first frame
+        // it is inactive and leave the voice where it ended.
+        if (v.follow.userData.active) { v.pos.copy(v.follow.position); v.vel.copy(v.follow.userData.vel); }
+        else { v.follow = null; v.vel.set(0, 0, 0); }
+      }
+      this._place(v);
+    }
+  }
+  // A sound in the world. Sources connect to the returned voice's `input`, start at
+  // `currentTime + delay` (the sound's travel time from `pos`), list their detune params in
+  // `detune`, then hand the voice to `_track`. It is panned and attenuated from its
+  // position, loses its top end with distance, and is Doppler-shifted from closing speed.
+  // `ref` is the distance inside which it plays at full level, so it is also the knob for
+  // how loud the sound is at its source. `follow` is a pool entry (with `position`,
+  // `userData.vel` and `userData.active`) to track while it stays active.
+  _voice(pos, bus, ref, follow = null) {
+    const ctx = this.ctx, air = ctx.createBiquadFilter(), pan = ctx.createPanner();
+    air.type = 'lowpass'; air.Q.value = 0;
+    pan.panningModel = 'HRTF'; pan.distanceModel = 'inverse';
+    pan.refDistance = ref; pan.rolloffFactor = 1; pan.maxDistance = 100000;
+    air.connect(pan); pan.connect(this.buses[bus]);
+    const dist = this.listenerPos.distanceTo(pos);
+    const v = { input: air, air, pan, pos: pos.clone(), vel: new THREE.Vector3(), follow, detune: [], end: 0,
+                dist, delay: dist / SPEED_OF_SOUND };
+    if (follow) v.vel.copy(follow.userData.vel);
+    return v;
+  }
+  _track(v, duration) {
+    v.end = this.ctx.currentTime + v.delay + duration;
+    this._place(v); this.voices.push(v);
+  }
+  _place(v) {
+    const d = _sndToL.subVectors(this.listenerPos, v.pos).length();
+    if (v.pan.positionX) { v.pan.positionX.value = v.pos.x; v.pan.positionY.value = v.pos.y; v.pan.positionZ.value = v.pos.z; }
+    else v.pan.setPosition(v.pos.x, v.pos.y, v.pos.z);
+    // Air absorbs the top end over distance: a far blast is a thud, not a crack.
+    v.air.frequency.value = 22000 / (1 + d / 600);
+    // Doppler. Web Audio dropped its own, so pitch is shifted here from the closing speeds:
+    // vs is the source's speed toward the listener, vl the listener's toward the source.
+    // Both are capped short of the speed of sound, where the formula breaks down, and the
+    // result is held within an octave either way.
+    if (d > 1e-3) _sndToL.divideScalar(d);
+    const vs = Math.min(v.vel.dot(_sndToL), 0.6 * SPEED_OF_SOUND);
+    const vl = Math.max(-this.listenerVel.dot(_sndToL), -0.6 * SPEED_OF_SOUND);
+    const ratio = THREE.MathUtils.clamp((SPEED_OF_SOUND + vl) / (SPEED_OF_SOUND - vs), 0.5, 2);
+    const cents = 1200 * Math.log2(ratio);
+    for (const p of v.detune) p.value = cents;
+  }
   silence() {
     if (!this.ctx) return;
     this.rumbleGain.gain.value = 0; this.turbineGain.gain.value = 0; this.compGain.gain.value = 0;
     this.abGain.gain.value = 0; this.windGain.gain.value = 0; this.cannonGain.gain.value = 0;
     this.lockGain.gain.value = 0; this.warnGain.gain.value = 0;
   }
-  explosion(dist) {
+  explosion(pos, scale = 1) {
     if (!this.ctx) return;
-    const now = this.ctx.currentTime, delay = Math.min(dist / 343, 3);
-    const vol = Math.max(0.25 - dist * 0.0002, 0.01);
+    const v = this._voice(pos, 'world', 200), now = this.ctx.currentTime + v.delay, vol = 0.25 * scale;
     const boom = this.ctx.createOscillator(); boom.type = 'sine';
-    boom.frequency.setValueAtTime(80, now + delay);
-    boom.frequency.exponentialRampToValueAtTime(15, now + delay + 0.6);
+    boom.frequency.setValueAtTime(80, now);
+    boom.frequency.exponentialRampToValueAtTime(15, now + 0.6);
     const bg = this.ctx.createGain();
-    bg.gain.setValueAtTime(vol, now + delay);
-    bg.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.8);
-    boom.connect(bg); bg.connect(this.master); boom.start(now + delay); boom.stop(now + delay + 1);
+    bg.gain.setValueAtTime(vol, now);
+    bg.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+    boom.connect(bg); bg.connect(v.input); boom.start(now); boom.stop(now + 1);
     const ns = this.ctx.createBufferSource(); ns.buffer = this.noiseBuffer;
     const nf = this.ctx.createBiquadFilter(); nf.type = 'lowpass'; nf.frequency.value = 2000;
     const ng = this.ctx.createGain();
-    ng.gain.setValueAtTime(vol * 0.5, now + delay);
-    ng.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.6);
-    ns.connect(nf); nf.connect(ng); ng.connect(this.master);
-    ns.start(now + delay); ns.stop(now + delay + 0.7);
+    ng.gain.setValueAtTime(vol * 0.5, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+    ns.connect(nf); nf.connect(ng); ng.connect(v.input);
+    ns.start(now); ns.stop(now + 0.7);
+    v.detune.push(boom.detune, nf.detune);
+    this._track(v, 1);
+    // The blast ducks the engines as it arrives: hard when close, barely at a kilometre.
+    const depth = Math.min(0.5 * scale * 200 / Math.max(v.dist, 200), 0.6), g = this.blastDuck.gain;
+    g.cancelScheduledValues(now); g.setTargetAtTime(1 - depth, now, 0.01); g.setTargetAtTime(1, now + 0.12, 0.4);
   }
-  missileLaunch() {
+  missileLaunch(missile) {
     if (!this.ctx) return;
-    const now = this.ctx.currentTime;
+    const v = this._voice(missile.position, 'weapons', 60, missile), now = this.ctx.currentTime + v.delay;
     const o = this.ctx.createOscillator(); o.type = 'sawtooth';
     o.frequency.setValueAtTime(150, now);
     o.frequency.exponentialRampToValueAtTime(3000, now + 0.2);
@@ -229,13 +353,15 @@ class SoundEngine {
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.12, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
-    o.connect(f); f.connect(g); g.connect(this.master); o.start(now); o.stop(now + 1.5);
+    o.connect(f); f.connect(g); g.connect(v.input); o.start(now); o.stop(now + 1.5);
     const ns = this.ctx.createBufferSource(); ns.buffer = this.noiseBuffer;
     const nf = this.ctx.createBiquadFilter(); nf.type = 'bandpass';
     nf.frequency.setValueAtTime(500, now); nf.frequency.exponentialRampToValueAtTime(4000, now + 0.3); nf.Q.value = 1;
     const ng2 = this.ctx.createGain();
     ng2.gain.setValueAtTime(0.15, now); ng2.gain.exponentialRampToValueAtTime(0.001, now + 1);
-    ns.connect(nf); nf.connect(ng2); ng2.connect(this.master); ns.start(now); ns.stop(now + 1.2);
+    ns.connect(nf); nf.connect(ng2); ng2.connect(v.input); ns.start(now); ns.stop(now + 1.2);
+    v.detune.push(o.detune, nf.detune);
+    this._track(v, 1.5);
   }
   hitMarker() {
     if (!this.ctx) return;
@@ -243,7 +369,16 @@ class SoundEngine {
     const o = this.ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 1200;
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.1, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
-    o.connect(g); g.connect(this.master); o.start(now); o.stop(now + 0.07);
+    o.connect(g); g.connect(this.buses.cockpit); o.start(now); o.stop(now + 0.07);
+  }
+  // Volume runs 0-1 in tenths and is applied squared, so the steps sound roughly even.
+  // It and the mute flag persist across sessions where the browser allows storage.
+  setVolume(v) { this.volume = Math.round(THREE.MathUtils.clamp(v, 0, 1) * 10) / 10; this.muted = false; this._applyOutput(); }
+  toggleMute() { this.muted = !this.muted; this._applyOutput(); }
+  _outputLevel() { return this.muted ? 0 : this.volume * this.volume; }
+  _applyOutput() {
+    try { localStorage.setItem(AUDIO_SETTINGS_KEY, JSON.stringify({ volume: this.volume, muted: this.muted })); } catch {}
+    if (this.ctx) this.output.gain.setTargetAtTime(this._outputLevel(), this.ctx.currentTime, 0.02);
   }
 }
 const snd = new SoundEngine();
@@ -266,12 +401,16 @@ const LOCK_TIME = 1.5, LOCK_CONE = 0.85, LOCK_WAIT_PROGRESS = 0.99;
 const MAX_PLAYER_HP = 100, MAX_MISSILE_AMMO = 12;
 let deathCamTimer = 0, deathCamCenter = new THREE.Vector3(), deathCamAngle = 0;
 const killNotifications = [];
+let audioToastUntil = 0;
 const keys = {};
 const gameKeys = new Set(['KeyW','KeyS','KeyA','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','KeyF']);
 window.addEventListener('keydown', e => {
   keys[e.code] = true;
   if (gameKeys.has(e.code)) e.preventDefault();
   if (e.code === 'Escape') togglePause();
+  if (e.code === 'KeyM' && !e.repeat) { snd.toggleMute(); audioToastUntil = performance.now() + 1500; }
+  if (e.code === 'Minus' || e.code === 'NumpadSubtract') { snd.setVolume(snd.volume - .1); audioToastUntil = performance.now() + 1500; }
+  if (e.code === 'Equal' || e.code === 'NumpadAdd') { snd.setVolume(snd.volume + .1); audioToastUntil = performance.now() + 1500; }
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
@@ -2674,7 +2813,7 @@ function updatePlayer(dt){
       const launchSide=player.missileSide;
       const mp=new THREE.Vector3(launchSide*5,-1.7,-1).applyQuaternion(playerJet.quaternion).add(playerJet.position);
       const launched=spawnMissile(mp,fwd.clone(),player.velocity,lockTarget,false,launchSide);
-      if(launched){lockProgress=0;player.missileCooldown=.5;player.missileSide*=-1;player.missileAmmo--;snd.missileLaunch()}
+      if(launched){lockProgress=0;player.missileCooldown=.5;player.missileSide*=-1;player.missileAmmo--;snd.missileLaunch(launched)}
       else lockProgress=LOCK_WAIT_PROGRESS}
   }else{lockTarget=null;lockProgress=0}
 
@@ -2837,8 +2976,8 @@ function updateEnemies(dt){
       if(e.aggression>.6&&dist<800&&dist>200&&facingPlayer>.9&&e.missileCooldown<=0){
         const mp=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(12));
         const carrierVelocity=_eFwd.clone().multiplyScalar(e.currentSpeed);
-        if(spawnMissile(mp,_eFwd.clone(),carrierVelocity,{mesh:playerJet,alive:!gameOver},true))
-          e.missileCooldown=10+Math.random()*15;
+        const launched=spawnMissile(mp,_eFwd.clone(),carrierVelocity,{mesh:playerJet,alive:!gameOver},true);
+        if(launched){e.missileCooldown=10+Math.random()*15;snd.missileLaunch(launched)}
       }
       const reachedAttackPoint=e.mesh.position.distanceTo(e.attackPoint)<140;
       if(reachedAttackPoint||e.stateTimer>e.stateDuration||(e.attackAligned&&facingPlayer<-.05))beginEnemyExtend(e);
@@ -2888,7 +3027,7 @@ function updateEnemies(dt){
 }
 
 function killEnemy(e,sv){e.alive=false;spawnExplosion(e.mesh.position,sv>100?55:40);
-  snd.explosion(e.mesh.position.distanceTo(playerJet.position));snd.hitMarker();
+  snd.explosion(e.mesh.position);snd.hitMarker();
   scene.remove(e.mesh);const idx=enemies.indexOf(e);if(idx>=0)enemies.splice(idx,1);
   score+=sv;kills++;player.missileAmmo=Math.min(player.missileAmmo+2,MAX_MISSILE_AMMO);
   addKillNotification(sv);fovPulse=.3;
@@ -2940,14 +3079,14 @@ function updateMissiles(dt){
       if(hitTime>=0&&hitTime<firstHitTime&&hitTime<terrainHitTime){hitEnemy=e;firstHitTime=hitTime}}
     if(hitEnemy){m.position.copy(_missileStepStart).addScaledVector(_missileStepDelta,firstHitTime);
       hitEnemy.hp-=50;hitEnemy.wasHit=true;u.active=false;m.visible=false;
-      if(hitEnemy.hp<=0)killEnemy(hitEnemy,200);else spawnExplosion(m.position,30)}
+      if(hitEnemy.hp<=0)killEnemy(hitEnemy,200);else{spawnExplosion(m.position,30);snd.explosion(m.position,.6)}}
   }
   if(u.active&&u.isEnemy){const hitTime=movingSphereHitTime(_missileStepStart,m.position,player.prevPosition,playerJet.position,15);if(hitTime>=0&&hitTime<terrainHitTime){
     m.position.copy(_missileStepStart).addScaledVector(_missileStepDelta,hitTime);
-    player.hp-=30;m.userData.active=false;m.visible=false;spawnExplosion(m.position,25);screenShake=1.5;hitFlash=.2}
+    player.hp-=30;m.userData.active=false;m.visible=false;spawnExplosion(m.position,25);snd.explosion(m.position,.6);screenShake=1.5;hitFlash=.2}
   }
   if(u.active&&terrainHitTime<Infinity){m.position.copy(_missileStepStart).addScaledVector(_missileStepDelta,terrainHitTime);
-    u.active=false;m.visible=false;spawnExplosion(m.position,18)}
+    u.active=false;m.visible=false;spawnExplosion(m.position,18);snd.explosion(m.position,.5)}
   emitMissileTrail(m,activeMissiles);
   }}
 
@@ -3139,11 +3278,14 @@ function drawHUD(){
   const elapsed=Math.floor(gameTime),mins=Math.floor(elapsed/60),secs=elapsed%60;
   hud.fillStyle='rgba(0,15,30,.3)';hud.fillRect(w-90,0,90,36);hud.strokeStyle='rgba(0,255,200,.08)';hud.strokeRect(w-90,0,90,36);
   hud.fillStyle='#8ac';hud.font='12px Courier New';hud.fillText(`T+${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`,w-78,23);
+  if(performance.now()<audioToastUntil){const n=Math.round(snd.volume*10);
+    const txt=snd.muted?'AUDIO MUTED':`VOLUME [${'|'.repeat(n)}${'.'.repeat(10-n)}] ${n*10}%`;
+    hud.font='12px Courier New';hud.fillStyle=snd.muted?'#fa0':'#0ff';hud.textAlign='center';hud.fillText(txt,cx,58);hud.textAlign='left'}
 }
 
 /* ═══════════════════ GAME STATE ═══════════════════ */
 function checkGameOver(){if(player.hp<=0&&!gameOver){gameOver=true;snd.silence();deathCamTimer=3;deathCamCenter.copy(playerJet.position);deathCamAngle=0;
-  spawnExplosion(playerJet.position,60);snd.explosion(0);playerJet.visible=false}}
+  spawnExplosion(playerJet.position,60);snd.explosion(playerJet.position);playerJet.visible=false}}
 
 function resetPool(pool){for(const item of pool){item.userData.active=false;item.visible=false}}
 function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.set(0,0,-120);
@@ -3636,6 +3778,7 @@ function animate(){requestAnimationFrame(animate);
     syncParticleBatches();
     if(deathCamTimer<=0){document.getElementById('final-score').textContent=score;document.getElementById('game-over').style.display='flex'}
   }
+  snd.updateListener(camera,dt);
   stepTerrainBuild();
   stepVegetationBuild();
   updateWorldAnchors(elapsed);

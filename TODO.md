@@ -73,35 +73,49 @@ synthesis is decent; the architecture is the problem.
 `class SoundEngine` is entirely procedural Web Audio — no sample files, which is
 worth preserving. It has a four-layer player engine (noise rumble, turbine sine,
 compressor harmonic, afterburner noise), wind, a cannon hiss, a lock tone, a
-threat warning, plus one-shot `explosion(dist)`, `missileLaunch()` and
-`hitMarker()`.
+threat warning, plus one-shot `explosion(pos, scale)`, `missileLaunch(missile)`
+and `hitMarker()`.
 
-What is actually wrong:
+### 1a. Positional audio — done; use it for everything below
 
-### 1a. There is no positional audio at all
+`snd.updateListener(camera, dt)` runs once per frame after the camera moves and
+places `ctx.listener` at it. A world-space sound is built in three steps:
 
-Every node connects straight to `this.master`. There is no `AudioListener`, no
-`PannerNode`, no stereo placement, no distance attenuation and no Doppler.
-`explosion(dist)` is the sole exception and it hand-rolls both — it delays by
-`dist / 343` and attenuates by distance, which is exactly the right instinct and
-should be generalised rather than repeated.
+1. `const v = this._voice(pos, bus, refDistance, follow)` — an HRTF
+   `PannerNode` with the inverse distance model, behind a lowpass that stands in
+   for air absorption (`22000 / (1 + d / 600)` Hz). `v.delay` is the travel
+   time from `pos`; start the sources at `currentTime + v.delay` and connect
+   them to `v.input`.
+2. Push the sources' `detune` params (oscillator or `BiquadFilter`) onto
+   `v.detune`. Doppler is computed from closing speed every frame and written to
+   them in cents, capped at an octave either way, with both speeds held below
+   0.6 c (the formula breaks at Mach 1, and at full throttle the player is
+   doing about Mach 1.3).
+3. `this._track(v, duration)` registers the voice; it is re-placed every frame
+   and disconnected once it has finished.
 
-This is the foundation: fix it first and every other item below gets most of the
-way there for free.
+`refDistance` is the distance inside which the sound plays at full level, so it
+doubles as the source-loudness knob (explosions use 200 m, missile launches
+60 m). `follow` is a pool entry — anything with `position`, `userData.vel` and
+`userData.active` — to track; the voice stops following the first frame the
+entry is inactive, because pool entries are reused.
 
-- Set up `ctx.listener` from the camera each frame (position and orientation).
-- Give every world-space sound a `PannerNode` (`panningModel: 'HRTF'`,
-  `distanceModel: 'inverse'`, a `refDistance` tuned to the scale of the world —
-  the player's airframe is about 48 m nose to tail, so world units are metres).
-- Keep cockpit sounds (lock tone, threat warning, the player's own engine) on
-  the dry master. They are heard through the airframe, not across the sky.
-- Doppler: Web Audio removed the built-in implementation, so drive
-  `detune`/`playbackRate` from closing speed yourself. A jet passing at 450 kts
-  is a dramatic shift and it is most of what sells a merge.
+The player's engine, the wind, the cannon and the cockpit tones stay dry. Every
+explosion and every missile launch, the enemy's included, is positional; enemy
+launches were silent before, and missile detonations that did not kill anything
+(hits that did not kill, impacts on terrain, a missile hitting the player) were
+silent too.
 
-**Done when:** a missile launched to your left is heard on your left, an
-explosion two kilometres away is late and quiet, and an enemy crossing in front
-of you sweeps across the stereo field.
+Measured against `OfflineAudioContext` in Chromium: a source 90° left is 4.9 dB
+louder in the left channel (HRTF, not hard panning, so expect a modest level
+difference rather than silence on one side);
+onsets land within about 12 ms of `d / 343` (the HRTF's own latency); a blast at
+2 km is 21 dB below one at 100 m, which is the inverse law and air absorption
+together.
+
+Still open from the original "done when": *an enemy crossing in front of you
+sweeps across the stereo field* needs enemies to make sound at all — that is
+1e, and it gets the panning and Doppler for free.
 
 ### 1b. The cannon is a hiss gate, not a gun
 
@@ -110,12 +124,13 @@ continuously running noise source. That is the sound of a valve opening, not of
 a rotary cannon. There is no per-round transient, so the rate of fire is
 inaudible and it does not match the tracers.
 
-Fire a short enveloped burst per round from `spawnBullet` (or from the same
+Fire a short enveloped burst per round, as a dry voice on the `weapons` bus, from `spawnBullet` (or from the same
 place that decides a round is fired) — a few milliseconds of attack, a filtered
 noise body, a fast decay, with small random pitch and level variation per shot
 so it does not machine-gun identically. Keep a quieter continuous layer
 underneath for the mechanical whir. Muzzle blast should also duck the engine
-slightly.
+slightly (a crude version exists: `fireDuck` pulls the engine bus to 0.75
+while the trigger is held; per-round ducking replaces it).
 
 **Done when:** you can hear the rate of fire, and a two-round tap sounds
 different from a two-second burst.
@@ -125,8 +140,7 @@ different from a two-second burst.
 `hitMarker()` is a 1200 Hz sine for 60 ms. That is a UI confirmation tone and it
 should stay as one — but there is currently no *physical* impact sound at all.
 Rounds striking an airframe should sound like metal being hit: a bright
-transient, a short metallic ring, positioned at the impact point and attenuated
-by distance.
+transient, a short metallic ring, as a `_voice` at the impact point.
 
 Hits on terrain and water want their own variants — dirt thud, water slap. Note
 that a round striking the ground currently produces *nothing at all*, visual or
@@ -144,9 +158,10 @@ crosses several kilometres in total silence, which is the single most noticeable
 gap in the mix.
 
 Attach a looping motor to each active missile in the pool: rocket noise plus a
-low sustain, panned and attenuated from its position, pitch-shifted by closing
-speed, cutting to a tail when the motor burns out. Tie the node's lifetime to
-the existing pool entry so it is released with the missile. A missile passing
+low sustain, cutting to a tail when the motor burns out. `_voice(..., follow)`
+already tracks a pool entry and stops following when it is released; what it
+lacks is a lifetime tied to the entry rather than a fixed duration, so a looping
+voice needs a way to be ended from `updateMissiles`. A missile passing
 close should be loud and brief.
 
 **Done when:** you can hear a missile go past you, and hear one chasing you from
@@ -163,16 +178,30 @@ pass-by Doppler from 1a is what makes this worth doing.
 **Done when:** you hear an enemy before the radar warning, and a head-on pass
 sounds like one.
 
-### 1f. Mix and headroom
+### 1f. Mix and headroom — done, apart from balancing
 
-Master gain is a flat 0.45 with no limiting. Once 1a–1e are in, several dozen
-voices can be live at once and it will clip. Add a `DynamicsCompressorNode` on
-the master as a safety limiter, put the sound groups on submix buses (engines,
-weapons, world, cockpit) so they can be balanced independently, and duck the
-world bus briefly under explosions and gunfire.
+The graph is now four buses (`this.buses.engines`, `.weapons`, `.world`,
+`.cockpit`) into the 0.45 mix level, then a limiter (`DynamicsCompressorNode`,
+-3 dB, 20:1, 3 ms attack), then a trim, then the player's volume. The trim
+exists because Chromium's compressor applies its own makeup gain — measured at
++1.71 dB below threshold at these settings — and the limiter should only ever
+turn peaks down. Measured: twenty point-blank explosions at once peak at
+-4.3 dBFS where they would be +10.6 unlimited, and a single explosion is within
+0.15 dB of the unlimited graph. If you change the threshold or ratio, re-measure
+the makeup gain and update `LIMITER_MAKEUP_TRIM`.
 
-Worth adding at the same time: a volume control and a mute key. There is
-currently no way to turn the game down.
+Ducking lands on the engine bus, not the world bus as first planned: the world
+bus only carries explosions so far, so ducking it under explosions would duck
+the explosions themselves. Nearby blasts dip the engines on arrival, scaled by
+distance (`blastDuck`), and held fire pulls them to 0.75 (`fireDuck`). When
+enemy engines (1e) land on the world bus, ducking it under close blasts becomes
+worth doing.
+
+Volume is `-`/`+` (tenths, applied squared), mute is `M`, both shown briefly on
+the HUD and persisted in `localStorage`.
+
+Still open: the bus levels are all 1.0, which reproduces the old mix. Balance
+them once 1b–1e add enough voices that the groups compete.
 
 ---
 
@@ -292,7 +321,7 @@ would be worth a lot and avoids most of the dynamic-shadowing problem.
   were fixed with the `smoothT` helper; two more (in `smoothLookAt` and
   `updateMissiles`) are clamped with `Math.min(..., 1)`, which is safe from
   divergence but still frame-rate dependent. Use `smoothT` for anything new.
-- There is no volume control, no mute, and no settings of any kind.
+- There is no settings screen. Volume and mute are keys only (see 1f).
 - **The HUD labels airspeed in knots but prints metres per second.** `drawHUD`
   uses `player.velocity.length()` directly for the `IAS` readout while deriving
   `MACH` from the same figure as `spd / 343` — which is correct for m/s, so the

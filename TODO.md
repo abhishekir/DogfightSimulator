@@ -71,16 +71,19 @@ diff. What worked during the rendering overhaul:
 worth preserving. The player's engine is turbulent roar, rumble, a beating
 turbine whine and reheat crackle, every layer modulated by `_wobble` (a looping
 slow random curve fed into an AudioParam) so nothing sits still. There is wind,
-a per-round cannon (`gunShot`), a Sidewinder-style seeker growl that climbs
-into a steady lock tone, a threat warning, `explosion(pos, scale)`,
-`missileLaunch(missile)` with a motor that follows the missile, and
-`hitMarker()`.
+a rotary cannon baked into buffers, an infrared-missile seeker (seek tone, growl,
+track tone), a threat warning, `explosion(pos, scale)` with a shared terrain
+echo, `impact(pos)` for the airframe striking the ground, `missileLaunch(missile)`
+with a motor that follows the missile, and `hitMarker()`.
 
 **Measure levels before changing them.** Every level in the class was set
 against A-weighted loudness measured offline (an `OfflineAudioContext` driven
 frame by frame, each bus soloed). At 70% throttle the engine bus is about
--38 dBA; the seeker is 4–9 dB above it, gunfire about 7 dB above, a missile
-launch about 10 dB above. Judging by ear on one pair of headphones is how the
+-38 dBA. The seek tone is 2 dB below it; the growl 5–10 dB above, rising with lock
+quality; the track tone 11 dB above; a sustained gun burst 11–12 dB above; a
+missile launch about 11 dB above. An enemy blowing up 300 m away is about 5 dB
+above in its first half second, the player's crash 15 dB above, peaking into
+the limiter. Judging by ear on one pair of headphones is how the
 engine came to drown out everything else.
 
 ### 1a. Positional audio — done; use it for everything below
@@ -126,17 +129,27 @@ sweeps across the stereo field* needs enemies to make sound at all — that is
 
 ### 1b. The cannon — done
 
-`gunShot()` fires one enveloped report per volley, called from `updatePlayer`
-where the cannons fire: a crack (band-passed noise, 1.5 ms attack, 50 ms decay),
-a pitched thump, a bolt tick, and a low tail long enough to overlap the next
-round. Pitch varies ±120 cents and level ±20% per round. The continuous hiss
-layer is gone; the overlapping tails do its job. `fireDuck` pulls the engine bus
-to 0.75 while the trigger is held.
+The gun is modelled on the M61 rotary cannon: `GUN_RATE` 100 rounds a second,
+reached over `GUN_SPINUP` 0.3 s and wound down over `GUN_SPINDOWN` 0.5 s. A
+trigger pressed while the barrels are still winding down picks up from where
+they are. Rounds come from an accumulator in `updatePlayer`, not once per frame,
+and a round fired partway through a frame is advanced by the time it has
+already flown, so the rate and the spacing of the stream do not depend on the
+frame rate. Every third round is a tracer (`GUN_TRACER_EVERY`); the others are
+invisible but hit. `GUN_DAMAGE` is 2.5 a round, which keeps damage per second
+on target where the old 12-volley gun had it.
 
-The rate of fire you hear is the rate the cannons actually fire, which is set by
-`fireCooldown` being reset (not decremented) once a frame: about 12 volleys a
-second at 60 fps, fewer at lower frame rates. That is a gameplay quirk, not an
-audio one; fixing it changes damage output.
+The sound is baked, not built from nodes, because a graph per round at 100 a
+second is thousands of nodes a burst. `_bakeRounds` writes each round (a crack,
+a body and a thump, varied per round) into a buffer at its firing time:
+`gunStartBuf` holds the spin-up with the rate ramping by the same rule the game
+uses, `gunLoopBuf` is one second at full rate with its tails wrapped so it
+loops without a seam. `update()` starts and stops them on the trigger's edges;
+release plays the report rolling away and the barrels whirring down. Measured,
+the sustained burst has a 10.0 ms period, i.e. 100 rounds a second.
+
+`hitMarker()` is limited to one tone per 80 ms, and hit sparks come only from
+tracer rounds, or a burst on target would flood both.
 
 Enemy guns are still silent.
 

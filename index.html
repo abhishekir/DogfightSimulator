@@ -101,7 +101,7 @@ class SoundEngine {
     this.ctx = null; this.noiseBuffer = null;
     this.voices = [];
     this.listenerPos = new THREE.Vector3(); this.listenerVel = new THREE.Vector3(); this._listenerPlaced = false;
-    this._fireDuck = 1;
+    this._fireDuck = 1; this._gun = null; this._lastHitMarker = 0;
     this.volume = 1; this.muted = false;
     try {
       const s = JSON.parse(localStorage.getItem(AUDIO_SETTINGS_KEY));
@@ -136,6 +136,12 @@ class SoundEngine {
       this.noiseBuffer = this._noise(2);
       this.pinkBuffer = this._noise(6, 'pink', 2);
       this.wobbleBuffer = this._wobbleBuffer();
+      this.brownBuffer = this._noise(6, 'brown', 2);
+      this.crackle = this._crackleBuffer(4);
+      this.softClip = new Float32Array(1024).map((_, i) => Math.tanh(2.5 * (i / 511.5 - 1)) / Math.tanh(2.5));
+      // One terrain echo shared by every explosion, fed by a send from each.
+      this.echo = ctx.createConvolver(); this.echo.buffer = this._echoImpulse(); this.echo.connect(this.buses.world);
+      this._bakeGun();
       this._setupEngine(); this._setupWind();
       this._setupLock(); this._setupWarn();
     } catch (error) {
@@ -199,6 +205,88 @@ class SoundEngine {
     s.start(when, Math.random() * buf.duration); return s;
   }
   _noiseSrc() { return this._loop(this.noiseBuffer); }
+  // An RBJ biquad as a per-sample function, for baking sounds into buffers in plain JS.
+  static _biquad(type, f, q, sr) {
+    const w = 2 * Math.PI * f / sr, cs = Math.cos(w), al = Math.sin(w) / (2 * q);
+    const [b0, b1, b2] = type === 'bandpass' ? [al, 0, -al] : [(1 - cs) / 2, 1 - cs, (1 - cs) / 2];
+    const a0 = 1 + al, a1 = -2 * cs, a2 = 1 - al;
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    return x => { const y = (b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0; x2 = x1; x1 = x; y2 = y1; y1 = y; return y; };
+  }
+  // The terrain echo: nothing for 60 ms, then a handful of discrete slaps off nearby ground
+  // and hills, then a diffuse roll that darkens as it dies away over about 3 s, which is
+  // what turns a bang outdoors into a rumble.
+  _echoImpulse() {
+    const sr = this.ctx.sampleRate, len = Math.floor(sr * 3.2), buf = this.ctx.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let k = 0; k < 7; k++) {
+        const at = Math.floor(sr * (0.06 + Math.random() * 0.55)), amp = 0.5 + Math.random() * 0.5, lp = SoundEngine._biquad('lowpass', 1500, 0.7, sr);
+        for (let i = 0; i < sr * 0.03; i++) d[at + i] += lp(Math.random() * 2 - 1) * amp * Math.exp(-i / (sr * 0.008));
+      }
+      let y = 0;
+      for (let i = Math.floor(sr * 0.08); i < len; i++) {
+        const t = i / sr, a = Math.exp(-2 * Math.PI * (2400 * Math.exp(-t / 0.7) + 150) / sr);
+        y = y * a + (Math.random() * 2 - 1) * (1 - a);
+        d[i] += y * 2.5 * Math.exp(-t / 0.42) * Math.min(1, (t - 0.08) / 0.15);
+      }
+    }
+    return buf;
+  }
+  // The cannon is baked rather than built from nodes: at 100 rounds a second, a node graph
+  // per round would be thousands of nodes a burst. Each round is a crack, a body and a
+  // thump, varied a little and written into a buffer at its firing time. The start buffer
+  // holds the 0.3 s spin-up, the rate ramping up as the barrels do; the loop buffer is one
+  // second at full rate, its tails wrapped around so it repeats without a seam. At this
+  // rate the rounds fuse into the tearing 100 Hz buzz a rotary cannon is known for.
+  _bakeRounds(len, times, wrap) {
+    const sr = this.ctx.sampleRate, n = Math.floor(len * sr), d = new Float32Array(n), rl = Math.floor(0.06 * sr);
+    for (const t0 of times) {
+      const lvl = 0.85 + Math.random() * 0.3, crack = SoundEngine._biquad('bandpass', 1700 * (0.9 + Math.random() * 0.2), 0.9, sr);
+      const body = SoundEngine._biquad('lowpass', 700, 0.7, sr), start = Math.floor(t0 * sr);
+      let ph = 0;
+      for (let i = 0; i < rl; i++) {
+        const t = i / sr, w = Math.random() * 2 - 1;
+        ph += 2 * Math.PI * (55 + 85 * Math.exp(-t / 0.01)) / sr;
+        const v = lvl * (crack(w) * 2.2 * Math.exp(-t / 0.004) * Math.min(1, t / 0.0003)
+                       + body(w) * 0.6 * Math.exp(-t / 0.012) + Math.sin(ph) * 0.5 * Math.exp(-t / 0.015));
+        const at = start + i;
+        if (at < n) d[at] += v; else if (wrap) d[at % n] += v; else break;
+      }
+    }
+    const buf = this.ctx.createBuffer(1, n, sr); buf.copyToChannel(d, 0); return buf;
+  }
+  _bakeGun() {
+    // Rounds fire when the integral of the rate (ramping linearly to GUN_RATE over the
+    // spin-up) crosses each whole number, the same rule the game uses to spawn them.
+    const start = [];
+    for (let k = 1; k <= GUN_RATE * GUN_SPINUP / 2; k++) start.push(Math.sqrt(2 * k * GUN_SPINUP / GUN_RATE));
+    this.gunStartBuf = this._bakeRounds(GUN_SPINUP + 0.06, start, false);
+    this.gunLoopBuf = this._bakeRounds(1, Array.from({ length: GUN_RATE }, (_, i) => (i + (Math.random() - 0.5) * 0.08) / GUN_RATE), true);
+  }
+  // Trigger down: play from wherever the barrels are in their spin-up (`spin` 0-1, since a
+  // gun still winding down restarts faster), then the loop at full rate.
+  _gunStart(spin) {
+    const ctx = this.ctx, t = ctx.currentTime, into = GUN_SPINUP * spin;
+    const g = ctx.createGain(); g.gain.value = 0.55; g.connect(this.buses.weapons);
+    const a = ctx.createBufferSource(); a.buffer = this.gunStartBuf; a.connect(g); a.start(t, into);
+    const l = ctx.createBufferSource(); l.buffer = this.gunLoopBuf; l.loop = true; l.connect(g); l.start(t + GUN_SPINUP - into);
+    this._gun = { g, srcs: [a, l] };
+  }
+  // Trigger up: the rounds stop at once, the report rolls away, and the barrels whir down.
+  _gunStop(spin) {
+    const ctx = this.ctx, t = ctx.currentTime, { g, srcs } = this._gun; this._gun = null;
+    g.gain.setTargetAtTime(0, t, 0.004); for (const s of srcs) s.stop(t + 0.04);
+    const tail = ctx.createBufferSource(); tail.buffer = this.brownBuffer;
+    const tlp = ctx.createBiquadFilter(); tlp.type = 'lowpass'; tlp.frequency.value = 400;
+    const tg = ctx.createGain(); tg.gain.setValueAtTime(0.5 * spin, t); tg.gain.setTargetAtTime(0, t, 0.12);
+    tail.connect(tlp); tlp.connect(tg); tg.connect(this.buses.weapons); tail.start(t, Math.random() * 4); tail.stop(t + 0.8);
+    const whir = ctx.createOscillator(); whir.type = 'sawtooth';
+    whir.frequency.setValueAtTime(320 * spin + 40, t); whir.frequency.exponentialRampToValueAtTime(30, t + GUN_SPINDOWN);
+    const wbp = ctx.createBiquadFilter(); wbp.type = 'bandpass'; wbp.frequency.value = 600; wbp.Q.value = 0.8;
+    const wg = ctx.createGain(); wg.gain.setValueAtTime(0.05 * spin, t); wg.gain.linearRampToValueAtTime(0, t + GUN_SPINDOWN);
+    whir.connect(wbp); wbp.connect(wg); wg.connect(this.buses.weapons); whir.start(t); whir.stop(t + GUN_SPINDOWN);
+  }
   // Make `params` (one AudioParam or several) wander by +-depth around their own value, at
   // `rate` times the wobble buffer's 32 points a second. Returns the source and the depth gain.
   _wobble(params, depth, rate, when = 0) {
@@ -215,7 +303,7 @@ class SoundEngine {
   // turbine's whine on top and, in reheat, crackle. Steady filtered noise plus a clean sine
   // is what a fan sounds like, so every layer here wanders.
   _setupEngine() {
-    const ctx = this.ctx, bus = this.buses.engines, brown = this._noise(6, 'brown', 2);
+    const ctx = this.ctx, bus = this.buses.engines, brown = this.brownBuffer;
     const filter = (type, freq, q = 0) => { const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q; return f; };
     const gain = v => { const g = ctx.createGain(); g.gain.value = v; return g; };
     const chain = (...nodes) => { for (let i = 1; i < nodes.length; i++) nodes[i - 1].connect(nodes[i]); return nodes[nodes.length - 1]; };
@@ -241,7 +329,7 @@ class SoundEngine {
     this.abFilter = filter('bandpass', 600, 0.5); this.abGain = gain(0);
     chain(this._loop(this.pinkBuffer), this.abFilter, this.abGain, bus);
     this.crackleGain = gain(0);
-    chain(this._loop(this._crackleBuffer(4)), filter('highpass', 900), this.crackleGain, bus);
+    chain(this._loop(this.crackle), filter('highpass', 900), this.crackleGain, bus);
   }
   _setupWind() {
     this.windSrc = this._noiseSrc();
@@ -250,27 +338,37 @@ class SoundEngine {
     this.windGain = this.ctx.createGain(); this.windGain.gain.value = 0;
     this.windSrc.connect(this.windFilter); this.windFilter.connect(this.windGust); this.windGust.connect(this.windGain); this.windGain.connect(this.buses.engines);
   }
-  // Seeker tone, after the Sidewinder's: while the seeker works toward a lock it growls, a
-  // raspy, wandering tone that climbs and steadies as the lock firms up, and once locked it
-  // settles into a steady, high tone. One voice does both, so the growl rises into the
-  // lock tone rather than being swapped for it.
+  // Seeker audio for an infrared missile, which is what the game's lock models: short range,
+  // a cone ahead, a lock built from the target's heat. With the seeker looking and nothing
+  // in it there is a quiet, low seek tone. A target in the seeker turns it into the growl:
+  // the seeker's chopped infrared signal played as audio, buzzing at the chopping rate,
+  // rising in pitch and strength as the signal and lock firm up. On track it becomes a
+  // steady, high-pitched tone. The AIM-9X, the current Sidewinder, still cues the pilot
+  // this way. One voice does all three, so each state glides into the next.
   _setupLock() {
     const ctx = this.ctx;
-    this.seekOsc = ctx.createOscillator(); this.seekOsc.type = 'sawtooth'; this.seekOsc.frequency.value = 220;
-    this.seekJitter = this._wobble(this.seekOsc.detune, 35, 0.8).depth;
-    this.seekBP = ctx.createBiquadFilter(); this.seekBP.type = 'bandpass'; this.seekBP.Q.value = 2;
-    this.seekRasp = ctx.createGain(); this.seekRaspDepth = this._wobble(this.seekRasp.gain, 0.5, 1.3).depth;
+    this.seekOsc = ctx.createOscillator(); this.seekOsc.type = 'square'; this.seekOsc.frequency.value = 250;
+    this.seekLP = ctx.createBiquadFilter(); this.seekLP.type = 'lowpass'; this.seekLP.frequency.value = 2500; this.seekLP.Q.value = 0;
+    // The chop: a low-frequency oscillator amplitude-modulating the tone, its rate wandering
+    // a little so the growl sounds organic rather than like a motor.
+    this.seekChop = ctx.createGain(); this.seekChop.gain.value = 1;
+    this.seekLfo = ctx.createOscillator(); this.seekLfo.frequency.value = 45;
+    this.seekDepth = ctx.createGain(); this.seekDepth.gain.value = 0;
+    this.seekLfo.connect(this.seekDepth); this.seekDepth.connect(this.seekChop.gain); this.seekLfo.start();
+    this._wobble(this.seekLfo.detune, 250, 0.5);
     this.seekGain = ctx.createGain(); this.seekGain.gain.value = 0;
-    this.seekOsc.connect(this.seekBP); this.seekBP.connect(this.seekRasp); this.seekRasp.connect(this.seekGain);
+    this.seekOsc.connect(this.seekLP); this.seekLP.connect(this.seekChop); this.seekChop.connect(this.seekGain);
     this.seekGain.connect(this.buses.cockpit); this.seekOsc.start();
-    this._seek = { level: 0, hz: 220, rasp: 0.5, jitter: 35 };
+    this._seek = { level: 0, hz: 250, depth: 0, rate: 45 };
   }
   _setupWarn() {
     this.warnOsc = this.ctx.createOscillator(); this.warnOsc.type = 'sine'; this.warnOsc.frequency.value = 1600;
     this.warnGain = this.ctx.createGain(); this.warnGain.gain.value = 0;
     this.warnOsc.connect(this.warnGain); this.warnGain.connect(this.buses.cockpit); this.warnOsc.start();
   }
-  update(throttle, speed, firing, lockProg, threat, dt) {
+  // `seek` is -1 with the seeker off, 0 with it looking at nothing, and the target's signal
+  // strength (0-1] with one in it. `gunSpin` is the cannon's barrel speed, 0-1.
+  update(throttle, speed, firing, lockProg, threat, dt, seek = -1, gunSpin = 0) {
     if (!this.ctx) return;
     const t = throttle, t2 = t * t;
     // Roar does most of the work and grows hard with power; its top end opens with it.
@@ -292,17 +390,23 @@ class SoundEngine {
     // Engines sit back a few dB under sustained fire: fast in, slower out.
     this._fireDuck += ((firing ? 0.75 : 1) - this._fireDuck) * smoothT(firing ? 30 : 6, dt);
     this.fireDuck.gain.value = this._fireDuck;
-    // Seeker: growl while acquiring, climbing and steadying with progress; a steady high
-    // tone once locked. Everything glides, so the transitions do not click.
-    const sk = this._seek, locked = lockProg >= 1;
-    const level = locked ? 0.28 : lockProg > 0 ? 0.2 + 0.08 * lockProg : 0;
-    const hz = locked ? 1150 : lockProg > 0 ? 220 + 380 * lockProg : sk.hz;
-    sk.level += (level - sk.level) * smoothT(20, dt);
-    sk.hz += (hz - sk.hz) * smoothT(locked ? 30 : 8, dt);
-    sk.rasp += ((locked ? 0.08 : 0.55 - 0.25 * lockProg) - sk.rasp) * smoothT(10, dt);
-    sk.jitter += ((locked ? 5 : 35 - 15 * lockProg) - sk.jitter) * smoothT(10, dt);
-    this.seekGain.gain.value = sk.level; this.seekOsc.frequency.value = sk.hz; this.seekBP.frequency.value = sk.hz * 2;
-    this.seekRaspDepth.gain.value = sk.rasp; this.seekJitter.gain.value = sk.jitter;
+    // Cannon: start and stop the baked rounds on the trigger's edges.
+    if (firing && !this._gun) this._gunStart(gunSpin);
+    else if (!firing && this._gun) this._gunStop(gunSpin);
+    // Seeker. Lock quality blends the target's signal with how far the lock has built.
+    const sk = this._seek, target = seek > 0, locked = target && lockProg >= 1;
+    const q = target ? 0.5 * seek + 0.5 * Math.min(lockProg, 1) : 0;
+    let level = 0, hz = sk.hz, depth = 0, rate = sk.rate;
+    if (locked) { level = 0.11; hz = 1300; depth = 0.04; rate = 70; }
+    else if (target) { level = 0.12 + 0.06 * q; hz = 300 + 550 * q; depth = 0.75 - 0.35 * q; rate = 38 + 30 * q; }
+    else if (seek === 0) { level = 0.08; hz = 200; depth = 0.12; rate = 30; }
+    sk.level += (level - sk.level) * smoothT(25, dt);
+    sk.hz += (hz - sk.hz) * smoothT(locked ? 30 : 10, dt);
+    sk.depth += (depth - sk.depth) * smoothT(12, dt);
+    sk.rate += (rate - sk.rate) * smoothT(10, dt);
+    this.seekGain.gain.value = sk.level; this.seekOsc.frequency.value = sk.hz;
+    this.seekLP.frequency.value = Math.min(sk.hz * 3, 4000);
+    this.seekDepth.gain.value = sk.depth; this.seekChop.gain.value = 1 - sk.depth; this.seekLfo.frequency.value = sk.rate;
     // Threat warning - pulsing tone
     this.warnGain.gain.value = threat ? (Math.sin(performance.now() * 0.025) > 0 ? 0.05 : 0) : 0;
   }
@@ -386,58 +490,74 @@ class SoundEngine {
     for (const g of [this.roarGain, this.rumbleGain, this.whineGain, this.abGain, this.crackleGain,
                      this.windGain, this.seekGain, this.warnGain]) g.gain.value = 0;
     this._seek.level = 0;
+    if (this._gun) this._gunStop(0);
     // Missile motors follow pool entries that stop updating when the game ends.
     for (const v of this.voices) if (v.follow && v.release) { v.follow = null; v.release(); }
   }
   // Pausing freezes the whole audio clock, so sounds in flight resume where they stopped.
   pause(on) { if (this.ctx) (on ? this.ctx.suspend() : this.ctx.resume()).catch(() => {}); }
+  // An explosion as it is heard from nearby: a sharp blast front, a deep boom and a
+  // sub-bass thud, a fireball that roars and churns as it burns out, burning crackle and,
+  // for anything big, debris clattering down; the whole thing trailing into a rolling echo
+  // off the terrain. `scale` 1 is a fighter going up; the player's crash is 2. The boom is
+  // saturated so it keeps its weight on small speakers that cannot reproduce the sub-bass.
   explosion(pos, scale = 1) {
     if (!this.ctx) return;
-    const v = this._voice(pos, 'world', 200), now = this.ctx.currentTime + v.delay, vol = 0.25 * scale;
-    const boom = this.ctx.createOscillator(); boom.type = 'sine';
-    boom.frequency.setValueAtTime(80, now);
-    boom.frequency.exponentialRampToValueAtTime(15, now + 0.6);
-    const bg = this.ctx.createGain();
-    bg.gain.setValueAtTime(vol, now);
-    bg.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
-    boom.connect(bg); bg.connect(v.input); boom.start(now); boom.stop(now + 1);
-    const ns = this.ctx.createBufferSource(); ns.buffer = this.noiseBuffer;
-    const nf = this.ctx.createBiquadFilter(); nf.type = 'lowpass'; nf.frequency.value = 2000;
-    const ng = this.ctx.createGain();
-    ng.gain.setValueAtTime(vol * 0.5, now);
-    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
-    ns.connect(nf); nf.connect(ng); ng.connect(v.input);
-    ns.start(now); ns.stop(now + 0.7);
-    v.detune.push(boom.detune, nf.detune);
-    this._track(v, 1);
+    const ctx = this.ctx, ref = 150 * scale, v = this._voice(pos, 'world', ref), t = ctx.currentTime + v.delay;
+    const dur = 1 + 1.4 * scale, big = scale >= 1.5;
+    const out = ctx.createGain(); out.gain.value = 0.3 * scale; out.connect(v.input);
+    // The echo falls off more slowly than the direct sound, so a distant blast is mostly echo.
+    const send = ctx.createGain(); send.gain.value = 1.2 * Math.min(1, Math.sqrt(ref / Math.max(v.dist, 1)));
+    out.connect(send); send.connect(this.echo);
+    const src = (buf, len) => { const s = ctx.createBufferSource(); s.buffer = buf;
+      s.start(t, Math.random() * Math.max(0, buf.duration - len)); s.stop(t + len); return s; };
+    const filter = (type, freq, q = 0) => { const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q; v.detune.push(f.detune); return f; };
+    const env = (peak, attack, tau, at = t) => { const g = ctx.createGain(); g.gain.setValueAtTime(0, at);
+      g.gain.linearRampToValueAtTime(peak, at + attack); g.gain.setTargetAtTime(0, at + attack, tau); return g; };
+    const chain = (...n) => { for (let i = 1; i < n.length; i++) n[i - 1].connect(n[i]); };
+    // Blast front: a broadband crack, gone in tens of milliseconds.
+    chain(src(this.noiseBuffer, 0.4), filter('lowpass', 7000), env(1.0, 0.0005, 0.03 * Math.sqrt(scale)), out);
+    // Boom: brown noise under ~220 Hz, soft-clipped for harmonics.
+    const shaper = ctx.createWaveShaper(); shaper.curve = this.softClip;
+    chain(src(this.brownBuffer, dur), filter('lowpass', 220), env(1.4, 0.004, 0.3 * scale), shaper, out);
+    // Sub thud: a falling sine for the chest.
+    const sub = ctx.createOscillator(); sub.frequency.setValueAtTime(60, t); sub.frequency.exponentialRampToValueAtTime(24, t + 0.7);
+    v.detune.push(sub.detune); chain(sub, env(0.9, 0.006, 0.22 * scale), out); sub.start(t); sub.stop(t + dur);
+    // Fireball: pink noise in a band that sinks as it burns out, churning at a few hertz.
+    const fbp = filter('bandpass', 600, 0.6); fbp.frequency.setValueAtTime(650, t); fbp.frequency.exponentialRampToValueAtTime(180, t + dur);
+    const churn = ctx.createGain(); const wob = this._wobble(churn.gain, 0.5, 0.25, t); wob.src.stop(t + dur);
+    chain(src(this.pinkBuffer, dur), fbp, churn, env(0.7, 0.08, dur * 0.3), out);
+    // Burning crackle.
+    chain(src(this.crackle, dur), filter('highpass', 1500), env(0.25 * scale, 0.05, dur * 0.25, t + 0.08), out);
+    // Debris: short metallic rings, scattered and thinning out over the first seconds.
+    for (let k = 0, n = big ? 28 : 7; k < n; k++) {
+      const at = t + 0.1 + Math.random() ** 1.6 * (big ? 2.2 : 0.9);
+      const s = ctx.createBufferSource(); s.buffer = this.noiseBuffer; s.start(at, Math.random() * 1.8); s.stop(at + 0.25);
+      chain(s, filter('bandpass', 700 + Math.random() * 3800, 4 + Math.random() * 10),
+            env((big ? 0.5 : 0.3) * (0.3 + Math.random() * 0.7), 0.001, 0.02 + Math.random() * 0.06, at), out);
+    }
+    this._track(v, dur + 0.5);
     // The blast ducks the engines as it arrives: hard when close, barely at a kilometre.
-    const depth = Math.min(0.5 * scale * 200 / Math.max(v.dist, 200), 0.6), g = this.blastDuck.gain;
-    g.cancelScheduledValues(now); g.setTargetAtTime(1 - depth, now, 0.01); g.setTargetAtTime(1, now + 0.12, 0.4);
+    const depth = Math.min(0.5 * scale * 200 / Math.max(v.dist, 200), 0.7), g = this.blastDuck.gain;
+    g.cancelScheduledValues(t); g.setTargetAtTime(1 - depth, t, 0.01); g.setTargetAtTime(1, t + 0.15, 0.5);
   }
-  // One volley from the cannons, called each time they fire. Each round is its own report:
-  // a millisecond to peak, a crack, a thump, a bolt tick, and a low tail that overlaps the
-  // next round, which is what makes a burst sound like a gun rather than a string of clicks.
-  // Pitch and level vary a little per round so a burst is not one sample looped.
-  gunShot() {
+  // The airframe striking the ground: a heavy low crunch and metal tearing, ahead of the
+  // explosion that follows it.
+  impact(pos) {
     if (!this.ctx) return;
-    const ctx = this.ctx, t = ctx.currentTime, out = this.buses.weapons;
-    const lvl = 0.8 + Math.random() * 0.4, cents = (Math.random() - 0.5) * 240;
-    const src = ctx.createBufferSource(); src.buffer = this.noiseBuffer;
-    const layer = (type, freq, q, peak, decay) => {
-      const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q; f.detune.value = cents;
-      const g = ctx.createGain(); g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(peak * lvl, t + 0.0015); g.gain.exponentialRampToValueAtTime(0.0005, t + decay);
-      src.connect(f); f.connect(g); g.connect(out);
+    const ctx = this.ctx, v = this._voice(pos, 'world', 300), t = ctx.currentTime + v.delay;
+    const out = ctx.createGain(); out.gain.value = 1.2; out.connect(v.input);
+    const layer = (type, f0, f1, q, peak, tau, len) => {
+      const s = ctx.createBufferSource(); s.buffer = this.pinkBuffer; s.start(t, Math.random() * 4); s.stop(t + len);
+      const f = ctx.createBiquadFilter(); f.type = type; f.Q.value = q; v.detune.push(f.detune);
+      f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + len);
+      const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(peak, t + 0.002); g.gain.setTargetAtTime(0, t + 0.002, tau);
+      s.connect(f); f.connect(g); g.connect(out);
     };
-    layer('bandpass', 1600, 0.8, 1.4, 0.05);    // crack
-    layer('lowpass', 500, 0, 0.30, 0.16);       // tail
-    layer('highpass', 5000, 0, 0.25, 0.015);    // tick
-    src.start(t, Math.random() * 1.5); src.stop(t + 0.17);
-    const o = ctx.createOscillator(); o.detune.value = cents;
-    o.frequency.setValueAtTime(160, t); o.frequency.exponentialRampToValueAtTime(48, t + 0.07);
-    const og = ctx.createGain(); og.gain.setValueAtTime(0, t);
-    og.gain.linearRampToValueAtTime(0.4 * lvl, t + 0.002); og.gain.exponentialRampToValueAtTime(0.0005, t + 0.1);
-    o.connect(og); og.connect(out); o.start(t); o.stop(t + 0.11);
+    layer('lowpass', 300, 120, 0.7, 1.4, 0.12, 0.8);     // crunch
+    layer('bandpass', 2200, 500, 3, 0.7, 0.18, 0.7);     // metal tearing
+    layer('bandpass', 900, 700, 1, 0.4, 0.3, 1.0);       // scraping
+    this._track(v, 1);
   }
   // Ignition is a thump and a burst of flame noise; then the motor roars for as long as the
   // missile flies, following it, so it is heard chasing or receding: the distance falloff,
@@ -470,6 +590,9 @@ class SoundEngine {
   hitMarker() {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // At 100 rounds a second hits arrive faster than a tone can be told apart; one per 80 ms.
+    if (now - this._lastHitMarker < 0.08) return;
+    this._lastHitMarker = now;
     const o = this.ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 1200;
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.1, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
@@ -2392,7 +2515,7 @@ function createPlayerJet(){
 }
 const playerJet=createPlayerJet();playerJet.position.set(0,350,0);scene.add(playerJet);
 const player={minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,0,-120),
-  rollRate:0,pitchRate:0,yawRate:0,hp:MAX_PLAYER_HP,fireCooldown:0,missileCooldown:0,missileAmmo:MAX_MISSILE_AMMO,
+  rollRate:0,pitchRate:0,yawRate:0,hp:MAX_PLAYER_HP,gunSpin:0,gunPhase:0,gunRound:0,onGround:false,missileCooldown:0,missileAmmo:MAX_MISSILE_AMMO,
   missileSide:1,prevVelocity:new THREE.Vector3(),prevPosition:playerJet.position.clone()};
 
 /* ═══════════════════ ENEMY JET ═══════════════════ */
@@ -2523,11 +2646,17 @@ function createEnemyJet(){
 const enemyJetTemplate=createEnemyJet();
 
 /* ═══════════════════ OBJECT POOLS ═══════════════════ */
-const MAX_BULLETS=250,bulletPool=[];
+// The cannon is modelled on the M61 rotary cannon fighters carry: about 6,000 rounds a
+// minute, reached over a 0.3 s spin-up, winding down over 0.5 s. Rounds come from an
+// accumulator rather than once per frame, so the rate does not depend on the frame rate.
+// Every third round is a tracer; the rest fly and hit unseen. Damage per round is set so
+// damage per second on target matches the old, slower gun.
+const GUN_RATE=100,GUN_SPINUP=.3,GUN_SPINDOWN=.5,GUN_DAMAGE=2.5,GUN_TRACER_EVERY=3;
+const MAX_BULLETS=400,bulletPool=[];
 const tracerGeo=new THREE.CylinderGeometry(.15,.15,4,4);tracerGeo.rotateX(Math.PI/2);
 const pBMat=new THREE.MeshBasicMaterial({color:0xffee44}),eBulletMat=new THREE.MeshBasicMaterial({color:0xff4422});
 for(let i=0;i<MAX_BULLETS;i++){const m=new THREE.Mesh(tracerGeo,pBMat);m.visible=false;m.userData={active:false,vel:new THREE.Vector3(),life:0,isEnemy:false};scene.add(m);bulletPool.push(m)}
-function spawnBullet(pos,dir,speed,isEnemy=false){for(const b of bulletPool)if(!b.userData.active){b.position.copy(pos);b.userData.vel.copy(dir).multiplyScalar(speed);b.userData.life=2.5;b.userData.active=true;b.userData.isEnemy=isEnemy;b.material=isEnemy?eBulletMat:pBMat;b.scale.set(isEnemy?1.5:1,isEnemy?1.5:1,isEnemy?1.5:1);b.visible=true;return b}}
+function spawnBullet(pos,dir,speed,isEnemy=false,tracer=true){for(const b of bulletPool)if(!b.userData.active){b.position.copy(pos);b.userData.vel.copy(dir).multiplyScalar(speed);b.userData.life=2.5;b.userData.active=true;b.userData.isEnemy=isEnemy;b.material=isEnemy?eBulletMat:pBMat;b.scale.set(isEnemy?1.5:1,isEnemy?1.5:1,isEnemy?1.5:1);b.visible=tracer;return b}}
 
 const MAX_MISSILES=20,missilePool=[],missileEjectVelocity=new THREE.Vector3();
 const missileBodyGeo=new THREE.CylinderGeometry(.22,.28,3,10);missileBodyGeo.rotateX(Math.PI/2);
@@ -2836,7 +2965,7 @@ function updateCamera(dt){
 /* ═══════════════════ GAME LOGIC ═══════════════════ */
 const _qP=new THREE.Quaternion(),_qR=new THREE.Quaternion(),_qY=new THREE.Quaternion();
 const _axisX=new THREE.Vector3(1,0,0),_axisY=new THREE.Vector3(0,1,0),_axisZ=new THREE.Vector3(0,0,1);
-const _tmpV1=new THREE.Vector3(),_tmpQ=new THREE.Quaternion();
+const _tmpV1=new THREE.Vector3(),_tmpQ=new THREE.Quaternion(),_gunPos=new THREE.Vector3();
 const _hudEuler=new THREE.Euler();
 
 function findNearestEnemy(){let n=null,md=Infinity;for(const e of enemies){if(!e.alive)continue;const d=e.mesh.position.distanceTo(playerJet.position);if(d<md&&d<1500){md=d;n=e}}return n}
@@ -2870,7 +2999,8 @@ function updatePlayer(dt){
   _tmpV1.copy(player.velocity).sub(player.prevVelocity).divideScalar(Math.max(dt,.001));
   gForce=_tmpV1.length()/9.81+1;
   const gH=getGroundHeight(playerJet.position.x,playerJet.position.z)+5;
-  if(playerJet.position.y<gH){playerJet.position.y=gH;player.hp-=250*dt;screenShake=2}
+  const onGround=playerJet.position.y<gH;if(onGround&&!player.onGround)snd.impact(playerJet.position);player.onGround=onGround;
+  if(onGround){playerJet.position.y=gH;player.hp-=250*dt;screenShake=2}
   if(playerJet.position.y<3){playerJet.position.y=3;player.hp-=120*dt}
 
   // Afterburner
@@ -2892,15 +3022,24 @@ function updatePlayer(dt){
   const exR=new THREE.Vector3(-.7*1.8,0,13*1.8).applyQuaternion(playerJet.quaternion).add(playerJet.position);
   emitExhaust(exL,_fwd,player.throttle);emitExhaust(exR,_fwd,player.throttle);
 
-  // Cannons (space)
-  player.fireCooldown-=dt;const firing=keys['Space']&&player.fireCooldown<=0;
-  if(firing){player.fireCooldown=.07;
-    const gL=new THREE.Vector3(-2.5,-.6,-14).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-    const gR=new THREE.Vector3(2.5,-.6,-14).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-    spawnBullet(gL,_fwd.clone(),speed+650);spawnBullet(gR,_fwd.clone(),speed+650);emitMuzzle(gL);emitMuzzle(gR);snd.gunShot()}
+  // Cannon (space). Rounds alternate between the two muzzles. One fired partway through
+  // the frame has already flown for the rest of it, so it is advanced by that much, which
+  // keeps the stream evenly spaced whatever the frame rate.
+  const trigger=!!keys['Space'];
+  player.gunSpin=trigger?Math.min(player.gunSpin+dt/GUN_SPINUP,1):Math.max(player.gunSpin-dt/GUN_SPINDOWN,0);
+  if(trigger){const rate=GUN_RATE*player.gunSpin;player.gunPhase+=rate*dt;
+    if(player.gunPhase>=1){
+      while(player.gunPhase>=1){player.gunPhase-=1;
+        _gunPos.set(player.gunRound&1?2.5:-2.5,-.6,-14).applyQuaternion(playerJet.quaternion).add(playerJet.position);
+        const b=spawnBullet(_gunPos,_fwd,speed+650,false,player.gunRound%GUN_TRACER_EVERY===0);
+        if(b)b.position.addScaledVector(b.userData.vel,player.gunPhase/rate);
+        player.gunRound++}
+      // A flash on roughly the old gun's cadence; one every frame would flood the particle pool.
+      if(Math.random()<.4)emitMuzzle(_gunPos)}}
+  else player.gunPhase=0;
 
   // Lock-on system
-  player.missileCooldown-=dt;
+  player.missileCooldown-=dt;let seekSignal=-1;
   if(keys['KeyF']&&player.missileAmmo>0){
     const fwd=_fwd;
     const maxLockProgress=missilePool.some(m=>!m.userData.active)?1:LOCK_WAIT_PROGRESS;
@@ -2908,6 +3047,9 @@ function updatePlayer(dt){
     for(const e of enemies){if(!e.alive)continue;const dir=new THREE.Vector3().subVectors(e.mesh.position,playerJet.position).normalize();
       const dot=dir.dot(fwd),dist=e.mesh.position.distanceTo(playerJet.position);
       if(dot>bestD&&dist<1500){bestD=dot;best=e}}
+    // Seeker signal: stronger the more centred and the closer the target.
+    if(best)seekSignal=.15+.85*(.6*(bestD-LOCK_CONE)/(1-LOCK_CONE)+.4*(1-best.mesh.position.distanceTo(playerJet.position)/1500));
+    else seekSignal=0;
     if(best){if(lockTarget!==best){lockTarget=best;lockProgress=0}
       lockProgress=Math.min(lockProgress+dt/LOCK_TIME,maxLockProgress)}
     else{lockTarget=null;lockProgress=Math.min(lockProgress+dt*2,maxLockProgress);
@@ -2944,7 +3086,7 @@ function updatePlayer(dt){
     spawnP(wL,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke');
     spawnP(wR,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke')}
 
-  snd.update(player.throttle,speed,keys['Space'],lockProgress,incomingThreat,dt);
+  snd.update(player.throttle,speed,trigger,lockProgress,incomingThreat,dt,seekSignal,player.gunSpin);
 }
 
 const _eFwd=new THREE.Vector3(),_eTarget=new THREE.Vector3(),_eTargetOffset=new THREE.Vector3(),_eDesired=new THREE.Quaternion(),_eLook=new THREE.Matrix4();
@@ -3148,7 +3290,7 @@ function updateBullets(dt){for(const b of bulletPool){if(!b.userData.active)cont
     for(let k=0;k<3;k++)spawnP(b.position,new THREE.Vector3((Math.random()-.5)*60,(Math.random()-.5)*60,(Math.random()-.5)*60),.08,0xffaa44,1);
     screenShake=.5;hitFlash=.15}}
   else{for(const e of enemies){if(!e.alive)continue;if(b.position.distanceTo(e.mesh.position)<14){
-    e.hp-=10;e.wasHit=true;b.userData.active=false;b.visible=false;spawnExplosion(b.position,5);snd.hitMarker();
+    e.hp-=GUN_DAMAGE;e.wasHit=true;if(b.visible)spawnExplosion(b.position,4);b.userData.active=false;b.visible=false;snd.hitMarker();
     if(e.hp<=0)killEnemy(e,100);break}}}
   if(b.position.y<getGroundHeight(b.position.x,b.position.z)){b.userData.active=false;b.visible=false}}}
 
@@ -3390,11 +3532,11 @@ function drawHUD(){
 
 /* ═══════════════════ GAME STATE ═══════════════════ */
 function checkGameOver(){if(player.hp<=0&&!gameOver){gameOver=true;snd.silence();deathCamTimer=3;deathCamCenter.copy(playerJet.position);deathCamAngle=0;
-  spawnExplosion(playerJet.position,60);snd.explosion(playerJet.position);playerJet.visible=false}}
+  spawnExplosion(playerJet.position,60);snd.explosion(playerJet.position,2);playerJet.visible=false}}
 
 function resetPool(pool){for(const item of pool){item.userData.active=false;item.visible=false}}
 function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.set(0,0,-120);
-  player.rollRate=player.pitchRate=player.yawRate=0;player.fireCooldown=player.missileCooldown=0;
+  player.rollRate=player.pitchRate=player.yawRate=0;player.missileCooldown=0;player.gunSpin=player.gunPhase=player.gunRound=0;player.onGround=false;
   player.missileAmmo=MAX_MISSILE_AMMO;player.missileSide=1;
   playerJet.position.set(0,350,0);player.prevPosition.copy(playerJet.position);playerJet.quaternion.identity();playerJet.visible=true;
   rebuildWorldAround(playerJet.position.x,playerJet.position.z);

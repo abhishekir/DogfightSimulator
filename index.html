@@ -130,11 +130,13 @@ class SoundEngine {
       this.blastDuck = ctx.createGain(); this.blastDuck.connect(this.master);
       this.fireDuck = ctx.createGain(); this.fireDuck.connect(this.blastDuck);
       this.buses = {
-        engines: this._bus(this.fireDuck, 1), weapons: this._bus(this.master, 1),
+        engines: this._bus(this.fireDuck, 0.7), weapons: this._bus(this.master, 1),
         world: this._bus(this.master, 1), cockpit: this._bus(this.master, 1)
       };
       this.noiseBuffer = this._noise(2);
-      this._setupEngine(); this._setupWind(); this._setupCannon();
+      this.pinkBuffer = this._noise(6, 'pink', 2);
+      this.wobbleBuffer = this._wobbleBuffer();
+      this._setupEngine(); this._setupWind();
       this._setupLock(); this._setupWarn();
     } catch (error) {
       this.ctx = null;
@@ -143,57 +145,125 @@ class SoundEngine {
     }
   }
   _bus(dest, level) { const g = this.ctx.createGain(); g.gain.value = level; g.connect(dest); return g; }
-  _noise(dur) {
-    const len = this.ctx.sampleRate * dur;
-    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  // Looping noise. White is flat; pink falls 3 dB an octave and brown 6, which is where a
+  // roar lives. Each channel is independent, so a stereo buffer sounds wide rather than
+  // coming from a point, and the tail is crossfaded into the head so the loop has no seam.
+  _noise(dur, color = 'white', channels = 1) {
+    const sr = this.ctx.sampleRate, len = Math.floor(sr * dur), fade = Math.floor(sr * 0.05);
+    const buf = this.ctx.createBuffer(channels, len, sr), raw = new Float32Array(len + fade);
+    for (let c = 0; c < channels; c++) {
+      let b0 = 0, b1 = 0, b2 = 0, br = 0, sq = 0;
+      for (let i = 0; i < raw.length; i++) {
+        const w = Math.random() * 2 - 1;
+        if (color === 'pink') { b0 = 0.99765 * b0 + w * 0.0990460; b1 = 0.96300 * b1 + w * 0.2965164; b2 = 0.57000 * b2 + w * 1.0526913; raw[i] = b0 + b1 + b2 + w * 0.1848; }
+        else if (color === 'brown') { br = (br + 0.02 * w) / 1.02; raw[i] = br; }
+        else raw[i] = w;
+        sq += raw[i] * raw[i];
+      }
+      // Coloured noise is scaled to white noise's RMS so the layers' gains are comparable.
+      const k = color === 'white' ? 1 : Math.sqrt(raw.length / 3 / sq), d = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) d[i] = raw[i] * k;
+      for (let i = 0; i < fade; i++) { const a = i / fade; d[i] = (raw[i] * Math.sqrt(a) + raw[len + i] * Math.sqrt(1 - a)) * k; }
+    }
     return buf;
   }
-  _noiseSrc() { const s = this.ctx.createBufferSource(); s.buffer = this.noiseBuffer; s.loop = true; s.start(); return s; }
+  // A slow random curve in [-1, 1]: random points 32 a second, cosine-interpolated and
+  // looped seamlessly. Fed into an AudioParam it makes the value wander the way turbulence
+  // does; the source's playbackRate sets how fast.
+  _wobbleBuffer() {
+    const sr = this.ctx.sampleRate, per = Math.floor(sr / 32), pts = 256;
+    const buf = this.ctx.createBuffer(1, pts * per, sr), d = buf.getChannelData(0);
+    const v = Array.from({ length: pts }, () => Math.random() * 2 - 1);
+    for (let i = 0; i < d.length; i++) {
+      const j = Math.floor(i / per), f = i / per - j, a = v[j], b = v[(j + 1) % pts];
+      d[i] = a + (b - a) * (0.5 - 0.5 * Math.cos(Math.PI * f));
+    }
+    return buf;
+  }
+  // Sparse random impulses, each a fraction of a millisecond: the crackle of shocks in a
+  // jet's exhaust, the most recognisable thing about one at full power.
+  _crackleBuffer(dur) {
+    const sr = this.ctx.sampleRate, len = Math.floor(sr * dur), buf = this.ctx.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let k = 0, n = Math.floor(dur * 90); k < n; k++) {
+        const at = Math.floor(Math.random() * (len - 64)), amp = 0.3 + 0.7 * Math.random() ** 2;
+        for (let i = 0; i < 40; i++) d[at + i] += amp * Math.exp(-i / 5) * (Math.random() * 2 - 1);
+      }
+    }
+    return buf;
+  }
+  // A looping source started at a random point, so layers sharing a buffer do not line up.
+  _loop(buf, rate = 1, when = 0) {
+    const s = this.ctx.createBufferSource(); s.buffer = buf; s.loop = true; s.playbackRate.value = rate;
+    s.start(when, Math.random() * buf.duration); return s;
+  }
+  _noiseSrc() { return this._loop(this.noiseBuffer); }
+  // Make `params` (one AudioParam or several) wander by +-depth around their own value, at
+  // `rate` times the wobble buffer's 32 points a second. Returns the source and the depth gain.
+  _wobble(params, depth, rate, when = 0) {
+    const g = this.ctx.createGain(), src = this._loop(this.wobbleBuffer, rate, when);
+    g.gain.value = depth; src.connect(g);
+    for (const p of [].concat(params)) g.connect(p);
+    return { src, depth: g };
+  }
   // The player's own engine, the wind, the cannon and the cockpit tones are heard through the
   // airframe or the headset, not across the sky, so they stay dry: no panner, no distance.
+  //
+  // The engine is heard from the chase camera behind the nozzles. A jet is mostly
+  // turbulence: broadband roar whose level never sits still, over a low rumble, with the
+  // turbine's whine on top and, in reheat, crackle. Steady filtered noise plus a clean sine
+  // is what a fan sounds like, so every layer here wanders.
   _setupEngine() {
-    const bus = this.buses.engines;
-    // Jet rumble - filtered noise for low-end turbofan roar
-    this.rumbleSrc = this._noiseSrc();
-    this.rumbleFilter = this.ctx.createBiquadFilter(); this.rumbleFilter.type = 'lowpass'; this.rumbleFilter.frequency.value = 200; this.rumbleFilter.Q.value = 1.5;
-    this.rumbleGain = this.ctx.createGain(); this.rumbleGain.gain.value = 0;
-    this.rumbleSrc.connect(this.rumbleFilter); this.rumbleFilter.connect(this.rumbleGain); this.rumbleGain.connect(bus);
-    // Turbine whine - primary high-pitched sine that scales with throttle
-    this.turbineOsc = this.ctx.createOscillator(); this.turbineOsc.type = 'sine'; this.turbineOsc.frequency.value = 800;
-    this.turbineFilter = this.ctx.createBiquadFilter(); this.turbineFilter.type = 'bandpass'; this.turbineFilter.frequency.value = 1200; this.turbineFilter.Q.value = 2;
-    this.turbineGain = this.ctx.createGain(); this.turbineGain.gain.value = 0;
-    this.turbineOsc.connect(this.turbineFilter); this.turbineFilter.connect(this.turbineGain); this.turbineGain.connect(bus);
-    this.turbineOsc.start();
-    // Compressor harmonic - upper spool whine
-    this.compOsc = this.ctx.createOscillator(); this.compOsc.type = 'sine'; this.compOsc.frequency.value = 2400;
-    this.compGain = this.ctx.createGain(); this.compGain.gain.value = 0;
-    this.compOsc.connect(this.compGain); this.compGain.connect(bus); this.compOsc.start();
-    // Afterburner - broadband noise roar
-    this.abSrc = this._noiseSrc();
-    this.abFilter = this.ctx.createBiquadFilter(); this.abFilter.type = 'bandpass'; this.abFilter.frequency.value = 800; this.abFilter.Q.value = 0.5;
-    this.abGain = this.ctx.createGain(); this.abGain.gain.value = 0;
-    this.abSrc.connect(this.abFilter); this.abFilter.connect(this.abGain); this.abGain.connect(bus);
+    const ctx = this.ctx, bus = this.buses.engines, brown = this._noise(6, 'brown', 2);
+    const filter = (type, freq, q = 0) => { const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q; return f; };
+    const gain = v => { const g = ctx.createGain(); g.gain.value = v; return g; };
+    const chain = (...nodes) => { for (let i = 1; i < nodes.length; i++) nodes[i - 1].connect(nodes[i]); return nodes[nodes.length - 1]; };
+    // Roar: pink noise whose top end opens with throttle, its level churning at ~10 Hz.
+    this.roarLP = filter('lowpass', 400); const churn = gain(1); this._wobble(churn.gain, 0.35, 0.3);
+    this.roarGain = gain(0);
+    chain(this._loop(this.pinkBuffer), filter('highpass', 45), this.roarLP, churn, this.roarGain, bus);
+    // Rumble: brown noise under ~150 Hz, throbbing at a few hertz.
+    this.rumbleLP = filter('lowpass', 100); const throb = gain(1); this._wobble(throb.gain, 0.45, 0.12);
+    this.rumbleGain = gain(0);
+    chain(this._loop(brown), this.rumbleLP, throb, this.rumbleGain, bus);
+    // Whine: the fan's blade-pass tone. Two partials a few cents apart beat against each
+    // other and the pitch jitters, so it shimmers instead of humming; a soft second
+    // harmonic gives it an edge.
+    this.whineBP = filter('bandpass', 1200, 1.5); this.whineGain = gain(0);
+    chain(this.whineBP, this.whineGain, bus);
+    this.whineOscs = [[1, 0.6], [1.006, 0.4], [2.01, 0.2]].map(([mult, level]) => {
+      const o = ctx.createOscillator(); o.type = 'triangle'; chain(o, gain(level), this.whineBP); o.start();
+      return [o, mult];
+    });
+    this._wobble(this.whineOscs.map(([o]) => o.detune), 12, 1);
+    // Reheat: a broadband mid roar and the crackle. A little crackle shows from 70% up.
+    this.abFilter = filter('bandpass', 600, 0.5); this.abGain = gain(0);
+    chain(this._loop(this.pinkBuffer), this.abFilter, this.abGain, bus);
+    this.crackleGain = gain(0);
+    chain(this._loop(this._crackleBuffer(4)), filter('highpass', 900), this.crackleGain, bus);
   }
   _setupWind() {
     this.windSrc = this._noiseSrc();
     this.windFilter = this.ctx.createBiquadFilter(); this.windFilter.type = 'bandpass'; this.windFilter.frequency.value = 500; this.windFilter.Q.value = 0.3;
+    this.windGust = this.ctx.createGain(); this._wobble(this.windGust.gain, 0.3, 0.05);
     this.windGain = this.ctx.createGain(); this.windGain.gain.value = 0;
-    this.windSrc.connect(this.windFilter); this.windFilter.connect(this.windGain); this.windGain.connect(this.buses.engines);
+    this.windSrc.connect(this.windFilter); this.windFilter.connect(this.windGust); this.windGust.connect(this.windGain); this.windGain.connect(this.buses.engines);
   }
-  _setupCannon() {
-    this.cannonSrc = this._noiseSrc();
-    this.cannonFilter = this.ctx.createBiquadFilter(); this.cannonFilter.type = 'bandpass'; this.cannonFilter.frequency.value = 1800; this.cannonFilter.Q.value = 2;
-    this.cannonGain = this.ctx.createGain(); this.cannonGain.gain.value = 0;
-    this.cannonSrc.connect(this.cannonFilter); this.cannonFilter.connect(this.cannonGain); this.cannonGain.connect(this.buses.weapons);
-  }
+  // Seeker tone, after the Sidewinder's: while the seeker works toward a lock it growls, a
+  // raspy, wandering tone that climbs and steadies as the lock firms up, and once locked it
+  // settles into a steady, high tone. One voice does both, so the growl rises into the
+  // lock tone rather than being swapped for it.
   _setupLock() {
-    this.lockOsc = this.ctx.createOscillator(); this.lockOsc.type = 'sine'; this.lockOsc.frequency.value = 400;
-    this.lockFilter = this.ctx.createBiquadFilter(); this.lockFilter.type = 'bandpass'; this.lockFilter.frequency.value = 500; this.lockFilter.Q.value = 5;
-    this.lockGain = this.ctx.createGain(); this.lockGain.gain.value = 0;
-    this.lockOsc.connect(this.lockFilter); this.lockFilter.connect(this.lockGain); this.lockGain.connect(this.buses.cockpit); this.lockOsc.start();
-    this._lockBeepT = 0; this._lockBeepOn = false;
+    const ctx = this.ctx;
+    this.seekOsc = ctx.createOscillator(); this.seekOsc.type = 'sawtooth'; this.seekOsc.frequency.value = 220;
+    this.seekJitter = this._wobble(this.seekOsc.detune, 35, 0.8).depth;
+    this.seekBP = ctx.createBiquadFilter(); this.seekBP.type = 'bandpass'; this.seekBP.Q.value = 2;
+    this.seekRasp = ctx.createGain(); this.seekRaspDepth = this._wobble(this.seekRasp.gain, 0.5, 1.3).depth;
+    this.seekGain = ctx.createGain(); this.seekGain.gain.value = 0;
+    this.seekOsc.connect(this.seekBP); this.seekBP.connect(this.seekRasp); this.seekRasp.connect(this.seekGain);
+    this.seekGain.connect(this.buses.cockpit); this.seekOsc.start();
+    this._seek = { level: 0, hz: 220, rasp: 0.5, jitter: 35 };
   }
   _setupWarn() {
     this.warnOsc = this.ctx.createOscillator(); this.warnOsc.type = 'sine'; this.warnOsc.frequency.value = 1600;
@@ -202,39 +272,37 @@ class SoundEngine {
   }
   update(throttle, speed, firing, lockProg, threat, dt) {
     if (!this.ctx) return;
-    const t = throttle;
-    // Jet rumble - noise floor rises with throttle
-    this.rumbleFilter.frequency.value = 120 + t * 300;
-    this.rumbleGain.gain.value = 0.03 + t * 0.09;
-    // Turbine whine - pitch sweeps up with throttle (F-22 spool-up)
-    this.turbineOsc.frequency.value = 600 + t * 1400;
-    this.turbineFilter.frequency.value = 800 + t * 1200;
-    this.turbineGain.gain.value = 0.015 + t * 0.055;
-    // Compressor harmonic
-    this.compOsc.frequency.value = 1800 + t * 2200;
-    this.compGain.gain.value = 0.005 + t * 0.025;
-    // Afterburner roar
-    this.abFilter.frequency.value = 600 + t * 800;
-    this.abGain.gain.value = t > 0.85 ? (t - 0.85) * 1.5 : 0;
+    const t = throttle, t2 = t * t;
+    // Roar does most of the work and grows hard with power; its top end opens with it.
+    this.roarLP.frequency.value = 280 + t2 * 1400;
+    this.roarGain.gain.value = 0.05 + 0.20 * t2;
+    this.rumbleLP.frequency.value = 90 + t * 70;
+    this.rumbleGain.gain.value = 0.10 + 0.14 * t;
+    // Whine spools up with throttle, and is what you hear most at idle and least at full power.
+    const whine = 650 + t * 1100;
+    for (const [o, mult] of this.whineOscs) o.frequency.value = whine * mult;
+    this.whineBP.frequency.value = whine * 1.2;
+    this.whineGain.gain.value = 0.020 - 0.008 * t;
+    const ab = t > 0.85 ? (t - 0.85) / 0.15 : 0;
+    this.abFilter.frequency.value = 500 + ab * 400; this.abGain.gain.value = 0.14 * ab;
+    this.crackleGain.gain.value = 0.03 * Math.max(0, t - 0.7) / 0.3 + 0.10 * ab;
     // Wind
     const sn = Math.min(speed / 400, 1);
-    this.windFilter.frequency.value = 300 + sn * 2200; this.windGain.gain.value = sn * 0.13;
-    // Cannon
-    this.cannonGain.gain.value = firing ? 0.12 : this.cannonGain.gain.value * Math.pow(0.85, dt * 60);
+    this.windFilter.frequency.value = 250 + sn * 1200; this.windGain.gain.value = sn * 0.07;
     // Engines sit back a few dB under sustained fire: fast in, slower out.
     this._fireDuck += ((firing ? 0.75 : 1) - this._fireDuck) * smoothT(firing ? 30 : 6, dt);
     this.fireDuck.gain.value = this._fireDuck;
-    // Lock tone - PRF increases as lock progresses (realistic seeker head)
-    if (lockProg > 0 && lockProg < 1) {
-      this._lockBeepT += dt;
-      const interval = 0.35 - lockProg * 0.3;
-      if (this._lockBeepT > interval) { this._lockBeepT = 0; this._lockBeepOn = !this._lockBeepOn; }
-      this.lockGain.gain.value = this._lockBeepOn ? 0.04 : 0;
-      this.lockOsc.frequency.value = 400 + lockProg * 200;
-      this.lockFilter.frequency.value = 400 + lockProg * 200;
-    } else if (lockProg >= 1) {
-      this.lockGain.gain.value = 0.05; this.lockOsc.frequency.value = 600; this.lockFilter.frequency.value = 600;
-    } else { this.lockGain.gain.value = 0; this._lockBeepT = 0; }
+    // Seeker: growl while acquiring, climbing and steadying with progress; a steady high
+    // tone once locked. Everything glides, so the transitions do not click.
+    const sk = this._seek, locked = lockProg >= 1;
+    const level = locked ? 0.28 : lockProg > 0 ? 0.2 + 0.08 * lockProg : 0;
+    const hz = locked ? 1150 : lockProg > 0 ? 220 + 380 * lockProg : sk.hz;
+    sk.level += (level - sk.level) * smoothT(20, dt);
+    sk.hz += (hz - sk.hz) * smoothT(locked ? 30 : 8, dt);
+    sk.rasp += ((locked ? 0.08 : 0.55 - 0.25 * lockProg) - sk.rasp) * smoothT(10, dt);
+    sk.jitter += ((locked ? 5 : 35 - 15 * lockProg) - sk.jitter) * smoothT(10, dt);
+    this.seekGain.gain.value = sk.level; this.seekOsc.frequency.value = sk.hz; this.seekBP.frequency.value = sk.hz * 2;
+    this.seekRaspDepth.gain.value = sk.rasp; this.seekJitter.gain.value = sk.jitter;
     // Threat warning - pulsing tone
     this.warnGain.gain.value = threat ? (Math.sin(performance.now() * 0.025) > 0 ? 0.05 : 0) : 0;
   }
@@ -268,7 +336,7 @@ class SoundEngine {
         // A pool entry is reused once it is released, so stop following at the first frame
         // it is inactive and leave the voice where it ended.
         if (v.follow.userData.active) { v.pos.copy(v.follow.position); v.vel.copy(v.follow.userData.vel); }
-        else { v.follow = null; v.vel.set(0, 0, 0); }
+        else { v.follow = null; v.vel.set(0, 0, 0); if (v.release) v.release(); }
       }
       this._place(v);
     }
@@ -315,10 +383,14 @@ class SoundEngine {
   }
   silence() {
     if (!this.ctx) return;
-    this.rumbleGain.gain.value = 0; this.turbineGain.gain.value = 0; this.compGain.gain.value = 0;
-    this.abGain.gain.value = 0; this.windGain.gain.value = 0; this.cannonGain.gain.value = 0;
-    this.lockGain.gain.value = 0; this.warnGain.gain.value = 0;
+    for (const g of [this.roarGain, this.rumbleGain, this.whineGain, this.abGain, this.crackleGain,
+                     this.windGain, this.seekGain, this.warnGain]) g.gain.value = 0;
+    this._seek.level = 0;
+    // Missile motors follow pool entries that stop updating when the game ends.
+    for (const v of this.voices) if (v.follow && v.release) { v.follow = null; v.release(); }
   }
+  // Pausing freezes the whole audio clock, so sounds in flight resume where they stopped.
+  pause(on) { if (this.ctx) (on ? this.ctx.suspend() : this.ctx.resume()).catch(() => {}); }
   explosion(pos, scale = 1) {
     if (!this.ctx) return;
     const v = this._voice(pos, 'world', 200), now = this.ctx.currentTime + v.delay, vol = 0.25 * scale;
@@ -342,26 +414,58 @@ class SoundEngine {
     const depth = Math.min(0.5 * scale * 200 / Math.max(v.dist, 200), 0.6), g = this.blastDuck.gain;
     g.cancelScheduledValues(now); g.setTargetAtTime(1 - depth, now, 0.01); g.setTargetAtTime(1, now + 0.12, 0.4);
   }
+  // One volley from the cannons, called each time they fire. Each round is its own report:
+  // a millisecond to peak, a crack, a thump, a bolt tick, and a low tail that overlaps the
+  // next round, which is what makes a burst sound like a gun rather than a string of clicks.
+  // Pitch and level vary a little per round so a burst is not one sample looped.
+  gunShot() {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t = ctx.currentTime, out = this.buses.weapons;
+    const lvl = 0.8 + Math.random() * 0.4, cents = (Math.random() - 0.5) * 240;
+    const src = ctx.createBufferSource(); src.buffer = this.noiseBuffer;
+    const layer = (type, freq, q, peak, decay) => {
+      const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q; f.detune.value = cents;
+      const g = ctx.createGain(); g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(peak * lvl, t + 0.0015); g.gain.exponentialRampToValueAtTime(0.0005, t + decay);
+      src.connect(f); f.connect(g); g.connect(out);
+    };
+    layer('bandpass', 1600, 0.8, 1.4, 0.05);    // crack
+    layer('lowpass', 500, 0, 0.30, 0.16);       // tail
+    layer('highpass', 5000, 0, 0.25, 0.015);    // tick
+    src.start(t, Math.random() * 1.5); src.stop(t + 0.17);
+    const o = ctx.createOscillator(); o.detune.value = cents;
+    o.frequency.setValueAtTime(160, t); o.frequency.exponentialRampToValueAtTime(48, t + 0.07);
+    const og = ctx.createGain(); og.gain.setValueAtTime(0, t);
+    og.gain.linearRampToValueAtTime(0.4 * lvl, t + 0.002); og.gain.exponentialRampToValueAtTime(0.0005, t + 0.1);
+    o.connect(og); og.connect(out); o.start(t); o.stop(t + 0.11);
+  }
+  // Ignition is a thump and a burst of flame noise; then the motor roars for as long as the
+  // missile flies, following it, so it is heard chasing or receding: the distance falloff,
+  // air absorption and Doppler do the rest. The motor cuts when the missile's pool entry is
+  // released (a hit, the ground, or the end of its life).
   missileLaunch(missile) {
     if (!this.ctx) return;
-    const v = this._voice(missile.position, 'weapons', 60, missile), now = this.ctx.currentTime + v.delay;
-    const o = this.ctx.createOscillator(); o.type = 'sawtooth';
-    o.frequency.setValueAtTime(150, now);
-    o.frequency.exponentialRampToValueAtTime(3000, now + 0.2);
-    o.frequency.exponentialRampToValueAtTime(800, now + 1);
-    const f = this.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 4000;
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.12, now);
-    g.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
-    o.connect(f); f.connect(g); g.connect(v.input); o.start(now); o.stop(now + 1.5);
-    const ns = this.ctx.createBufferSource(); ns.buffer = this.noiseBuffer;
-    const nf = this.ctx.createBiquadFilter(); nf.type = 'bandpass';
-    nf.frequency.setValueAtTime(500, now); nf.frequency.exponentialRampToValueAtTime(4000, now + 0.3); nf.Q.value = 1;
-    const ng2 = this.ctx.createGain();
-    ng2.gain.setValueAtTime(0.15, now); ng2.gain.exponentialRampToValueAtTime(0.001, now + 1);
-    ns.connect(nf); nf.connect(ng2); ng2.connect(v.input); ns.start(now); ns.stop(now + 1.2);
-    v.detune.push(o.detune, nf.detune);
-    this._track(v, 1.5);
+    const ctx = this.ctx, v = this._voice(missile.position, 'weapons', 80, missile), t = ctx.currentTime + v.delay;
+    const filter = (type, freq) => { const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = 0; v.detune.push(f.detune); return f; };
+    const envGain = (peak, attack, decay) => { const g = ctx.createGain(); g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(peak, t + attack); g.gain.exponentialRampToValueAtTime(0.0005, t + decay); return g; };
+    const th = ctx.createOscillator(); th.frequency.setValueAtTime(120, t); th.frequency.exponentialRampToValueAtTime(40, t + 0.2);
+    const thg = envGain(0.8, 0.004, 0.3); th.connect(thg); thg.connect(v.input); th.start(t); th.stop(t + 0.32); v.detune.push(th.detune);
+    const burst = ctx.createBufferSource(); burst.buffer = this.noiseBuffer; const burstLP = filter('lowpass', 2500), bg = envGain(0.9, 0.01, 0.5);
+    burst.connect(burstLP); burstLP.connect(bg); bg.connect(v.input); burst.start(t, Math.random()); burst.stop(t + 0.55);
+    const motor = ctx.createGain(); motor.gain.setValueAtTime(0, t); motor.gain.linearRampToValueAtTime(1, t + 0.15); motor.connect(v.input);
+    const roar = this._loop(this.pinkBuffer, 1, t), roarHP = filter('highpass', 150), roarLP = filter('lowpass', 3200);
+    const sputter = ctx.createGain(), wob = this._wobble(sputter.gain, 0.3, 1.5, t), roarG = ctx.createGain(); roarG.gain.value = 0.7;
+    roar.connect(roarHP); roarHP.connect(roarLP); roarLP.connect(sputter); sputter.connect(roarG); roarG.connect(motor);
+    const hiss = this._loop(this.noiseBuffer, 1, t), hissHP = filter('highpass', 4000), hissG = ctx.createGain(); hissG.gain.value = 0.12;
+    hiss.connect(hissHP); hissHP.connect(hissG); hissG.connect(motor);
+    v.release = () => {
+      const n = ctx.currentTime;
+      motor.gain.cancelScheduledValues(n); motor.gain.setTargetAtTime(0, n, 0.04);
+      for (const s of [roar, hiss, wob.src]) s.stop(n + 0.3);
+      v.end = n + 0.3;
+    };
+    this._track(v, Infinity);
   }
   hitMarker() {
     if (!this.ctx) return;
@@ -417,7 +521,7 @@ window.addEventListener('keyup', e => { keys[e.code] = false; });
 function togglePause() {
   if (!gameStarted || gameOver) return;
   paused = !paused;
-  if (paused) snd.silence();
+  snd.pause(paused);
   document.getElementById('pause').style.display = paused ? 'flex' : 'none';
 }
 
@@ -2793,7 +2897,7 @@ function updatePlayer(dt){
   if(firing){player.fireCooldown=.07;
     const gL=new THREE.Vector3(-2.5,-.6,-14).applyQuaternion(playerJet.quaternion).add(playerJet.position);
     const gR=new THREE.Vector3(2.5,-.6,-14).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-    spawnBullet(gL,_fwd.clone(),speed+650);spawnBullet(gR,_fwd.clone(),speed+650);emitMuzzle(gL);emitMuzzle(gR)}
+    spawnBullet(gL,_fwd.clone(),speed+650);spawnBullet(gR,_fwd.clone(),speed+650);emitMuzzle(gL);emitMuzzle(gR);snd.gunShot()}
 
   // Lock-on system
   player.missileCooldown-=dt;

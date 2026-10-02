@@ -67,14 +67,21 @@ diff. What worked during the rendering overhaul:
 
 ## 1. Audio
 
-**The weakest system in the game, and the one with the most headroom.** The
-synthesis is decent; the architecture is the problem.
-
 `class SoundEngine` is entirely procedural Web Audio — no sample files, which is
-worth preserving. It has a four-layer player engine (noise rumble, turbine sine,
-compressor harmonic, afterburner noise), wind, a cannon hiss, a lock tone, a
-threat warning, plus one-shot `explosion(pos, scale)`, `missileLaunch(missile)`
-and `hitMarker()`.
+worth preserving. The player's engine is turbulent roar, rumble, a beating
+turbine whine and reheat crackle, every layer modulated by `_wobble` (a looping
+slow random curve fed into an AudioParam) so nothing sits still. There is wind,
+a per-round cannon (`gunShot`), a Sidewinder-style seeker growl that climbs
+into a steady lock tone, a threat warning, `explosion(pos, scale)`,
+`missileLaunch(missile)` with a motor that follows the missile, and
+`hitMarker()`.
+
+**Measure levels before changing them.** Every level in the class was set
+against A-weighted loudness measured offline (an `OfflineAudioContext` driven
+frame by frame, each bus soloed). At 70% throttle the engine bus is about
+-38 dBA; the seeker is 4–9 dB above it, gunfire about 7 dB above, a missile
+launch about 10 dB above. Judging by ear on one pair of headphones is how the
+engine came to drown out everything else.
 
 ### 1a. Positional audio — done; use it for everything below
 
@@ -117,23 +124,21 @@ Still open from the original "done when": *an enemy crossing in front of you
 sweeps across the stereo field* needs enemies to make sound at all — that is
 1e, and it gets the panning and Doppler for free.
 
-### 1b. The cannon is a hiss gate, not a gun
+### 1b. The cannon — done
 
-`update()` sets `cannonGain.gain.value = firing ? 0.12 : <decay>` on a
-continuously running noise source. That is the sound of a valve opening, not of
-a rotary cannon. There is no per-round transient, so the rate of fire is
-inaudible and it does not match the tracers.
+`gunShot()` fires one enveloped report per volley, called from `updatePlayer`
+where the cannons fire: a crack (band-passed noise, 1.5 ms attack, 50 ms decay),
+a pitched thump, a bolt tick, and a low tail long enough to overlap the next
+round. Pitch varies ±120 cents and level ±20% per round. The continuous hiss
+layer is gone; the overlapping tails do its job. `fireDuck` pulls the engine bus
+to 0.75 while the trigger is held.
 
-Fire a short enveloped burst per round, as a dry voice on the `weapons` bus, from `spawnBullet` (or from the same
-place that decides a round is fired) — a few milliseconds of attack, a filtered
-noise body, a fast decay, with small random pitch and level variation per shot
-so it does not machine-gun identically. Keep a quieter continuous layer
-underneath for the mechanical whir. Muzzle blast should also duck the engine
-slightly (a crude version exists: `fireDuck` pulls the engine bus to 0.75
-while the trigger is held; per-round ducking replaces it).
+The rate of fire you hear is the rate the cannons actually fire, which is set by
+`fireCooldown` being reset (not decremented) once a frame: about 12 volleys a
+second at 60 fps, fewer at lower frame rates. That is a gameplay quirk, not an
+audio one; fixing it changes damage output.
 
-**Done when:** you can hear the rate of fire, and a two-round tap sounds
-different from a two-second burst.
+Enemy guns are still silent.
 
 ### 1c. Bullet impacts
 
@@ -151,21 +156,23 @@ dirt is worth adding at the same time as the sound.
 **Done when:** hitting an enemy at 800 m sounds different from hitting one at
 100 m, and different again from hosing the sea.
 
-### 1d. Missiles are silent in flight
+### 1d. Missile motors — done
 
-`missileLaunch()` is a one-shot whoosh of about 1.5 s. After that the missile
-crosses several kilometres in total silence, which is the single most noticeable
-gap in the mix.
+`missileLaunch(missile)` plays an ignition thump and flame burst, then a looping
+motor (pink-noise roar with a random sputter, plus hiss) on a `_voice` that
+follows the missile. A voice can carry a `release()`; `updateListener` calls it
+the first frame the followed pool entry is inactive, which fades the motor out
+(40 ms time constant) and stops its sources. `silence()` releases every motor too, because the
+pool stops updating when the game ends. Player and enemy missiles both have
+motors, so one chasing you is audible.
 
-Attach a looping motor to each active missile in the pool: rocket noise plus a
-low sustain, cutting to a tail when the motor burns out. `_voice(..., follow)`
-already tracks a pool entry and stops following when it is released; what it
-lacks is a lifetime tied to the entry rather than a fixed duration, so a looping
-voice needs a way to be ended from `updateMissiles`. A missile passing
-close should be loud and brief.
+Measured from the chase camera with the missile pulling away at 410 m/s: about
+-28 dBA in the first half second, -35 by one second, -43 at two, -48 at four,
+against the engine at about -38 dBA at 70% throttle.
 
-**Done when:** you can hear a missile go past you, and hear one chasing you from
-behind.
+There is no motor burnout in the simulation (`motor` ramps to 1 and stays), so
+the sound runs for the missile's whole life; if burnout is ever modelled, cut
+the roar to a tail there.
 
 ### 1e. Enemy aircraft make no sound
 
@@ -200,8 +207,8 @@ worth doing.
 Volume is `-`/`+` (tenths, applied squared), mute is `M`, both shown briefly on
 the HUD and persisted in `localStorage`.
 
-Still open: the bus levels are all 1.0, which reproduces the old mix. Balance
-them once 1b–1e add enough voices that the groups compete.
+The engine bus sits at 0.7, the others at 1.0; see the measured levels at the
+top of this section before moving them.
 
 ---
 

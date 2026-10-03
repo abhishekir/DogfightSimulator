@@ -19,7 +19,7 @@ canvas{display:block}
 #hud{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10}
 #hud-canvas{width:100%;height:100%}
 #game-over{position:fixed;inset:0;background:rgba(0,0,0,0.85);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:50}
-#game-over h1{font-size:52px;color:#f44;text-shadow:0 0 30px #f00,0 0 60px #800;margin-bottom:20px;letter-spacing:6px}
+#game-over h1{font-size:clamp(26px,7vw,52px);text-align:center;color:#f44;text-shadow:0 0 30px #f00,0 0 60px #800;margin-bottom:20px;letter-spacing:6px}
 #game-over p{color:#ccc;font-size:22px;margin-bottom:30px}
 #game-over .restart{color:#0f0;font-size:16px;cursor:pointer;pointer-events:all;animation:pulse 1.8s ease-in-out infinite;letter-spacing:3px}
 #pause{background:rgba(0,0,0,0.75);display:none}
@@ -640,6 +640,11 @@ window.addEventListener('keydown', e => {
   if (e.code === 'Equal' || e.code === 'NumpadAdd') { snd.setVolume(snd.volume + .1); audioToastUntil = performance.now() + 1500; }
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
+// Losing focus swallows key-up events, which would leave the gun firing and the jet rolling
+// on return; and a hidden tab stops the frame loop but not the audio. So drop held keys on
+// blur, and pause when the page is hidden.
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+document.addEventListener('visibilitychange', () => { if (document.hidden && !paused) togglePause(); });
 
 function togglePause() {
   if (!gameStarted || gameOver) return;

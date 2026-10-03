@@ -340,3 +340,13 @@ would be worth a lot and avoids most of the dynamic-shadowing problem.
   `k * dt` exceeds 2, which one long frame is enough to trigger. Every instance
   now goes through `smoothT`; use it for anything new.
 - There is no settings screen. Volume and mute are keys only (see 1f).
+- **The particle pool runs close to empty in heavy fights.** A soak (a bot
+  flying 15 game-minutes, auto-restarting) took `freeParticles` down to 7 of
+  `MAX_PARTICLES` 600; the same bot on the code before the rotary cannon got to
+  21, so the pressure predates it. At the low point about 290 were missile and
+  exhaust smoke trails and about 250 short-lived fire. When the pool is empty
+  `spawnP` drops the effect silently, so an explosion can come out thin.
+- **On a machine too slow for 20 fps, game time runs slow but audio does not.**
+  `dt` is clamped to 0.05 s, so below 20 fps the simulation slows down while the
+  audio clock keeps real time: the cannon's sound reaches full rate in 0.3 s of
+  real time while the barrels in the game take longer.

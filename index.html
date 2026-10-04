@@ -234,41 +234,60 @@ class SoundEngine {
     return buf;
   }
   // The cannon is baked rather than built from nodes: at 100 rounds a second, a node graph
-  // per round would be thousands of nodes a burst. Each round is a crack, a body and a
-  // thump, varied a little and written into a buffer at its firing time. The start buffer
-  // holds the 0.3 s spin-up, the rate ramping up as the barrels do; the loop buffer is one
-  // second at full rate, its tails wrapped around so it repeats without a seam. At this
-  // rate the rounds fuse into the tearing 100 Hz buzz a rotary cannon is known for.
+  // per round would be thousands of nodes a burst. The start buffer holds the 0.3 s spin-up,
+  // the rate ramping up as the barrels do; the loop buffer is one second at full rate, its
+  // tails wrapped around so it repeats without a seam.
+  //
+  // Each round is noise, not a tone: a bright crack, a mid-range blast and a metallic tick
+  // from the feed, with only a short noise punch underneath. An earlier version gave each
+  // round a pitched sine thump; at 100 identical thumps a second they fused into a 100 Hz
+  // tone with 80% of the energy below 250 Hz, which sounded like a fart rather than a gun.
+  // Noise rounds keep the rate audible as a ripping texture without making a pitch, and
+  // the per-round jitter in timing and colour keeps the waveform from repeating.
   _bakeRounds(len, times, wrap) {
-    const sr = this.ctx.sampleRate, n = Math.floor(len * sr), d = new Float32Array(n), rl = Math.floor(0.06 * sr);
+    const sr = this.ctx.sampleRate, n = Math.floor(len * sr), d = new Float32Array(n), rl = Math.floor(0.04 * sr);
+    const B = (type, f, q) => SoundEngine._biquad(type, f, q, sr);
     for (const t0 of times) {
-      const lvl = 0.85 + Math.random() * 0.3, crack = SoundEngine._biquad('bandpass', 1700 * (0.9 + Math.random() * 0.2), 0.9, sr);
-      const body = SoundEngine._biquad('lowpass', 700, 0.7, sr), start = Math.floor(t0 * sr);
-      let ph = 0;
+      const lvl = 0.8 + Math.random() * 0.4, start = Math.floor(t0 * sr);
+      const crackHP = B('highpass', 500, 0.7), crackBP = B('bandpass', 1800 + Math.random() * 1400, 0.7);
+      const blast = B('bandpass', 700 + Math.random() * 400, 0.6), tick = B('highpass', 4000, 0.7), punch = B('lowpass', 350, 0.7);
       for (let i = 0; i < rl; i++) {
-        const t = i / sr, w = Math.random() * 2 - 1;
-        ph += 2 * Math.PI * (55 + 85 * Math.exp(-t / 0.01)) / sr;
-        const v = lvl * (crack(w) * 2.2 * Math.exp(-t / 0.004) * Math.min(1, t / 0.0003)
-                       + body(w) * 0.6 * Math.exp(-t / 0.012) + Math.sin(ph) * 0.5 * Math.exp(-t / 0.015));
+        const t = i / sr, w = Math.random() * 2 - 1, atk = Math.min(1, t / 0.0002);
+        const v = lvl * atk * (crackBP(crackHP(w)) * 3.0 * Math.exp(-t / 0.003) + blast(w) * 1.2 * Math.exp(-t / 0.007)
+                             + tick(w) * 0.5 * Math.exp(-t / 0.0012) + punch(w) * 1.1 * Math.exp(-t / 0.004));
         const at = start + i;
         if (at < n) d[at] += v; else if (wrap) d[at % n] += v; else break;
       }
     }
-    const buf = this.ctx.createBuffer(1, n, sr); buf.copyToChannel(d, 0); return buf;
+    return d;
+  }
+  // The drive's whine, rising with barrel speed. `f(t)` is its frequency over the buffer.
+  static _addWhine(d, sr, f, amp, fadeAt) {
+    let ph = 0;
+    for (let i = 0; i < d.length; i++) {
+      const t = i / sr; ph += 2 * Math.PI * f(t) / sr;
+      const fade = fadeAt ? Math.max(0, Math.min(1, (fadeAt - t) / 0.01)) : 1;
+      d[i] += amp * fade * (Math.sin(ph) + 0.3 * Math.sin(2 * ph));
+    }
   }
   _bakeGun() {
+    const sr = this.ctx.sampleRate, toBuf = d => { const b = this.ctx.createBuffer(1, d.length, sr); b.copyToChannel(d, 0); return b; };
     // Rounds fire when the integral of the rate (ramping linearly to GUN_RATE over the
     // spin-up) crosses each whole number, the same rule the game uses to spawn them.
     const start = [];
     for (let k = 1; k <= GUN_RATE * GUN_SPINUP / 2; k++) start.push(Math.sqrt(2 * k * GUN_SPINUP / GUN_RATE));
-    this.gunStartBuf = this._bakeRounds(GUN_SPINUP + 0.06, start, false);
-    this.gunLoopBuf = this._bakeRounds(1, Array.from({ length: GUN_RATE }, (_, i) => (i + (Math.random() - 0.5) * 0.08) / GUN_RATE), true);
+    const s = this._bakeRounds(GUN_SPINUP + 0.04, start, false);
+    SoundEngine._addWhine(s, sr, t => 300 + 850 * Math.min(t / GUN_SPINUP, 1), 0.06, GUN_SPINUP);
+    // 1150 Hz is a whole number of cycles in the one-second loop, so the whine loops cleanly.
+    const l = this._bakeRounds(1, Array.from({ length: GUN_RATE }, (_, i) => (i + (Math.random() - 0.5) * 0.12) / GUN_RATE), true);
+    SoundEngine._addWhine(l, sr, () => 1150, 0.06, 0);
+    this.gunStartBuf = toBuf(s); this.gunLoopBuf = toBuf(l);
   }
   // Trigger down: play from wherever the barrels are in their spin-up (`spin` 0-1, since a
   // gun still winding down restarts faster), then the loop at full rate.
   _gunStart(spin) {
     const ctx = this.ctx, t = ctx.currentTime, into = GUN_SPINUP * spin;
-    const g = ctx.createGain(); g.gain.value = 0.55; g.connect(this.buses.weapons);
+    const g = ctx.createGain(); g.gain.value = 0.72; g.connect(this.buses.weapons);
     const a = ctx.createBufferSource(); a.buffer = this.gunStartBuf; a.connect(g); a.start(t, into);
     const l = ctx.createBufferSource(); l.buffer = this.gunLoopBuf; l.loop = true; l.connect(g); l.start(t + GUN_SPINUP - into);
     this._gun = { g, srcs: [a, l] };
@@ -277,10 +296,10 @@ class SoundEngine {
   _gunStop(spin) {
     const ctx = this.ctx, t = ctx.currentTime, { g, srcs } = this._gun; this._gun = null;
     g.gain.setTargetAtTime(0, t, 0.004); for (const s of srcs) s.stop(t + 0.04);
-    const tail = ctx.createBufferSource(); tail.buffer = this.brownBuffer;
-    const tlp = ctx.createBiquadFilter(); tlp.type = 'lowpass'; tlp.frequency.value = 400;
-    const tg = ctx.createGain(); tg.gain.setValueAtTime(0.5 * spin, t); tg.gain.setTargetAtTime(0, t, 0.12);
-    tail.connect(tlp); tlp.connect(tg); tg.connect(this.buses.weapons); tail.start(t, Math.random() * 4); tail.stop(t + 0.8);
+    const tail = ctx.createBufferSource(); tail.buffer = this.pinkBuffer;
+    const tbp = ctx.createBiquadFilter(); tbp.type = 'bandpass'; tbp.frequency.value = 1000; tbp.Q.value = 0.6;
+    const tg = ctx.createGain(); tg.gain.setValueAtTime(0.35 * spin, t); tg.gain.setTargetAtTime(0, t, 0.09);
+    tail.connect(tbp); tbp.connect(tg); tg.connect(this.buses.weapons); tail.start(t, Math.random() * 4); tail.stop(t + 0.6);
     const whir = ctx.createOscillator(); whir.type = 'sawtooth';
     whir.frequency.setValueAtTime(320 * spin + 40, t); whir.frequency.exponentialRampToValueAtTime(30, t + GUN_SPINDOWN);
     const wbp = ctx.createBiquadFilter(); wbp.type = 'bandpass'; wbp.frequency.value = 600; wbp.Q.value = 0.8;
@@ -340,26 +359,47 @@ class SoundEngine {
   }
   // Seeker audio for an infrared missile, which is what the game's lock models: short range,
   // a cone ahead, a lock built from the target's heat. With the seeker looking and nothing
-  // in it there is a quiet, low seek tone. A target in the seeker turns it into the growl:
-  // the seeker's chopped infrared signal played as audio, buzzing at the chopping rate,
-  // rising in pitch and strength as the signal and lock firm up. On track it becomes a
-  // steady, high-pitched tone. The AIM-9X, the current Sidewinder, still cues the pilot
-  // this way. One voice does all three, so each state glides into the next.
+  // in it there is a quiet seek tone. A target in the seeker turns it into the growl: the
+  // seeker's chopped infrared signal played as audio, rising in pitch and strength as the
+  // signal and lock firm up. On track it becomes a steady, high-pitched tone. The AIM-9X,
+  // the current Sidewinder, still cues the pilot this way.
+  //
+  // It is a sensor signal heard over a headset, not a synthesiser, and that is what keeps
+  // it from sounding like a toy. The tone is a band-limited sawtooth mixed with narrow-band
+  // noise centred on the same pitch, so it has the roughness of a real, noisy signal (the
+  // noise dominates the seek tone and growl; the tone dominates on track). It is then
+  // chopped, and finally put through the headset: band-limited to 300-3400 Hz, softly
+  // saturated, with a faint line hiss while the seeker is on. One voice does all three
+  // states, so each glides into the next.
   _setupLock() {
-    const ctx = this.ctx;
-    this.seekOsc = ctx.createOscillator(); this.seekOsc.type = 'square'; this.seekOsc.frequency.value = 250;
-    this.seekLP = ctx.createBiquadFilter(); this.seekLP.type = 'lowpass'; this.seekLP.frequency.value = 2500; this.seekLP.Q.value = 0;
-    // The chop: a low-frequency oscillator amplitude-modulating the tone, its rate wandering
-    // a little so the growl sounds organic rather than like a motor.
+    const ctx = this.ctx, filter = (type, f, q = 0.7) => { const n = ctx.createBiquadFilter(); n.type = type; n.frequency.value = f; n.Q.value = q; return n; };
+    this.seekOsc = ctx.createOscillator(); this.seekOsc.type = 'sawtooth'; this.seekOsc.frequency.value = 400;
+    this.seekToneLP = filter('lowpass', 1600);
+    this.seekToneGain = ctx.createGain(); this.seekToneGain.gain.value = 0;
+    this.seekOsc.connect(this.seekToneLP); this.seekToneLP.connect(this.seekToneGain);
+    // Narrow-band noise at the tone's pitch: the signal's roughness.
+    this.seekNoiseBP = filter('bandpass', 400, 9);
+    this.seekNoiseGain = ctx.createGain(); this.seekNoiseGain.gain.value = 0;
+    this._loop(this.noiseBuffer).connect(this.seekNoiseBP); this.seekNoiseBP.connect(this.seekNoiseGain);
+    // The chop: a low-frequency oscillator amplitude-modulating the signal, its rate
+    // wandering so the growl sounds organic rather than like a motor.
     this.seekChop = ctx.createGain(); this.seekChop.gain.value = 1;
+    this.seekToneGain.connect(this.seekChop); this.seekNoiseGain.connect(this.seekChop);
     this.seekLfo = ctx.createOscillator(); this.seekLfo.frequency.value = 45;
     this.seekDepth = ctx.createGain(); this.seekDepth.gain.value = 0;
     this.seekLfo.connect(this.seekDepth); this.seekDepth.connect(this.seekChop.gain); this.seekLfo.start();
     this._wobble(this.seekLfo.detune, 250, 0.5);
+    // The headset.
+    const hp = filter('highpass', 300), lp = filter('lowpass', 3400), drive = ctx.createWaveShaper();
+    drive.curve = this.softClip;
+    this.seekDrive = ctx.createGain(); this.seekDrive.gain.value = 1.5;
     this.seekGain = ctx.createGain(); this.seekGain.gain.value = 0;
-    this.seekOsc.connect(this.seekLP); this.seekLP.connect(this.seekChop); this.seekChop.connect(this.seekGain);
-    this.seekGain.connect(this.buses.cockpit); this.seekOsc.start();
-    this._seek = { level: 0, hz: 250, depth: 0, rate: 45 };
+    this.seekChop.connect(hp); hp.connect(lp); lp.connect(this.seekDrive); this.seekDrive.connect(drive); drive.connect(this.seekGain);
+    this.seekGain.connect(this.buses.cockpit);
+    this.seekHiss = ctx.createGain(); this.seekHiss.gain.value = 0;
+    this._loop(this.noiseBuffer).connect(filter('bandpass', 2000, 0.5)).connect(this.seekHiss); this.seekHiss.connect(this.buses.cockpit);
+    this.seekOsc.start();
+    this._seek = { level: 0, hz: 400, depth: 0, rate: 45, tone: 0, hiss: 0 };
   }
   _setupWarn() {
     this.warnOsc = this.ctx.createOscillator(); this.warnOsc.type = 'sine'; this.warnOsc.frequency.value = 1600;
@@ -396,17 +436,23 @@ class SoundEngine {
     // Seeker. Lock quality blends the target's signal with how far the lock has built.
     const sk = this._seek, target = seek > 0, locked = target && lockProg >= 1;
     const q = target ? 0.5 * seek + 0.5 * Math.min(lockProg, 1) : 0;
-    let level = 0, hz = sk.hz, depth = 0, rate = sk.rate;
-    if (locked) { level = 0.11; hz = 1300; depth = 0.04; rate = 70; }
-    else if (target) { level = 0.12 + 0.06 * q; hz = 300 + 550 * q; depth = 0.75 - 0.35 * q; rate = 38 + 30 * q; }
-    else if (seek === 0) { level = 0.08; hz = 200; depth = 0.12; rate = 30; }
+    // level, pitch, chop depth and rate, and the tone's share of tone + noise
+    let level = 0, hz = sk.hz, depth = 0, rate = sk.rate, tone = sk.tone;
+    if (locked) { level = 0.11; hz = 1350; depth = 0.05; rate = 70; tone = 0.85; }
+    else if (target) { level = 0.13 + 0.07 * q; hz = 420 + 530 * q; depth = 0.7 - 0.3 * q; rate = 38 + 30 * q; tone = 0.25 + 0.3 * q; }
+    else if (seek === 0) { level = 0.07; hz = 380; depth = 0.15; rate = 30; tone = 0.1; }
     sk.level += (level - sk.level) * smoothT(25, dt);
     sk.hz += (hz - sk.hz) * smoothT(locked ? 30 : 10, dt);
     sk.depth += (depth - sk.depth) * smoothT(12, dt);
     sk.rate += (rate - sk.rate) * smoothT(10, dt);
+    sk.tone += (tone - sk.tone) * smoothT(10, dt);
+    sk.hiss += ((seek >= 0 ? 0.012 : 0) - sk.hiss) * smoothT(20, dt);
     this.seekGain.gain.value = sk.level; this.seekOsc.frequency.value = sk.hz;
-    this.seekLP.frequency.value = Math.min(sk.hz * 3, 4000);
+    this.seekToneLP.frequency.value = Math.min(sk.hz * 2.5, 3400); this.seekNoiseBP.frequency.value = sk.hz;
+    // Noise in a narrow band carries far less energy than a full tone, hence the larger gain.
+    this.seekToneGain.gain.value = sk.tone; this.seekNoiseGain.gain.value = (1 - sk.tone) * 6;
     this.seekDepth.gain.value = sk.depth; this.seekChop.gain.value = 1 - sk.depth; this.seekLfo.frequency.value = sk.rate;
+    this.seekHiss.gain.value = sk.hiss;
     // Threat warning - pulsing tone
     this.warnGain.gain.value = threat ? (Math.sin(performance.now() * 0.025) > 0 ? 0.05 : 0) : 0;
   }
@@ -488,8 +534,8 @@ class SoundEngine {
   silence() {
     if (!this.ctx) return;
     for (const g of [this.roarGain, this.rumbleGain, this.whineGain, this.abGain, this.crackleGain,
-                     this.windGain, this.seekGain, this.warnGain]) g.gain.value = 0;
-    this._seek.level = 0;
+                     this.windGain, this.seekGain, this.seekHiss, this.warnGain]) g.gain.value = 0;
+    this._seek.level = 0; this._seek.hiss = 0;
     if (this._gun) this._gunStop(0);
     // Missile motors follow pool entries that stop updating when the game ends.
     for (const v of this.voices) if (v.follow && v.release) { v.follow = null; v.release(); }

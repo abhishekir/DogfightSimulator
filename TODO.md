@@ -1,9 +1,19 @@
 # TODO
 
-Next pieces of work on Sky Strike, written for whoever picks this up — human or
-agent. Each item says what is there now, what is missing, and what done looks
-like. Read "Orientation" first; a couple of the conventions are easy to break by
+Open work on Sky Strike, written for whoever picks this up — human or agent.
+Read "Orientation" first; a couple of the conventions are easy to break by
 accident.
+
+The tasks are sorted by priority, highest first. Each says what is there now,
+what is missing, and what done looks like. How finished systems work is under
+"Reference" at the end, so a task can point there instead of repeating it.
+
+| Priority | Meaning |
+|---|---|
+| **P1** | Something the player sees or hears is broken or degrading now. |
+| **P2** | A gap in gameplay or readability, cheap relative to what it buys. |
+| **P3** | A large feature. Worth doing; plan it first. |
+| **P4** | Investigation, polish, or a decision to make. |
 
 ---
 
@@ -39,6 +49,9 @@ accident.
   shadow and its reflection describing the same cloud.
 - `USE_VOLUMETRIC_CLOUDS = false` swaps the raymarched layer back to the old
   billboard field. It exists for machines where the march is too expensive.
+- **Smooth with `smoothT(k, dt)`, never `lerp(a, b, k * dt)`.** The latter is
+  frame-rate dependent and diverges outright once `k * dt` exceeds 2, which one
+  long frame is enough to trigger. Every instance in the code now uses `smoothT`.
 
 Line numbers drift; search by symbol name.
 
@@ -61,198 +74,152 @@ diff. What worked during the rendering overhaul:
 - For simulation changes, a soak harness (fixed timestep, many substeps per
   rendered frame, auto-restart on death, per-frame non-finite watchdog) covers
   minutes of game time in minutes of wall clock and catches NaN, pool leaks and
-  streaming stalls.
+  streaming stalls. With a bot flying it (lead pursuit, guns and missiles,
+  forced crashes, random pauses) 40 game-minutes take under three minutes.
+- For audio, render offline: an `OfflineAudioContext` driven frame by frame
+  through `snd.update()`, each bus soloed, measured A-weighted. Ears and
+  headphones differ; the numbers in "Reference: the sound engine" do not.
 
 ---
 
-## 1. Audio
+## Tasks
 
-**The weakest system in the game, and the one with the most headroom.** The
-synthesis is decent; the architecture is the problem.
+### 1. Particle pool runs dry in heavy fights — P1
 
-`class SoundEngine` is entirely procedural Web Audio — no sample files, which is
-worth preserving. It has a four-layer player engine (noise rumble, turbine sine,
-compressor harmonic, afterburner noise), wind, a cannon hiss, a lock tone, a
-threat warning, plus one-shot `explosion(dist)`, `missileLaunch()` and
-`hitMarker()`.
+**What happens.** `spawnP` takes from a fixed pool of `MAX_PARTICLES` (600) and
+drops the request silently when it is empty, so in a busy fight explosions come
+out thin and hit sparks go missing. A soak (a bot flying 15 game-minutes with
+guns and missiles, auto-restarting) took `freeParticles` down to 7. The same bot
+on the code before the rotary cannon reached 21, so the pressure predates the
+cannon; the cannon's muzzle flash adds about a dozen live particles. At the low
+point roughly 290 were missile smoke trails and 250 short-lived fire.
 
-What is actually wrong:
+**Why the reserve does not help.** `PARTICLE_EFFECT_RESERVE` (160) holds
+particles back for one-off effects, but it only applies to requests flagged
+`isTrail`, and the only emitter flagged is the missile trail
+(`emitMissileTrail`). Every other continuous emitter — both jets' exhaust,
+player damage smoke, wing vapour, burning debris, muzzle flash — draws from the
+reserve exactly as an explosion does.
 
-### 1a. There is no positional audio at all
+**What to do.** Measure first: count dropped requests by emitter in `spawnP`
+and run a soak. Then likely some of: flag the continuous emitters as trails (or
+give them their own budget) so the reserve protects one-off effects; when the
+pool is empty, evict the oldest trail particle rather than drop an effect;
+raise `MAX_PARTICLES` if the GPU cost of the batches allows (it is unmeasured,
+see task 2).
 
-Every node connects straight to `this.master`. There is no `AudioListener`, no
-`PannerNode`, no stereo placement, no distance attenuation and no Doppler.
-`explosion(dist)` is the sole exception and it hand-rolls both — it delays by
-`dist / 343` and attenuates by distance, which is exactly the right instinct and
-should be generalised rather than repeated.
+**Done when:** a 15-minute soak drops no explosion, impact or spark particles,
+and the count of dropped requests is logged per emitter. Do this before task 5
+or task 8; damage effects add emitters, and a damaged dogfight is exactly when
+the pool is closest to empty.
 
-This is the foundation: fix it first and every other item below gets most of the
-way there for free.
+### 2. GPU cost is unmeasured — P2 (needs real hardware)
 
-- Set up `ctx.listener` from the camera each frame (position and orientation).
-- Give every world-space sound a `PannerNode` (`panningModel: 'HRTF'`,
-  `distanceModel: 'inverse'`, a `refDistance` tuned to the scale of the world —
-  the player's airframe is about 48 m nose to tail, so world units are metres).
-- Keep cockpit sounds (lock tone, threat warning, the player's own engine) on
-  the dry master. They are heard through the airframe, not across the sky.
-- Doppler: Web Audio removed the built-in implementation, so drive
-  `detune`/`playbackRate` from closing speed yourself. A jet passing at 450 kts
-  is a dramatic shift and it is most of what sells a merge.
+Every performance figure in the commit history comes from a software
+rasteriser, which does not predict GPU cost for an ALU-heavy raymarch. The
+volumetric cloud pass measured around 6% of frame time under SwiftShader; what
+it costs on real hardware is unknown. If it is heavy, `USE_VOLUMETRIC_CLOUDS =
+false` is the fallback. This cannot be done in a headless container.
 
-**Done when:** a missile launched to your left is heard on your left, an
-explosion two kilometres away is late and quiet, and an enemy crossing in front
-of you sweeps across the stereo field.
+**Done when:** frame time, and the share of it per pass, is recorded on at least
+one integrated and one discrete GPU, and a default for `USE_VOLUMETRIC_CLOUDS`
+is chosen from it.
 
-### 1b. The cannon is a hiss gate, not a gun
+### 3. Enemy aircraft make no sound — P2
 
-`update()` sets `cannonGain.gain.value = firing ? 0.12 : <decay>` on a
-continuously running noise source. That is the sound of a valve opening, not of
-a rotary cannon. There is no per-round transient, so the rate of fire is
-inaudible and it does not match the tracers.
+Only the player's engine is audible, so a merge has no audio. Give each entry in
+`enemies` a cheap engine voice through `_voice(..., follow)` (see "Reference:
+the sound engine") — far fewer layers than the player's, since it will usually
+be distant and heavily attenuated — with distance culling so eight of them do
+not cost eight full engine stacks. The panning and Doppler come free. Put them
+on the `world` bus, and once they are there, duck the world bus briefly under
+close blasts (today only the engine bus is ducked, because the world bus held
+nothing but explosions).
 
-Fire a short enveloped burst per round from `spawnBullet` (or from the same
-place that decides a round is fired) — a few milliseconds of attack, a filtered
-noise body, a fast decay, with small random pitch and level variation per shot
-so it does not machine-gun identically. Keep a quieter continuous layer
-underneath for the mechanical whir. Muzzle blast should also duck the engine
-slightly.
+**Done when:** you hear an enemy before the radar warning, a head-on pass sweeps
+across the stereo field with a Doppler drop, and eight enemies cost less than
+the player's engine.
 
-**Done when:** you can hear the rate of fire, and a two-round tap sounds
-different from a two-second burst.
+### 4. Hits and enemy gunfire make no physical sound — P2
 
-### 1c. Bullet impacts
+`hitMarker()` is a UI confirmation tone (limited to one per 80 ms) and should
+stay one, but there is no *physical* impact sound. Rounds striking an airframe
+should sound like metal being hit — a bright transient, a short metallic ring —
+as a `_voice` at the impact point. Hits on terrain and water want their own
+variants, dirt thud and water slap; a round striking the ground currently
+produces nothing at all, visual or audio (`updateBullets` just deactivates it
+below `getGroundHeight`), so add a dirt puff or splash at the same time. Land
+versus water is one comparison against `WATER_LEVEL`. Enemy guns are silent
+too; a positional burst per enemy volley would tell you you are being shot at.
 
-`hitMarker()` is a 1200 Hz sine for 60 ms. That is a UI confirmation tone and it
-should stay as one — but there is currently no *physical* impact sound at all.
-Rounds striking an airframe should sound like metal being hit: a bright
-transient, a short metallic ring, positioned at the impact point and attenuated
-by distance.
-
-Hits on terrain and water want their own variants — dirt thud, water slap. Note
-that a round striking the ground currently produces *nothing at all*, visual or
-audio: `updateBullets` just deactivates it below `getGroundHeight`. Land versus
-water is one comparison against `WATER_LEVEL` away, and a splash or a puff of
-dirt is worth adding at the same time as the sound.
+At 100 rounds a second, hit sounds need the same treatment as the cannon:
+bake or pool them, and rate-limit per target.
 
 **Done when:** hitting an enemy at 800 m sounds different from hitting one at
-100 m, and different again from hosing the sea.
+100 m, and different again from hosing the sea; you hear an enemy firing at
+you.
 
-### 1d. Missiles are silent in flight
+### 5. Enemy damage you can read at range — P2
 
-`missileLaunch()` is a one-shot whoosh of about 1.5 s. After that the missile
-crosses several kilometres in total silence, which is the single most noticeable
-gap in the mix.
+An enemy carries no visible damage state: you cannot tell one that is about to
+die from a fresh one. Smoke from a damaged enemy, thickening as HP falls, would
+make a wounded bandit identifiable at range. The player's single 20 HP
+threshold for tail flame should become graded at the same time. Depends on
+task 1.
 
-Attach a looping motor to each active missile in the pool: rocket noise plus a
-low sustain, panned and attenuated from its position, pitch-shifted by closing
-speed, cutting to a tail when the motor burns out. Tie the node's lifetime to
-the existing pool entry so it is released with the missile. A missile passing
-close should be loud and brief.
+**Done when:** at 1 km you can tell a nearly dead enemy from a fresh one.
 
-**Done when:** you can hear a missile go past you, and hear one chasing you from
-behind.
+### 6. Enemies leave no contrails — P2
 
-### 1e. Enemy aircraft make no sound
+`updateContrails` draws one contrail, the player's, from the fuselage origin.
+At altitude a contrail is how you spot a bandit before the radar does, so
+giving enemies contrails is a gameplay benefit as much as a visual one. Vary
+persistence with altitude rather than the hard 300 m cut while doing it.
 
-Only the player's engine is audible. Enemies are silent, so a merge has no
-audio. Give each entry in `enemies` a cheap engine voice — far fewer layers than
-the player's, since it will usually be distant and heavily attenuated — with
-distance culling so eight of them do not cost eight full engine stacks. The
-pass-by Doppler from 1a is what makes this worth doing.
+**Done when:** an enemy above 3,000 m is visible by its contrail before it is
+visible as an aircraft.
 
-**Done when:** you hear an enemy before the radar warning, and a head-on pass
-sounds like one.
-
-### 1f. Mix and headroom
-
-Master gain is a flat 0.45 with no limiting. Once 1a–1e are in, several dozen
-voices can be live at once and it will clip. Add a `DynamicsCompressorNode` on
-the master as a safety limiter, put the sound groups on submix buses (engines,
-weapons, world, cockpit) so they can be balanced independently, and duck the
-world bus briefly under explosions and gunfire.
-
-Worth adding at the same time: a volume control and a mute key. There is
-currently no way to turn the game down.
-
----
-
-## 2. Wingtip vortices, and contrails that respond to flight
-
-Check what is there before starting — more exists than you would guess from
-playing it.
-
-**Contrails:** `updateContrails` maintains a single polyline of up to 120 points
-trailing the player, gated on altitude above 300 m, with an alpha ramp along its
-length. One line, from the fuselage origin, player only.
-
-**Wingtip vapour:** already implemented, in `updatePlayer` under the comment
-`// Wing vapor`. Above 3 G it spawns pale blue-white smoke particles at both
-wingtips. It works, but it is a puff emitter rather than a vortex.
-
-What is missing:
-
-- Emit contrails from each wingtip rather than the centreline, so a roll
-  visibly twists the pair.
-- Make the vapour read as a vortex rather than a cloud of dots: a ribbon or
-  tapered core with a lifetime, instead of independent particles.
-- Scale vapour with G rather than switching on at a hard threshold of 3, and
-  vary contrail persistence with altitude rather than a hard 300 m cut.
-- The wingtip positions are hardcoded as `±12 * 1.8` — the wing semi-span times
-  the model scale. Derive them from the wing stations so they survive the next
-  airframe change.
-- Give enemies contrails and vapour. At altitude a contrail is how you spot a
-  bandit before the radar does, so this is a gameplay benefit as much as a
-  visual one.
-
-## 3. Battle damage
-
-Partly there. The player streams orange flame particles from the tail below 20
-HP, and a round striking an enemy throws a burst of sparks at the impact point.
-Beyond that both go from pristine to exploding with nothing in between, and an
-enemy carries no visible damage state at all — you cannot tell one that is about
-to die from a fresh one, which costs readability as well as looks.
-
-- **Surface damage.** Scorch and soot around hit locations. The airframe
-  materials already carry procedurally generated panel normal and roughness maps
-  and the lofts carry arc-length UVs, so a damage mask blended into those maps
-  fits naturally and needs no new texture assets.
-- **Enemy damage states.** Smoke from a damaged enemy, thickening as HP falls,
-  so a wounded bandit is identifiable at range. The player's single threshold at
-  20 HP should become graded at the same time.
-- **Structural loss.** Pieces departing on heavy hits — the debris pool already
-  exists — and a flame from an engine that has been killed.
-
-Reuse the particle pool rather than adding another, and respect the reserve and
-budget constants it already carries (`MAX_PARTICLES`, `PARTICLE_EFFECT_RESERVE`);
-a damaged dogfight is exactly when it is closest to exhaustion.
-
-## 4. Cockpit view
+### 7. Cockpit view — P3
 
 There is one chase camera (`camOff`, `camLookOff`) and nothing else. A cockpit
 or virtual-cockpit view would change how the game reads more than any other
 single addition, and the canopy, coaming and instrument shroud geometry are
-already modelled.
-
-Note two things before starting:
+already modelled. Before starting:
 
 - The canopy is deliberately opaque (`canopyMat`) so the chase camera never
   sorts through it. A cockpit view needs it genuinely transparent, which means
   dealing with the sort order that decision was avoiding.
 - The HUD is drawn to a 2D canvas overlay. A cockpit view wants it projected
   onto a combining glass in world space instead, or it will look pasted on.
+- A view toggle needs the camera smoothing to stay frame-rate independent; use
+  `smoothT`, never `lerp(a, b, k * dt)`.
+- The listener follows the camera, so the player's own engine — dry, heard from
+  the chase position — wants a muffled, interior variant in the cockpit.
 
-A view toggle also needs the camera smoothing to stay frame-rate independent —
-see `smoothT`, and the note in item 5 of "Known gaps".
+**Done when:** a key toggles views, the canopy is transparent from inside
+without sorting artefacts, and the HUD sits on the combiner.
 
-## 5. Time of day
+### 8. Battle damage on the airframe — P3
+
+Beyond task 5's smoke, both the player and enemies go from pristine to
+exploding with nothing in between.
+
+- **Surface damage.** Scorch and soot around hit locations. The airframe
+  materials already carry procedurally generated panel normal and roughness maps
+  and the lofts carry arc-length UVs, so a damage mask blended into those maps
+  fits naturally and needs no new texture assets.
+- **Structural loss.** Pieces departing on heavy hits — the debris pool already
+  exists — and a flame from an engine that has been killed.
+
+Reuse the particle pool rather than adding another, and do task 1 first.
+
+### 9. Time of day — P3
 
 The sun direction is a module-scope constant, and a good deal of tuning assumes
 it: `uCloudShadowOffset` is computed once from it at load, the terrain's
 sun-visibility is baked per vertex on the assumption the sun never moves, and
 the water's specular normalisation and the sky's turbidity/Rayleigh curve were
-both tuned at its current elevation of about 21 degrees.
-
-So this is a bigger job than it looks, and the order matters:
+both tuned at its current elevation of about 21 degrees. So the order matters:
 
 1. Make the sun a variable and find everything that assumes otherwise (start by
    grepping `sunDirection`).
@@ -267,36 +234,138 @@ So this is a bigger job than it looks, and the order matters:
 Even a fixed choice of three or four presets — dawn, noon, golden hour, dusk —
 would be worth a lot and avoids most of the dynamic-shadowing problem.
 
----
+### 10. Wingtip vortices and contrail polish — P3
 
-## Known gaps
+**Wingtip vapour** exists in `updatePlayer` under `// Wing vapor`: above 3 G it
+spawns pale smoke particles at both wingtips. It is a puff emitter, not a
+vortex. Remaining (enemy contrails are task 6):
 
-- **GPU performance is unmeasured.** Every performance figure quoted in the
-  commit history comes from a software rasteriser, which does not predict GPU
-  cost for an ALU-heavy raymarch. The volumetric cloud pass measured around 6%
-  of frame time under SwiftShader; what it costs on real hardware is unknown. If
-  it is heavy, `USE_VOLUMETRIC_CLOUDS = false` is the fallback.
+- Emit contrails from each wingtip rather than the centreline, so a roll
+  visibly twists the pair.
+- Make the vapour read as a vortex — a ribbon or tapered core with a lifetime —
+  and scale it with G rather than switching on at 3.
+- The wingtip positions are hardcoded as `±12 * 1.8` (semi-span times model
+  scale). Derive them from the wing stations so they survive the next airframe
+  change.
+
+### 11. The flight model allows 30+ G — P4 (decision)
+
+The HUD's G readout regularly shows 30–37 G in hard turns: steady pitch rate
+reaches about 1.15 rad/s, which at 300 m/s is about 35 G. That is the arcade
+handling working as built, not a bug, but it sits oddly next to realistic
+airspeed, cannon and missile cues. Decide whether to cap turn rate by speed (a
+real fighter manages about 9 G) or to leave it and stop showing the number.
+
+### 12. Settings screen — P4
+
+There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
+(`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source.
+
+### 13. Cloud and water quality — P4
+
 - The cloud march is half resolution (`CLOUD_SCALE = 0.5`) and resolved with a
-  four-tap rotated-grid blur. That is a quality/cost trade, not a finished
-  answer — temporal reprojection would do better if anyone wants to spend the
-  complexity.
+  four-tap rotated-grid blur. Temporal reprojection would do better if anyone
+  wants to spend the complexity.
 - Water reflections are a half-resolution planar pass and only cover what the
   mirrored camera can see; everything off-screen falls back to the analytic sky
   plus the analytic cloud tint. Look for the seam at grazing angles.
-- Terrain streaming is budgeted at about 4 ms per frame. Under the soak harness
-  the build queue reaches several hundred chunks because the aircraft outruns
-  it; at normal frame rates it drains. If you make the aircraft faster, re-check
-  that.
-- **`lerp(a, b, k * dt)` is frame-rate dependent** and diverges outright once
-  `k * dt` exceeds 2, which one long frame is enough to trigger. Two instances
-  were fixed with the `smoothT` helper; two more (in `smoothLookAt` and
-  `updateMissiles`) are clamped with `Math.min(..., 1)`, which is safe from
-  divergence but still frame-rate dependent. Use `smoothT` for anything new.
-- There is no volume control, no mute, and no settings of any kind.
-- **The HUD labels airspeed in knots but prints metres per second.** `drawHUD`
-  uses `player.velocity.length()` directly for the `IAS` readout while deriving
-  `MACH` from the same figure as `spd / 343` — which is correct for m/s, so the
-  Mach number is right and the knots label is not. At full throttle it reads
-  450 kt where it means roughly 875. Converting (`* 1.94384`) is the realistic
-  fix and keeps Mach consistent, but it changes a number the player reads, so
-  it is a deliberate call rather than a silent correction.
+
+### 14. Small things to keep in mind — P4
+
+- **Below 20 fps, game time runs slow but audio does not.** `dt` is clamped to
+  0.05 s, so the simulation slows while the audio clock keeps real time; the
+  cannon's sound reaches full rate in 0.3 s of real time while the barrels in
+  the game take longer.
+- **Terrain streaming** is budgeted at about 4 ms per frame. Under the soak
+  harness the build queue reaches several hundred chunks because the aircraft
+  outruns it; at normal frame rates it drains. If you make the aircraft faster,
+  re-check that.
+- **Missile motors never burn out** (`motor` ramps to 1 and stays), so the
+  motor sound runs for the missile's whole life. If burnout is modelled, cut
+  the roar to a tail there.
+
+---
+
+## Reference: the sound engine
+
+`class SoundEngine` is entirely procedural Web Audio — no sample files, which is
+worth preserving.
+
+**Measure levels before changing them.** Every level in the class was set
+against A-weighted loudness measured offline. At 70% throttle the engine bus is
+about -38 dBA. The seek tone is 2 dB below it; the growl 5–10 dB above, rising
+with lock quality; the track tone 11 dB above; a sustained gun burst about
+12 dB above; a missile launch about 11 dB above. An enemy blowing up 300 m away
+is about 5 dB above in its first half second, the player's crash 15 dB above,
+peaking into the limiter. Judging by ear on one pair of headphones is how the
+engine once came to drown out everything else.
+
+**Mix.** Four buses (`this.buses.engines`, `.weapons`, `.world`, `.cockpit`)
+into the 0.45 mix level, then a limiter (`DynamicsCompressorNode`, -3 dB, 20:1,
+3 ms attack), then a trim, then the player's volume. The trim exists because
+Chromium's compressor applies its own makeup gain — measured at +1.71 dB below
+threshold at these settings — and the limiter should only turn peaks down. If
+you change the threshold or ratio, re-measure it and update
+`LIMITER_MAKEUP_TRIM`. The engine bus sits at 0.7, the others at 1.0. Nearby
+blasts dip the engine bus on arrival (`blastDuck`) and held fire pulls it to
+0.75 (`fireDuck`). Volume is `-`/`+` (tenths, applied squared), mute is `M`,
+both persisted in `localStorage`. Hiding the tab pauses the game, which
+suspends the audio clock.
+
+**Positional audio.** `snd.updateListener(camera, dt)` runs once per frame after
+the camera moves. A world-space sound is built in three steps:
+
+1. `const v = this._voice(pos, bus, refDistance, follow)` — an HRTF
+   `PannerNode` with the inverse distance model, behind a lowpass that stands in
+   for air absorption (`22000 / (1 + d / 600)` Hz). `v.delay` is the travel
+   time from `pos`; start the sources at `currentTime + v.delay` and connect
+   them to `v.input`.
+2. Push the sources' `detune` params (oscillator or `BiquadFilter`) onto
+   `v.detune`. Doppler is computed from closing speed every frame and written to
+   them in cents, capped at an octave either way, with both speeds held below
+   0.6 c (the formula breaks at Mach 1, and at full throttle the player is
+   doing about Mach 1.3).
+3. `this._track(v, duration)` registers the voice; it is re-placed every frame
+   and disconnected once finished. A looping voice passes `Infinity` and sets
+   `v.release`, which `updateListener` calls the first frame its `follow` pool
+   entry is inactive (pool entries are reused, so it never follows past that).
+
+`refDistance` is the distance inside which the sound plays at full level, so it
+doubles as the source-loudness knob. The player's engine, wind, cannon and the
+cockpit tones stay dry. Measured: a source 90° left is 4.9 dB louder in the
+left channel (HRTF, not hard panning); onsets land within about 12 ms of
+`d / 343`; a blast at 2 km is 21 dB below one at 100 m.
+
+**Engine.** Turbulent pink-noise roar, brown-noise rumble, a turbine whine of
+two partials beating a few cents apart, and reheat crackle, every layer
+modulated by `_wobble` (a looping slow random curve fed into an AudioParam) so
+nothing sits still. A steady filtered noise plus a clean sine is what a fan
+sounds like.
+
+**Cannon.** Modelled on the M61: `GUN_RATE` 100 rounds a second, `GUN_SPINUP`
+0.3 s, `GUN_SPINDOWN` 0.5 s, fired from an accumulator so rate and spacing do
+not depend on the frame rate. Every third round is a tracer; `GUN_DAMAGE` 2.5
+keeps damage per second where the old 12-volley gun had it. The sound is baked
+by `_bakeRounds` into a spin-up buffer and a seamless one-second loop, because a
+node graph per round would be thousands of nodes a burst. Each round is noise —
+crack, mid blast, feed tick, a short noise punch — never a tone: an earlier
+version gave each round a pitched sine thump, and 100 identical thumps a second
+fused into a 100 Hz tone with 80% of its energy under 250 Hz, which sounded like
+a fart. Measured now: 4% under 250 Hz, no waveform periodicity at 10 ms, but
+the envelope still repeats every 10 ms, so the rate is heard as rhythm.
+
+**Seeker.** Infrared-missile cues: a quiet seek tone with nothing in the
+seeker, a chopped growl rising with lock quality (the target's alignment and
+range blended with lock progress), a steady high tone on track. It is a
+band-limited sawtooth mixed with narrow-band noise at the same pitch, chopped,
+then put through a headset chain (300–3400 Hz, soft saturation, faint line
+hiss). A square wave with nothing else, which an earlier version used, measured
+spectral flatness 0 and sounded like a toy.
+
+**Missiles and explosions.** `missileLaunch(missile)` plays an ignition and a
+looping motor that follows the missile, released with its pool entry; player
+and enemy missiles both have one. `explosion(pos, scale)` layers a blast front,
+a soft-clipped boom, a sub thud, a churning fireball, crackle and debris, with a
+send into one shared terrain-echo convolver that falls off more slowly with
+distance than the direct sound; level scales with `scale` (1 an enemy, 2 the
+player's crash). `impact(pos)` is the airframe striking the ground.

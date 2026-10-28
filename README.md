@@ -23,13 +23,16 @@ Open `index.html` in any WebGL2 browser. Click to start.
 | `A` / `D` | Yaw |
 | `Space` | Cannon |
 | `F` (hold) | Acquire lock, then launch missile |
+| `−` / `+` | Volume |
+| `M` | Mute |
 | `Esc` | Pause |
 
 Survive waves of hostiles. Each wave is larger and flown better than the last —
 count rises to ten, and enemy aggression, skill, speed and durability all scale
 with the wave number. Clearing one restores 25 hull and refills the missile
 rails; each kill returns two missiles. Missile lock takes 1.5 s inside a
-forward cone and the seeker tone tightens as it converges.
+forward cone; the seeker growls as it acquires and settles into a steady tone
+on lock.
 
 ---
 
@@ -95,10 +98,11 @@ as a single artefact.
 | Terrain | Procedural archipelago, streamed in 1 km chunks, triplanar rock, baked sun visibility, canopy vegetation |
 | Clouds | Raymarched cumulus deck at 1500–2500 m, shared coverage field driving ground shadows and sea reflections |
 | Aircraft | Two lofted airframes — player twin-fin chined fighter, hostile tailless canard delta |
-| Combat | Cannon, lock-on missiles, 8 concurrent hostiles, scaling waves, radar, threat warning |
-| Audio | Procedural Web Audio — engine, wind, cannon, lock tone, explosions |
+| Combat | M61-style rotary cannon (100 rounds/s), lock-on missiles, 8 concurrent hostiles, scaling waves, radar, threat warning |
+| Audio | Procedural Web Audio — positional (HRTF, distance, Doppler), mixed through buses and a limiter: jet engine, rotary cannon, infrared seeker tones, missile motors, explosions with terrain echo |
 
-Audio is the weakest system by a distance and is the top item in `TODO.md`.
+The sound levels were set by offline measurement, not by ear; `TODO.md` has
+the numbers and how to re-measure them.
 
 ---
 
@@ -174,8 +178,8 @@ with itself.
 
 - **`CLAUDE.md`** — constraints, invariants that are easy to break by accident,
   and how to verify a change without a test suite.
-- **`TODO.md`** — the roadmap: audio, wingtip vortices, battle damage, a
-  cockpit view, time of day. Each entry says what already exists, what is
-  actually missing, and what done looks like.
+- **`TODO.md`** — the roadmap as ranked tasks (P1–P4), each saying what
+  already exists, what is actually missing, and what done looks like; then a
+  reference section on how the sound engine works.
 
 Built with [Three.js](https://threejs.org) r163.

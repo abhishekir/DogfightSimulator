@@ -208,7 +208,9 @@ class SoundEngine {
   // An RBJ biquad as a per-sample function, for baking sounds into buffers in plain JS.
   static _biquad(type, f, q, sr) {
     const w = 2 * Math.PI * f / sr, cs = Math.cos(w), al = Math.sin(w) / (2 * q);
-    const [b0, b1, b2] = type === 'bandpass' ? [al, 0, -al] : [(1 - cs) / 2, 1 - cs, (1 - cs) / 2];
+    const num = { bandpass: [al, 0, -al], lowpass: [(1 - cs) / 2, 1 - cs, (1 - cs) / 2], highpass: [(1 + cs) / 2, -(1 + cs), (1 + cs) / 2] }[type];
+    if (!num) throw new Error(`_biquad: no coefficients for '${type}'`);
+    const [b0, b1, b2] = num;
     const a0 = 1 + al, a1 = -2 * cs, a2 = 1 - al;
     let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
     return x => { const y = (b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0; x2 = x1; x1 = x; y2 = y1; y1 = y; return y; };
@@ -251,10 +253,13 @@ class SoundEngine {
       const lvl = 0.8 + Math.random() * 0.4, start = Math.floor(t0 * sr);
       const crackHP = B('highpass', 500, 0.7), crackBP = B('bandpass', 1800 + Math.random() * 1400, 0.7);
       const blast = B('bandpass', 700 + Math.random() * 400, 0.6), tick = B('highpass', 4000, 0.7), punch = B('lowpass', 350, 0.7);
+      // A single band-pass rolls off at only 6 dB an octave, and white noise has more energy
+      // in each octave up, so without these the crack and blast turn to hiss.
+      const crackLP = B('lowpass', 6500, 0.7), blastLP = B('lowpass', 6500, 0.7);
       for (let i = 0; i < rl; i++) {
         const t = i / sr, w = Math.random() * 2 - 1, atk = Math.min(1, t / 0.0002);
-        const v = lvl * atk * (crackBP(crackHP(w)) * 3.0 * Math.exp(-t / 0.003) + blast(w) * 1.2 * Math.exp(-t / 0.007)
-                             + tick(w) * 0.5 * Math.exp(-t / 0.0012) + punch(w) * 1.1 * Math.exp(-t / 0.004));
+        const v = lvl * atk * (crackLP(crackBP(crackHP(w))) * 0.45 * Math.exp(-t / 0.003) + blastLP(blast(w)) * 2.2 * Math.exp(-t / 0.007)
+                             + tick(w) * 0.14 * Math.exp(-t / 0.0012) + punch(w) * 2.2 * Math.exp(-t / 0.004));
         const at = start + i;
         if (at < n) d[at] += v; else if (wrap) d[at % n] += v; else break;
       }
@@ -287,7 +292,7 @@ class SoundEngine {
   // gun still winding down restarts faster), then the loop at full rate.
   _gunStart(spin) {
     const ctx = this.ctx, t = ctx.currentTime, into = GUN_SPINUP * spin;
-    const g = ctx.createGain(); g.gain.value = 0.72; g.connect(this.buses.weapons);
+    const g = ctx.createGain(); g.gain.value = 0.47; g.connect(this.buses.weapons);
     const a = ctx.createBufferSource(); a.buffer = this.gunStartBuf; a.connect(g); a.start(t, into);
     const l = ctx.createBufferSource(); l.buffer = this.gunLoopBuf; l.loop = true; l.connect(g); l.start(t + GUN_SPINUP - into);
     this._gun = { g, srcs: [a, l] };
@@ -625,11 +630,15 @@ class SoundEngine {
     roar.connect(roarHP); roarHP.connect(roarLP); roarLP.connect(sputter); sputter.connect(roarG); roarG.connect(motor);
     const hiss = this._loop(this.noiseBuffer, 1, t), hissHP = filter('highpass', 4000), hissG = ctx.createGain(); hissG.gain.value = 0.12;
     hiss.connect(hissHP); hissHP.connect(hissG); hissG.connect(motor);
+    // The motor is heard until the sound of the missile's end reaches the listener. For a
+    // distant missile that can be after it has already hit, and the ignition and motor were
+    // scheduled to start `v.delay` after launch, so a release timed from now alone would
+    // tear the voice down before any of it had played.
     v.release = () => {
-      const n = ctx.currentTime;
-      motor.gain.cancelScheduledValues(n); motor.gain.setTargetAtTime(0, n, 0.04);
-      for (const s of [roar, hiss, wob.src]) s.stop(n + 0.3);
-      v.end = n + 0.3;
+      const n = ctx.currentTime, heard = Math.max(n + this.listenerPos.distanceTo(v.pos) / SPEED_OF_SOUND, t + 0.15);
+      motor.gain.cancelScheduledValues(heard); motor.gain.setTargetAtTime(0, heard, 0.04);
+      for (const s of [roar, hiss, wob.src]) s.stop(heard + 0.3);
+      v.end = Math.max(heard + 0.3, t + 0.6);
     };
     this._track(v, Infinity);
   }

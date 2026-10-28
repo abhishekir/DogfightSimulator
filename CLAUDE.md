@@ -58,6 +58,22 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
+Three more tools in `.github/tools/` go further. They run locally, not in CI,
+take the same two environment variables, and exit non-zero on failure; each
+takes `--page <file>` to test another copy of the game, which is how a
+before/after comparison is done.
+
+- `soak.mjs [--minutes 10] [--screens]` — a bot flies the game at a fixed
+  timestep (lead pursuit, guns, missiles, forced crashes, random pauses) with a
+  watchdog after every step: non-finite values, pool and voice leaks, audio out
+  of step with the trigger, page errors. Ten game-minutes take about a minute.
+  It also reports how close the particle pool came to empty.
+- `ui-test.mjs` — plays through the real UI in real time: overlays, keys,
+  pause, focus loss, crash, game over, restart, settings across a reload.
+- `audio-check.mjs [--render]` — renders the SoundEngine offline and checks the
+  mix against the engine, positional audio, Doppler, the limiter, volume, and
+  regressions the audio has actually had. `--render` writes WAVs to listen to.
+
 Everything below is still on you.
 
 - Drive it headless: Chromium with `--use-angle=swiftshader`, a generated copy
@@ -69,10 +85,9 @@ Everything below is still on you.
   cost more time than measuring ever has.
 - Change one variable per render. An artefact that looks obvious usually is not;
   run the isolation test before the fix, not after the third one fails.
-- For simulation changes use a soak harness — fixed timestep, many substeps per
-  rendered frame, auto-restart on death, per-frame non-finite watchdog. It
-  covers minutes of game time in minutes of wall clock and catches NaN, pool
-  leaks and streaming stalls.
+- For simulation changes run `soak.mjs`; for anything a player touches,
+  `ui-test.mjs`; for any sound, `audio-check.mjs`, and listen to its renders.
+  Set audio levels by measurement, not by ear on one pair of headphones.
 
 ## Notes
 

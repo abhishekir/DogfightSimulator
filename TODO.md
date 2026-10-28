@@ -71,14 +71,19 @@ diff. What worked during the rendering overhaul:
 - Isolate one variable per render. Three "fixes" for an artefact turned out to
   address three real but unrelated bugs, because the isolation test that would
   have identified the actual cause was not run first.
-- For simulation changes, a soak harness (fixed timestep, many substeps per
-  rendered frame, auto-restart on death, per-frame non-finite watchdog) covers
-  minutes of game time in minutes of wall clock and catches NaN, pool leaks and
-  streaming stalls. With a bot flying it (lead pursuit, guns and missiles,
-  forced crashes, random pauses) 40 game-minutes take under three minutes.
-- For audio, render offline: an `OfflineAudioContext` driven frame by frame
-  through `snd.update()`, each bus soloed, measured A-weighted. Ears and
-  headphones differ; the numbers in "Reference: the sound engine" do not.
+- For simulation changes, `.github/tools/soak.mjs`: a bot flies the game at a
+  fixed timestep (lead pursuit, guns and missiles, forced crashes, random
+  pauses) with a watchdog after every step, and catches NaN, pool and voice
+  leaks, audio out of step with the game, and exceptions on rare paths. Ten
+  game-minutes take about a minute.
+- For anything a player touches, `.github/tools/ui-test.mjs`, which plays
+  through the real overlays and keys in real time.
+- For audio, `.github/tools/audio-check.mjs`: it renders the SoundEngine
+  offline, each bus soloed, measured A-weighted, and checks the mix and the
+  regressions listed in it. Ears and headphones differ; its numbers do not.
+  `--render` writes WAVs to listen to as well.
+
+See CLAUDE.md for how to run them.
 
 ---
 
@@ -108,8 +113,10 @@ pool is empty, evict the oldest trail particle rather than drop an effect;
 raise `MAX_PARTICLES` if the GPU cost of the batches allows (it is unmeasured,
 see task 2).
 
-**Done when:** a 15-minute soak drops no explosion, impact or spark particles,
-and the count of dropped requests is logged per emitter. Do this before task 5
+**Done when:** a 15-minute soak (`.github/tools/soak.mjs --minutes 15`, which
+already reports the pool's lowest free count and what was using it) drops no
+explosion, impact or spark particles, and the count of dropped requests is
+logged per emitter. Do this before task 5
 or task 8; damage effects add emitters, and a damaged dogfight is exactly when
 the pool is closest to empty.
 
@@ -332,9 +339,11 @@ the camera moves. A world-space sound is built in three steps:
 
 `refDistance` is the distance inside which the sound plays at full level, so it
 doubles as the source-loudness knob. The player's engine, wind, cannon and the
-cockpit tones stay dry. Measured: a source 90° left is 4.9 dB louder in the
+cockpit tones stay dry. Measured: a source 90° left is about 4 dB louder in the
 left channel (HRTF, not hard panning); onsets land within about 12 ms of
-`d / 343`; a blast at 2 km is 21 dB below one at 100 m.
+`d / 343`; a blast at 2 km is about 14 dB below one at 100 m over its first
+half second. The direct sound alone is about 22 dB down; the terrain echo falls
+off more slowly, so a distant blast is mostly echo.
 
 **Engine.** Turbulent pink-noise roar, brown-noise rumble, a turbine whine of
 two partials beating a few cents apart, and reheat crackle, every layer

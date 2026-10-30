@@ -89,38 +89,7 @@ See CLAUDE.md for how to run them.
 
 ## Tasks
 
-### 1. Particle pool runs dry in heavy fights — P1
-
-**What happens.** `spawnP` takes from a fixed pool of `MAX_PARTICLES` (600) and
-drops the request silently when it is empty, so in a busy fight explosions come
-out thin and hit sparks go missing. A soak (a bot flying 15 game-minutes with
-guns and missiles, auto-restarting) took `freeParticles` down to 7. The same bot
-on the code before the rotary cannon reached 21, so the pressure predates the
-cannon; the cannon's muzzle flash adds about a dozen live particles. At the low
-point roughly 290 were missile smoke trails and 250 short-lived fire.
-
-**Why the reserve does not help.** `PARTICLE_EFFECT_RESERVE` (160) holds
-particles back for one-off effects, but it only applies to requests flagged
-`isTrail`, and the only emitter flagged is the missile trail
-(`emitMissileTrail`). Every other continuous emitter — both jets' exhaust,
-player damage smoke, wing vapour, burning debris, muzzle flash — draws from the
-reserve exactly as an explosion does.
-
-**What to do.** Measure first: count dropped requests by emitter in `spawnP`
-and run a soak. Then likely some of: flag the continuous emitters as trails (or
-give them their own budget) so the reserve protects one-off effects; when the
-pool is empty, evict the oldest trail particle rather than drop an effect;
-raise `MAX_PARTICLES` if the GPU cost of the batches allows (it is unmeasured,
-see task 2).
-
-**Done when:** a 15-minute soak (`.github/tools/soak.mjs --minutes 15`, which
-already reports the pool's lowest free count and what was using it) drops no
-explosion, impact or spark particles, and the count of dropped requests is
-logged per emitter. Do this before task 5
-or task 8; damage effects add emitters, and a damaged dogfight is exactly when
-the pool is closest to empty.
-
-### 2. GPU cost is unmeasured — P2 (needs real hardware)
+### 1. GPU cost is unmeasured — P2 (needs real hardware)
 
 Every performance figure in the commit history comes from a software
 rasteriser, which does not predict GPU cost for an ALU-heavy raymarch. The
@@ -132,7 +101,7 @@ false` is the fallback. This cannot be done in a headless container.
 one integrated and one discrete GPU, and a default for `USE_VOLUMETRIC_CLOUDS`
 is chosen from it.
 
-### 3. Enemy aircraft make no sound — P2
+### 2. Enemy aircraft make no sound — P2
 
 Only the player's engine is audible, so a merge has no audio. Give each entry in
 `enemies` a cheap engine voice through `_voice(..., follow)` (see "Reference:
@@ -147,7 +116,7 @@ nothing but explosions).
 across the stereo field with a Doppler drop, and eight enemies cost less than
 the player's engine.
 
-### 4. Hits and enemy gunfire make no physical sound — P2
+### 3. Hits and enemy gunfire make no physical sound — P2
 
 `hitMarker()` is a UI confirmation tone (limited to one per 80 ms) and should
 stay one, but there is no *physical* impact sound. Rounds striking an airframe
@@ -166,17 +135,17 @@ bake or pool them, and rate-limit per target.
 100 m, and different again from hosing the sea; you hear an enemy firing at
 you.
 
-### 5. Enemy damage you can read at range — P2
+### 4. Enemy damage you can read at range — P2
 
 An enemy carries no visible damage state: you cannot tell one that is about to
 die from a fresh one. Smoke from a damaged enemy, thickening as HP falls, would
 make a wounded bandit identifiable at range. The player's single 20 HP
-threshold for tail flame should become graded at the same time. Depends on
-task 1.
+threshold for tail flame should become graded at the same time. The smoke is a
+continuous emitter: see "Reference: the particle pool" for how to tag it.
 
 **Done when:** at 1 km you can tell a nearly dead enemy from a fresh one.
 
-### 6. Enemies leave no contrails — P2
+### 5. Enemies leave no contrails — P2
 
 `updateContrails` draws one contrail, the player's, from the fuselage origin.
 At altitude a contrail is how you spot a bandit before the radar does, so
@@ -186,7 +155,7 @@ persistence with altitude rather than the hard 300 m cut while doing it.
 **Done when:** an enemy above 3,000 m is visible by its contrail before it is
 visible as an aircraft.
 
-### 7. Cockpit view — P3
+### 6. Cockpit view — P3
 
 There is one chase camera (`camOff`, `camLookOff`) and nothing else. A cockpit
 or virtual-cockpit view would change how the game reads more than any other
@@ -206,9 +175,9 @@ already modelled. Before starting:
 **Done when:** a key toggles views, the canopy is transparent from inside
 without sorting artefacts, and the HUD sits on the combiner.
 
-### 8. Battle damage on the airframe — P3
+### 7. Battle damage on the airframe — P3
 
-Beyond task 5's smoke, both the player and enemies go from pristine to
+Beyond task 4's smoke, both the player and enemies go from pristine to
 exploding with nothing in between.
 
 - **Surface damage.** Scorch and soot around hit locations. The airframe
@@ -218,9 +187,10 @@ exploding with nothing in between.
 - **Structural loss.** Pieces departing on heavy hits — the debris pool already
   exists — and a flame from an engine that has been killed.
 
-Reuse the particle pool rather than adding another, and do task 1 first.
+Reuse the particle pool rather than adding another (see "Reference: the
+particle pool").
 
-### 9. Time of day — P3
+### 8. Time of day — P3
 
 The sun direction is a module-scope constant, and a good deal of tuning assumes
 it: `uCloudShadowOffset` is computed once from it at load, the terrain's
@@ -241,11 +211,11 @@ both tuned at its current elevation of about 21 degrees. So the order matters:
 Even a fixed choice of three or four presets — dawn, noon, golden hour, dusk —
 would be worth a lot and avoids most of the dynamic-shadowing problem.
 
-### 10. Wingtip vortices and contrail polish — P3
+### 9. Wingtip vortices and contrail polish — P3
 
 **Wingtip vapour** exists in `updatePlayer` under `// Wing vapor`: above 3 G it
 spawns pale smoke particles at both wingtips. It is a puff emitter, not a
-vortex. Remaining (enemy contrails are task 6):
+vortex. Remaining (enemy contrails are task 5):
 
 - Emit contrails from each wingtip rather than the centreline, so a roll
   visibly twists the pair.
@@ -255,7 +225,7 @@ vortex. Remaining (enemy contrails are task 6):
   scale). Derive them from the wing stations so they survive the next airframe
   change.
 
-### 11. The flight model allows 30+ G — P4 (decision)
+### 10. The flight model allows 30+ G — P4 (decision)
 
 The HUD's G readout regularly shows 30–37 G in hard turns: steady pitch rate
 reaches about 1.15 rad/s, which at 300 m/s is about 35 G. That is the arcade
@@ -263,12 +233,12 @@ handling working as built, not a bug, but it sits oddly next to realistic
 airspeed, cannon and missile cues. Decide whether to cap turn rate by speed (a
 real fighter manages about 9 G) or to leave it and stop showing the number.
 
-### 12. Settings screen — P4
+### 11. Settings screen — P4
 
 There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
 (`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source.
 
-### 13. Cloud and water quality — P4
+### 12. Cloud and water quality — P4
 
 - The cloud march is half resolution (`CLOUD_SCALE = 0.5`) and resolved with a
   four-tap rotated-grid blur. Temporal reprojection would do better if anyone
@@ -277,7 +247,7 @@ There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
   mirrored camera can see; everything off-screen falls back to the analytic sky
   plus the analytic cloud tint. Look for the seam at grazing angles.
 
-### 14. Small things to keep in mind — P4
+### 13. Small things to keep in mind — P4
 
 - **Below 20 fps, game time runs slow but audio does not.** `dt` is clamped to
   0.05 s, so the simulation slows while the audio clock keeps real time; the
@@ -378,3 +348,42 @@ a soft-clipped boom, a sub thud, a churning fireball, crackle and debris, with a
 send into one shared terrain-echo convolver that falls off more slowly with
 distance than the direct sound; level scales with `scale` (1 an enemy, 2 the
 player's crash). `impact(pos)` is the airframe striking the ground.
+
+---
+
+## Reference: the particle pool
+
+`spawnP(emitter, ...)` takes from a fixed pool of `MAX_PARTICLES` (600). Every
+request names an entry in `emitters`, which counts what it requested, what was
+dropped and how many of its particles were evicted. The soak prints that table
+and fails if any emitter not flagged as a trail is refused a particle.
+
+- **Trail emitters** (only `missileTrail`) are capped at `MAX_TRAIL_PARTICLES`
+  (360) and may not take the last `PARTICLE_EFFECT_RESERVE` (160) free entries.
+  Missile trails drop 6–9% of their requests in a 15-minute soak, by design.
+- **Every other emitter** takes from the whole pool, and if it finds the pool
+  empty it evicts the most faded trail particle (lowest `life / maxLife`)
+  rather than being dropped. It can still be dropped if the pool is full and
+  holds no trail particle, which no soak has produced.
+
+Why it is built this way, measured with two 15-minute soaks per variant. Before
+eviction the pool's lowest free count was 6 and 16, and one run lost 49
+explosion particles over three kills, 14–20 of each kill's 84–108. At each loss
+the pool held 243–298 missile-trail particles, 142–215 cannon hit sparks, 69–80
+from the previous explosion, and 56–95 from the continuous emitters not flagged
+as trails. The reserve could not help: hit sparks are one-off effects and use it
+up legitimately. With eviction (four soaks) nothing outside the trails was
+dropped, though the pool still ran as low as 2 free; the trails gave up 41–69
+particles per 15 minutes to eviction.
+
+Flagging exhaust, wing vapour, muzzle flash, damage smoke and debris smoke as
+trails as well was measured too, and rejected. They share the trail cap with
+the missile trails and run earlier in each frame, and missile-trail drops
+doubled to 13–18%. They also began dropping 0.2–2.5% of their own requests.
+That bought nothing, since eviction alone already stopped every one-off drop.
+A new continuous emitter (enemy damage smoke, task 4) can hold dozens of
+particles per aircraft, so tag it as a trail: untagged, it cannot be evicted
+and can starve explosions. The soak's table will show which way it went.
+
+`MAX_PARTICLES` is unchanged: eviction made raising it unnecessary, and what the
+particle batches cost on a GPU is unmeasured (task 1).

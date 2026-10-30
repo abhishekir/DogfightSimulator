@@ -2751,10 +2751,11 @@ function spawnMissile(pos,dir,carrierVelocity,target,isEnemy=false,launchSide=0)
 
 const MAX_PARTICLES=600,MAX_TRAIL_PARTICLES=360,PARTICLE_EFFECT_RESERVE=160,freeParticles=[],activeParticles=[];
 let activeTrailParticles=0;
-// Every spawnP request names its emitter, which counts what it asked for and what the pool
-// refused it (the soak reports both). A trail emitter may only take from the pool above
-// PARTICLE_EFFECT_RESERVE, which is kept for one-off effects.
-const particleEmitter=(name,trail)=>({name,trail,requested:0,dropped:0});
+// Every spawnP request names its emitter, which counts what it asked for, what the pool
+// refused it and how many of its particles were evicted (the soak reports all three). A trail
+// emitter may only take from the pool above PARTICLE_EFFECT_RESERVE, which is kept for one-off
+// effects, and its particles make way for any other emitter that finds the pool empty.
+const particleEmitter=(name,trail)=>({name,trail,requested:0,dropped:0,evicted:0});
 const emitters={explosion:particleEmitter('explosion',false),impact:particleEmitter('impact',false),spark:particleEmitter('spark',false),
   launch:particleEmitter('launch',false),missileTrail:particleEmitter('missileTrail',true),exhaust:particleEmitter('exhaust',false),
   enemyExhaust:particleEmitter('enemyExhaust',false),muzzle:particleEmitter('muzzle',false),damage:particleEmitter('damage',false),
@@ -2856,9 +2857,15 @@ const fireParticleBatch=createParticleBatch(particleGeo,THREE.AdditiveBlending);
 asEffect(smokeParticleBatch.mesh);asEffect(fireParticleBatch.mesh);
 for(let i=0;i<MAX_PARTICLES;i++)freeParticles.push({position:new THREE.Vector3(),velocity:new THREE.Vector3(),color:new THREE.Color(),
   opacity:0,scale:1,hashSeed:0,life:0,maxLife:1,size:1,type:'fire',isTrail:false,emitter:null,camD2:0});
+// The reserve alone is not enough: cannon hit sparks and one explosion can use it up, and the
+// next kill then came out thin. So a request that is not a trail and finds the pool empty takes
+// the place of the most faded trail particle; the faint end of a trail going early shows far less.
+function evictTrailParticle(){let k=-1,faded=Infinity;
+  for(let i=0;i<activeParticles.length;i++){const q=activeParticles[i];if(q.isTrail&&q.life/q.maxLife<faded){faded=q.life/q.maxLife;k=i}}
+  if(k<0)return false;activeParticles[k].emitter.evicted++;releaseParticle(k);return true}
 function spawnP(emitter,pos,vel,life,color,size,type='fire'){emitter.requested++;const isTrail=emitter.trail;
   if(isTrail&&(activeTrailParticles>=MAX_TRAIL_PARTICLES||freeParticles.length<=PARTICLE_EFFECT_RESERVE)){emitter.dropped++;return}
-  const p=freeParticles.pop();if(!p){emitter.dropped++;return}
+  const p=freeParticles.pop()||(!isTrail&&evictTrailParticle()?freeParticles.pop():null);if(!p){emitter.dropped++;return}
   p.position.copy(pos);p.velocity.copy(vel);p.life=life;p.maxLife=life;p.size=size;p.type=type;
   p.color.set(color);p.opacity=type==='smoke'?.35:1;p.scale=size;p.hashSeed=Math.random()*6.2832;p.isTrail=isTrail;p.emitter=emitter;
   if(isTrail)activeTrailParticles++;activeParticles.push(p)}

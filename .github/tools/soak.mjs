@@ -11,9 +11,11 @@
  * erratically, sometimes dives into the ground on purpose, and pauses and resumes at
  * random. --screens saves one frame per game-minute to .github/tools/out/.
  *
- * Exits 1 on any watchdog anomaly or page error. The particle-pool figures (lowest free
- * count, what was using the pool at that moment, and requests and drops per emitter) are
- * reported but not failed on; see TODO.md task 1.
+ * Exits 1 on any watchdog anomaly or page error, and on any particle refused to an emitter
+ * that is not a trail: explosions, impacts and hit sparks above all, which can only go
+ * missing when the pool is full and holds no trail particle to evict. Per emitter it reports
+ * what was requested, dropped and evicted; trail drops are by design and not failed on.
+ * See "Reference: the particle pool" in TODO.md.
  */
 import { join } from 'node:path';
 import { openGame, stepper, arg, flag, outDir } from './lib.mjs';
@@ -184,6 +186,9 @@ const leftover = await p.evaluate(() => { const G = window.__g; G.keys.Space = f
 const S = await p.evaluate(() => { let emitters = null; try { emitters = Object.values(window.__g.emitters); } catch {}
   return { ...window.__soak, lastKills: window.__g.kills, emitters }; });
 if (leftover.length) S.anomalies['voices that will never be released'] = { n: leftover.length, firstAt: +S.t.toFixed(2), detail: { secondsUntilDeadline: leftover } };
+const refused = (S.emitters || []).filter(e => !e.trail && e.dropped);
+if (refused.length) S.anomalies['particles refused to non-trail emitters'] = { n: refused.reduce((n, e) => n + e.dropped, 0),
+  firstAt: S.episodes[0]?.t, detail: Object.fromEntries(refused.map(e => [e.name, e.dropped])) };
 await game.close();
 
 const anomalies = Object.entries(S.anomalies), errors = [...game.errors.entries()];
@@ -196,10 +201,11 @@ heap MB per game-minute: ${heap.filter((_, i) => i % 6 === 5).join(' ')}`);
 for (const e of S.events.slice(-10)) console.log('  ' + e);
 if (S.emitters) {
   const mean = k => ((S.live[k] || 0) / Math.max(S.watched, 1)).toFixed(1), at = k => ((S.starvedBy[k] || 0) / Math.max(S.starvedSteps, 1)).toFixed(0);
-  console.log(`\nparticle emitters: requested, dropped, mean live${S.starvedSteps ? ', mean held while a non-trail request was refused' : ''}`);
+  console.log(`\nparticle emitters: requested, dropped, evicted, mean live${S.starvedSteps ? ', mean held while a non-trail request was refused' : ''}`);
   for (const e of [...S.emitters].sort((a, b) => b.dropped - a.dropped || b.requested - a.requested))
     console.log(`  ${(e.name + (e.trail ? ' (trail)' : '')).padEnd(22)} ${String(e.requested).padStart(9)} ${String(e.dropped).padStart(8)}` +
-      ` ${(e.requested ? (100 * e.dropped / e.requested).toFixed(1) : '0.0').padStart(5)}%  ${mean(e.name).padStart(6)}${S.starvedSteps ? at(e.name).padStart(6) : ''}`);
+      ` ${(e.requested ? (100 * e.dropped / e.requested).toFixed(1) : '0.0').padStart(5)}% ${String(e.evicted ?? '-').padStart(7)}` +
+      `  ${mean(e.name).padStart(6)}${S.starvedSteps ? at(e.name).padStart(6) : ''}`);
   console.log(`non-trail requests refused on ${S.starvedSteps} steps in ${S.episodes.length} episodes`);
   for (const ep of S.episodes.slice(0, 12)) console.log('  ' + JSON.stringify({ ...ep, end: +ep.end.toFixed(1) }));
 }

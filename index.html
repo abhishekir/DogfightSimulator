@@ -2751,6 +2751,14 @@ function spawnMissile(pos,dir,carrierVelocity,target,isEnemy=false,launchSide=0)
 
 const MAX_PARTICLES=600,MAX_TRAIL_PARTICLES=360,PARTICLE_EFFECT_RESERVE=160,freeParticles=[],activeParticles=[];
 let activeTrailParticles=0;
+// Every spawnP request names its emitter, which counts what it asked for and what the pool
+// refused it (the soak reports both). A trail emitter may only take from the pool above
+// PARTICLE_EFFECT_RESERVE, which is kept for one-off effects.
+const particleEmitter=(name,trail)=>({name,trail,requested:0,dropped:0});
+const emitters={explosion:particleEmitter('explosion',false),impact:particleEmitter('impact',false),spark:particleEmitter('spark',false),
+  launch:particleEmitter('launch',false),missileTrail:particleEmitter('missileTrail',true),exhaust:particleEmitter('exhaust',false),
+  enemyExhaust:particleEmitter('enemyExhaust',false),muzzle:particleEmitter('muzzle',false),damage:particleEmitter('damage',false),
+  vapour:particleEmitter('vapour',false),debris:particleEmitter('debris',false)};
 function createSmokeTexture(){
   const S=128,R=S*.5,lump=tileableFBM(S,5,4,31337),data=new Uint8Array(S*S*4);
   for(let y=0;y<S;y++)for(let x=0;x<S;x++){
@@ -2847,12 +2855,12 @@ const smokeParticleBatch=createParticleBatch(smokeParticleGeo,THREE.NormalBlendi
 const fireParticleBatch=createParticleBatch(particleGeo,THREE.AdditiveBlending);
 asEffect(smokeParticleBatch.mesh);asEffect(fireParticleBatch.mesh);
 for(let i=0;i<MAX_PARTICLES;i++)freeParticles.push({position:new THREE.Vector3(),velocity:new THREE.Vector3(),color:new THREE.Color(),
-  opacity:0,scale:1,hashSeed:0,life:0,maxLife:1,size:1,type:'fire',isTrail:false,camD2:0});
-function spawnP(pos,vel,life,color,size,type='fire',isTrail=false){
-  if(isTrail&&(activeTrailParticles>=MAX_TRAIL_PARTICLES||freeParticles.length<=PARTICLE_EFFECT_RESERVE))return;
-  const p=freeParticles.pop();if(!p)return;
+  opacity:0,scale:1,hashSeed:0,life:0,maxLife:1,size:1,type:'fire',isTrail:false,emitter:null,camD2:0});
+function spawnP(emitter,pos,vel,life,color,size,type='fire'){emitter.requested++;const isTrail=emitter.trail;
+  if(isTrail&&(activeTrailParticles>=MAX_TRAIL_PARTICLES||freeParticles.length<=PARTICLE_EFFECT_RESERVE)){emitter.dropped++;return}
+  const p=freeParticles.pop();if(!p){emitter.dropped++;return}
   p.position.copy(pos);p.velocity.copy(vel);p.life=life;p.maxLife=life;p.size=size;p.type=type;
-  p.color.set(color);p.opacity=type==='smoke'?.35:1;p.scale=size;p.hashSeed=Math.random()*6.2832;p.isTrail=isTrail;
+  p.color.set(color);p.opacity=type==='smoke'?.35:1;p.scale=size;p.hashSeed=Math.random()*6.2832;p.isTrail=isTrail;p.emitter=emitter;
   if(isTrail)activeTrailParticles++;activeParticles.push(p)}
 function releaseParticle(index){const p=activeParticles[index],last=activeParticles.pop();if(index<activeParticles.length)activeParticles[index]=last;
   if(p.isTrail){p.isTrail=false;activeTrailParticles--}freeParticles.push(p)}
@@ -2891,15 +2899,15 @@ const debrisMat=airframeMaterial(0x4a4a48,{metalness:.35,roughness:.66});
 for(let i=0;i<MAX_DEBRIS;i++){const m=new THREE.Mesh(debrisGeos[i%3],debrisMat.clone());m.visible=false;m.userData={active:false,vel:new THREE.Vector3(),rotVel:new THREE.Vector3(),life:0};scene.add(m);debrisPool.push(m)}
 function spawnDebris(pos,count){for(let i=0;i<count;i++)for(const d of debrisPool)if(!d.userData.active){d.position.copy(pos);d.userData.vel.set((Math.random()-.5)*200,Math.random()*150+50,(Math.random()-.5)*200);d.userData.rotVel.set((Math.random()-.5)*10,(Math.random()-.5)*10,(Math.random()-.5)*10);d.userData.life=1.5+Math.random()*2;d.userData.active=true;d.visible=true;d.scale.setScalar(.8+Math.random()*1.5);d.material.color.setHex([0x555555,0x444444,0x666655,0x553333][Math.floor(Math.random()*4)]);break}}
 
-function spawnExplosion(pos, count) {
-  spawnP(pos, new THREE.Vector3(), .15, 0xffffff, 20 + count * .5);
-  spawnP(pos, new THREE.Vector3(), .25, 0xffffcc, 12 + count * .3);
+function spawnExplosion(pos, count, emitter) {
+  spawnP(emitter, pos, new THREE.Vector3(), .15, 0xffffff, 20 + count * .5);
+  spawnP(emitter, pos, new THREE.Vector3(), .25, 0xffffcc, 12 + count * .3);
   for (let i = 0; i < count; i++) { const v = new THREE.Vector3((Math.random()-.5)*250,(Math.random()-.5)*250,(Math.random()-.5)*250);
-    spawnP(pos, v, .4+Math.random()*.8, [0xff4400,0xff8800,0xffcc00,0xff2200,0xffaa00][Math.floor(Math.random()*5)], 1.5+Math.random()*3.5); }
+    spawnP(emitter, pos, v, .4+Math.random()*.8, [0xff4400,0xff8800,0xffcc00,0xff2200,0xffaa00][Math.floor(Math.random()*5)], 1.5+Math.random()*3.5); }
   for (let i = 0; i < count * .6; i++) { const v = new THREE.Vector3((Math.random()-.5)*80,Math.random()*60,(Math.random()-.5)*80);
-    spawnP(pos, v, 1+Math.random()*2, 0x333333, 2+Math.random()*5, 'smoke'); }
+    spawnP(emitter, pos, v, 1+Math.random()*2, 0x333333, 2+Math.random()*5, 'smoke'); }
   for (let i = 0; i < 18; i++) { const a = (i/18)*Math.PI*2;
-    spawnP(pos, new THREE.Vector3(Math.cos(a)*400,Math.sin(a*.3)*40,Math.sin(a)*400), .18, 0xffcc66, 2.5); }
+    spawnP(emitter, pos, new THREE.Vector3(Math.cos(a)*400,Math.sin(a*.3)*40,Math.sin(a)*400), .18, 0xffcc66, 2.5); }
   if (count >= 30) spawnDebris(pos, 3 + Math.floor(Math.random()*3));
 }
 
@@ -2940,17 +2948,17 @@ function spawnEnemy(wc){if(enemies.length>=MAX_ENEMIES)return;const m=enemyJetTe
 
 /* ═══════════════════ VFX ═══════════════════ */
 const _fwd = new THREE.Vector3();
-function emitExhaust(pos,dir,thr){if(Math.random()>thr*.7)return;const v=dir.clone().multiplyScalar(-40-Math.random()*50);v.x+=(Math.random()-.5)*12;v.y+=(Math.random()-.5)*12;v.z+=(Math.random()-.5)*12;const c=thr>.85?0x4488ff:(thr>.5?0xff8833:0xff5500);spawnP(pos,v,.15+Math.random()*.25,c,.4+Math.random()*1.2)}
-function emitMuzzle(pos){spawnP(pos,new THREE.Vector3(),0.05,0xffffff,4);for(let i=0;i<5;i++){const v=new THREE.Vector3((Math.random()-.5)*50,(Math.random()-.5)*50,(Math.random()-.5)*50);spawnP(pos,v,.05+Math.random()*.08,0xffffaa,2+Math.random()*3)}}
+function emitExhaust(pos,dir,thr){if(Math.random()>thr*.7)return;const v=dir.clone().multiplyScalar(-40-Math.random()*50);v.x+=(Math.random()-.5)*12;v.y+=(Math.random()-.5)*12;v.z+=(Math.random()-.5)*12;const c=thr>.85?0x4488ff:(thr>.5?0xff8833:0xff5500);spawnP(emitters.exhaust,pos,v,.15+Math.random()*.25,c,.4+Math.random()*1.2)}
+function emitMuzzle(pos){spawnP(emitters.muzzle,pos,new THREE.Vector3(),0.05,0xffffff,4);for(let i=0;i<5;i++){const v=new THREE.Vector3((Math.random()-.5)*50,(Math.random()-.5)*50,(Math.random()-.5)*50);spawnP(emitters.muzzle,pos,v,.05+Math.random()*.08,0xffffaa,2+Math.random()*3)}}
 function emitMissileLaunch(pos,dir,isEnemy){
   const back=dir.clone().normalize().negate();
-  spawnP(pos,back.clone().multiplyScalar(30),.18,0xffffff,7);
+  spawnP(emitters.launch,pos,back.clone().multiplyScalar(30),.18,0xffffff,7);
   for(let i=0;i<8;i++){const v=back.clone().multiplyScalar(40+Math.random()*60);
     v.x+=(Math.random()-.5)*35;v.y+=(Math.random()-.5)*35;v.z+=(Math.random()-.5)*35;
-    spawnP(pos,v,.12+Math.random()*.18,isEnemy?0xff4422:0xffaa33,1.5+Math.random()*2.5)}
+    spawnP(emitters.launch,pos,v,.12+Math.random()*.18,isEnemy?0xff4422:0xffaa33,1.5+Math.random()*2.5)}
   for(let i=0;i<5;i++){const v=back.clone().multiplyScalar(15+Math.random()*25);
     v.x+=(Math.random()-.5)*15;v.y+=(Math.random()-.5)*15;v.z+=(Math.random()-.5)*15;
-    spawnP(pos,v,.8+Math.random()*.7,0x888888,1.8+Math.random()*2,'smoke')}
+    spawnP(emitters.launch,pos,v,.8+Math.random()*.7,0x888888,1.8+Math.random()*2,'smoke')}
   if(!isEnemy){screenShake=Math.max(screenShake,.3);fovPulse=Math.max(fovPulse,.12)}
 }
 const _missileTrailPos=new THREE.Vector3(),_missileTrailVel=new THREE.Vector3(),_missileTrailBack=new THREE.Vector3(),_missileSteer=new THREE.Vector3();
@@ -2988,8 +2996,8 @@ function emitMissileTrail(m,activeMissiles){
   while(distanceToNext<=travel){_missileTrailPos.lerpVectors(u.prevPos,m.position,distanceToNext/travel);
     _missileTrailVel.copy(_missileTrailBack).multiplyScalar(18);
     _missileTrailVel.x+=(Math.random()-.5)*7;_missileTrailVel.y+=(Math.random()-.5)*7;_missileTrailVel.z+=(Math.random()-.5)*7;
-    spawnP(_missileTrailPos,_missileTrailVel,1.2+Math.random()*.7,0x9aa0a6,1.5+Math.random()*1.2,'smoke',true);
-    if(Math.random()<.6)spawnP(_missileTrailPos,_missileTrailVel,.1+Math.random()*.08,u.isEnemy?0xff4422:0xff9933,.7+Math.random()*.7,'fire',true);
+    spawnP(emitters.missileTrail,_missileTrailPos,_missileTrailVel,1.2+Math.random()*.7,0x9aa0a6,1.5+Math.random()*1.2,'smoke');
+    if(Math.random()<.6)spawnP(emitters.missileTrail,_missileTrailPos,_missileTrailVel,.1+Math.random()*.08,u.isEnemy?0xff4422:0xff9933,.7+Math.random()*.7);
     distanceToNext+=spacing}
   u.trailDistance=(u.trailDistance+travel)%spacing;u.prevPos.copy(m.position);
 }
@@ -3133,18 +3141,18 @@ function updatePlayer(dt){
   // Damage smoke/fire
   if(player.hp<70&&Math.random()<.05*(1-player.hp/70)){
     const o=new THREE.Vector3((Math.random()-.5)*5,(Math.random()-.5)*3,(Math.random()-.5)*10).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-    spawnP(o,new THREE.Vector3((Math.random()-.5)*15,Math.random()*20,(Math.random()-.5)*15),.8+Math.random()*1.2,0x444444,1.5+Math.random()*2,'smoke')}
+    spawnP(emitters.damage,o,new THREE.Vector3((Math.random()-.5)*15,Math.random()*20,(Math.random()-.5)*15),.8+Math.random()*1.2,0x444444,1.5+Math.random()*2,'smoke')}
   if(player.hp<40){const o=new THREE.Vector3((Math.random()-.5)*4,(Math.random()-.5)*2,5+Math.random()*8).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-    spawnP(o,new THREE.Vector3((Math.random()-.5)*10,Math.random()*15,(Math.random()-.5)*10),.6+Math.random(),0x333333,1+Math.random()*2.5,'smoke');
-    if(Math.random()<.15)spawnP(o,new THREE.Vector3((Math.random()-.5)*80,(Math.random()-.5)*80,(Math.random()-.5)*80),.1+Math.random()*.15,0xffcc44,.3+Math.random()*.5)}
+    spawnP(emitters.damage,o,new THREE.Vector3((Math.random()-.5)*10,Math.random()*15,(Math.random()-.5)*10),.6+Math.random(),0x333333,1+Math.random()*2.5,'smoke');
+    if(Math.random()<.15)spawnP(emitters.damage,o,new THREE.Vector3((Math.random()-.5)*80,(Math.random()-.5)*80,(Math.random()-.5)*80),.1+Math.random()*.15,0xffcc44,.3+Math.random()*.5)}
   if(player.hp<20){const o=new THREE.Vector3((Math.random()-.5)*3,(Math.random()-.5)*2,3+Math.random()*6).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-    spawnP(o,new THREE.Vector3((Math.random()-.5)*20,Math.random()*30,(Math.random()-.5)*20),.2+Math.random()*.4,0xff4400,1+Math.random()*2)}
+    spawnP(emitters.damage,o,new THREE.Vector3((Math.random()-.5)*20,Math.random()*30,(Math.random()-.5)*20),.2+Math.random()*.4,0xff4400,1+Math.random()*2)}
   // Wing vapor
   if(gForce>3&&Math.random()<.5){const wL=new THREE.Vector3(-12*1.8,0,0).applyQuaternion(playerJet.quaternion).add(playerJet.position);
     const wR=new THREE.Vector3(12*1.8,0,0).applyQuaternion(playerJet.quaternion).add(playerJet.position);
     const v=new THREE.Vector3((Math.random()-.5)*5,(Math.random()-.5)*5,(Math.random()-.5)*5);
-    spawnP(wL,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke');
-    spawnP(wR,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke')}
+    spawnP(emitters.vapour,wL,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke');
+    spawnP(emitters.vapour,wR,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke')}
 
   snd.update(player.throttle,speed,trigger,lockProgress,incomingThreat,dt,seekSignal,player.gunSpin);
 }
@@ -3328,11 +3336,11 @@ function updateEnemies(dt){
     if(e.mesh.position.y<80)e.mesh.position.y+=80*dt;
     // Exhaust trail
     if(Math.random()<.3){const ep=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(16));
-      spawnP(ep,_eFwd.clone().multiplyScalar(-15),.2+Math.random()*.3,0xff6600,.3+Math.random()*.6)}
+      spawnP(emitters.enemyExhaust,ep,_eFwd.clone().multiplyScalar(-15),.2+Math.random()*.3,0xff6600,.3+Math.random()*.6)}
     if(dist>2800&&e.state!=='inbound')transitionEnemy(e,'inbound')}
 }
 
-function killEnemy(e,sv){e.alive=false;spawnExplosion(e.mesh.position,sv>100?55:40);
+function killEnemy(e,sv){e.alive=false;spawnExplosion(e.mesh.position,sv>100?55:40,emitters.explosion);
   snd.explosion(e.mesh.position);snd.hitMarker();
   scene.remove(e.mesh);const idx=enemies.indexOf(e);if(idx>=0)enemies.splice(idx,1);
   score+=sv;kills++;player.missileAmmo=Math.min(player.missileAmmo+2,MAX_MISSILE_AMMO);
@@ -3347,10 +3355,10 @@ function updateBullets(dt){for(const b of bulletPool){if(!b.userData.active)cont
   _tmpV1.copy(b.userData.vel).multiplyScalar(dt);b.position.add(_tmpV1);
   _tmpV1.copy(b.position).add(b.userData.vel);b.lookAt(_tmpV1);
   if(b.userData.isEnemy){if(b.position.distanceTo(playerJet.position)<10){player.hp-=5;b.userData.active=false;b.visible=false;
-    for(let k=0;k<3;k++)spawnP(b.position,new THREE.Vector3((Math.random()-.5)*60,(Math.random()-.5)*60,(Math.random()-.5)*60),.08,0xffaa44,1);
+    for(let k=0;k<3;k++)spawnP(emitters.spark,b.position,new THREE.Vector3((Math.random()-.5)*60,(Math.random()-.5)*60,(Math.random()-.5)*60),.08,0xffaa44,1);
     screenShake=.5;hitFlash=.15}}
   else{for(const e of enemies){if(!e.alive)continue;if(b.position.distanceTo(e.mesh.position)<14){
-    e.hp-=GUN_DAMAGE;e.wasHit=true;if(b.visible)spawnExplosion(b.position,4);b.userData.active=false;b.visible=false;snd.hitMarker();
+    e.hp-=GUN_DAMAGE;e.wasHit=true;if(b.visible)spawnExplosion(b.position,4,emitters.spark);b.userData.active=false;b.visible=false;snd.hitMarker();
     if(e.hp<=0)killEnemy(e,100);break}}}
   if(b.position.y<getGroundHeight(b.position.x,b.position.z)){b.userData.active=false;b.visible=false}}}
 
@@ -3385,14 +3393,14 @@ function updateMissiles(dt){
       if(hitTime>=0&&hitTime<firstHitTime&&hitTime<terrainHitTime){hitEnemy=e;firstHitTime=hitTime}}
     if(hitEnemy){m.position.copy(_missileStepStart).addScaledVector(_missileStepDelta,firstHitTime);
       hitEnemy.hp-=50;hitEnemy.wasHit=true;u.active=false;m.visible=false;
-      if(hitEnemy.hp<=0)killEnemy(hitEnemy,200);else{spawnExplosion(m.position,30);snd.explosion(m.position,.6)}}
+      if(hitEnemy.hp<=0)killEnemy(hitEnemy,200);else{spawnExplosion(m.position,30,emitters.impact);snd.explosion(m.position,.6)}}
   }
   if(u.active&&u.isEnemy){const hitTime=movingSphereHitTime(_missileStepStart,m.position,player.prevPosition,playerJet.position,15);if(hitTime>=0&&hitTime<terrainHitTime){
     m.position.copy(_missileStepStart).addScaledVector(_missileStepDelta,hitTime);
-    player.hp-=30;m.userData.active=false;m.visible=false;spawnExplosion(m.position,25);snd.explosion(m.position,.6);screenShake=1.5;hitFlash=.2}
+    player.hp-=30;m.userData.active=false;m.visible=false;spawnExplosion(m.position,25,emitters.impact);snd.explosion(m.position,.6);screenShake=1.5;hitFlash=.2}
   }
   if(u.active&&terrainHitTime<Infinity){m.position.copy(_missileStepStart).addScaledVector(_missileStepDelta,terrainHitTime);
-    u.active=false;m.visible=false;spawnExplosion(m.position,18);snd.explosion(m.position,.5)}
+    u.active=false;m.visible=false;spawnExplosion(m.position,18,emitters.impact);snd.explosion(m.position,.5)}
   emitMissileTrail(m,activeMissiles);
   }}
 
@@ -3409,7 +3417,7 @@ function updateDebris(dt){for(const d of debrisPool){if(!d.userData.active)conti
   d.rotation.x+=d.userData.rotVel.x*dt;d.rotation.y+=d.userData.rotVel.y*dt;d.rotation.z+=d.userData.rotVel.z*dt;
   const h=getGroundHeight(d.position.x,d.position.z);
   if(d.position.y<h){d.position.y=h;d.userData.vel.y*=-.3;d.userData.vel.x*=.7;d.userData.vel.z*=.7;
-    for(let j=0;j<2;j++)spawnP(d.position,new THREE.Vector3((Math.random()-.5)*20,Math.random()*10,(Math.random()-.5)*20),.5+Math.random()*.5,0x222211,1.5+Math.random()*2,'smoke')}}}
+    for(let j=0;j<2;j++)spawnP(emitters.debris,d.position,new THREE.Vector3((Math.random()-.5)*20,Math.random()*10,(Math.random()-.5)*20),.5+Math.random()*.5,0x222211,1.5+Math.random()*2,'smoke')}}}
 
 function updateSpeedLines(dt){for(const sl of speedLines){if(!sl.userData.active)continue;sl.userData.life-=dt;if(sl.userData.life<=0){sl.userData.active=false;sl.visible=false}}}
 
@@ -3592,7 +3600,7 @@ function drawHUD(){
 
 /* ═══════════════════ GAME STATE ═══════════════════ */
 function checkGameOver(){if(player.hp<=0&&!gameOver){gameOver=true;snd.silence();deathCamTimer=3;deathCamCenter.copy(playerJet.position);deathCamAngle=0;
-  spawnExplosion(playerJet.position,60);snd.explosion(playerJet.position,2);playerJet.visible=false}}
+  spawnExplosion(playerJet.position,60,emitters.explosion);snd.explosion(playerJet.position,2);playerJet.visible=false}}
 
 function resetPool(pool){for(const item of pool){item.userData.active=false;item.visible=false}}
 function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.set(0,0,-120);

@@ -12,8 +12,8 @@
  * random. --screens saves one frame per game-minute to .github/tools/out/.
  *
  * Exits 1 on any watchdog anomaly or page error. The particle-pool figures (lowest free
- * count and what was using the pool at that moment) are reported but not failed on;
- * see TODO.md task 1.
+ * count, what was using the pool at that moment, and requests and drops per emitter) are
+ * reported but not failed on; see TODO.md task 1.
  */
 import { join } from 'node:path';
 import { openGame, stepper, arg, flag, outDir } from './lib.mjs';
@@ -30,13 +30,30 @@ await p.evaluate(() => {
   const G = window.__g, T = G.THREE, K = G.keys;
   const S = window.__soak = { t: 0, steps: 0, deaths: 0, crashesForced: 0, pauses: 0, maxWave: 1, totalKills: 0, lives: 1,
     maxBullets: 0, bulletsFull: 0, maxParticles: 0, minFree: Infinity, under20: 0, lowFree: null, maxVoices: 0, maxMissiles: 0,
-    gunToggles: 0, launches: 0, impacts: 0, anomalies: {}, events: [], mode: 'hunt', modeT: 0, lifeT: 0 };
+    gunToggles: 0, launches: 0, impacts: 0, anomalies: {}, events: [], mode: 'hunt', modeT: 0, lifeT: 0,
+    watched: 0, live: {}, starvedSteps: 0, starvedBy: {}, episodes: [] };
   const A = (k, detail) => { (S.anomalies[k] ||= { n: 0, firstAt: +S.t.toFixed(2), detail }).n++; };
   const fin = v => Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
   const _to = new T.Vector3(), _loc = new T.Vector3(), _q = new T.Quaternion();
   // Count calls through the sound API, to prove those paths ran.
   const snd = G.snd, count = (name, key) => { const f = snd[name].bind(snd); snd[name] = (...a) => { S[key]++; return f(...a); }; };
   count('missileLaunch', 'launches'); count('impact', 'impacts');
+  // The game counts requests and drops per particle emitter (a page from before it did has no
+  // counters, and gets the old by-type breakdown). Whenever a non-trail request is refused,
+  // note what was holding the pool, and group refusals less than half a second apart.
+  let E = null; try { E = Object.values(G.emitters); } catch {}
+  const seen = E ? E.map(e => e.dropped) : [], holder = q => q.emitter ? q.emitter.name : q.type + (q.isTrail ? '/trail' : '');
+  function drops() {
+    let fresh = null;
+    E.forEach((e, i) => { if (e.dropped > seen[i]) { if (!e.trail) (fresh ||= {})[e.name] = e.dropped - seen[i]; seen[i] = e.dropped; } });
+    if (!fresh) return;
+    const using = {}; for (const q of G.particles) using[holder(q)] = (using[holder(q)] || 0) + 1;
+    S.starvedSteps++; for (const k in using) S.starvedBy[k] = (S.starvedBy[k] || 0) + using[k];
+    const last = S.episodes[S.episodes.length - 1];
+    if (last && S.t - last.end < 0.5) { last.end = S.t; for (const k in fresh) last.dropped[k] = (last.dropped[k] || 0) + fresh[k]; return; }
+    S.episodes.push({ t: +S.t.toFixed(1), end: S.t, mode: G.gameOver ? 'dead' : S.mode, firing: !!K.Space,
+      missiles: G.missiles.filter(m => m.userData.active).length, dropped: fresh, using });
+  }
 
   function bot(dt) {
     for (const k of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD', 'KeyW', 'KeyS', 'Space', 'KeyF']) K[k] = false;
@@ -86,6 +103,7 @@ await p.evaluate(() => {
     let nb = 0; for (const b of G.bullets) if (b.userData.active) { nb++; if (!fin(b.position)) A('bullet non-finite'); }
     let nm = 0; for (const m of G.missiles) if (m.userData.active) { nm++; if (!fin(m.position) || !fin(m.userData.vel)) A('missile non-finite'); }
     for (const q of G.particles) if (!fin(q.position)) { A('particle non-finite'); break; }
+    S.watched++; for (const q of G.particles) S.live[holder(q)] = (S.live[holder(q)] || 0) + 1;
     S.maxBullets = Math.max(S.maxBullets, nb); if (nb >= G.MAX_BULLETS) S.bulletsFull++;
     S.maxMissiles = Math.max(S.maxMissiles, nm);
     S.maxParticles = Math.max(S.maxParticles, G.particles.length);
@@ -98,7 +116,7 @@ await p.evaluate(() => {
     if (free < S.minFree) {
       S.minFree = free;
       const using = {};
-      for (const q of G.particles) { const k = q.type + (q.isTrail ? '/trail' : ''); using[k] = (using[k] || 0) + 1; }
+      for (const q of G.particles) using[holder(q)] = (using[holder(q)] || 0) + 1;
       S.lowFree = { t: +S.t.toFixed(1), free, firing: !!K.Space, missiles: nm, enemies: G.enemies.length, using };
     }
     const s = G.snd;
@@ -120,6 +138,7 @@ await p.evaluate(() => {
       try { G.frame(dt, renderLast && i === n - 1); }
       catch (e) { A('exception in frame: ' + e.message, (e.stack || '').split('\n').slice(0, 3).join(' | ')); }
       S.t += dt; S.steps++; S.lifeT += dt;
+      if (E) drops();
       if (!G.gameOver && !G.paused) watch();
       const gun = !!G.snd._gun; if (gun !== wasGun) { S.gunToggles++; wasGun = gun; }
       S.maxWave = Math.max(S.maxWave, G.wave);
@@ -162,7 +181,8 @@ const leftover = await p.evaluate(() => { const G = window.__g; G.keys.Space = f
   return G.snd.voices.filter(v => !(v.follow && v.release))
     .filter(v => !Number.isFinite(v.end) || v.end < now || v.end - now > 120)
     .map(v => Number.isFinite(v.end) ? +(v.end - now).toFixed(1) : 'never'); });
-const S = await p.evaluate(() => ({ ...window.__soak, lastKills: window.__g.kills }));
+const S = await p.evaluate(() => { let emitters = null; try { emitters = Object.values(window.__g.emitters); } catch {}
+  return { ...window.__soak, lastKills: window.__g.kills, emitters }; });
 if (leftover.length) S.anomalies['voices that will never be released'] = { n: leftover.length, firstAt: +S.t.toFixed(2), detail: { secondsUntilDeadline: leftover } };
 await game.close();
 
@@ -174,6 +194,15 @@ peaks: bullets ${S.maxBullets} (pool full ${S.bulletsFull} steps), missiles ${S.
 particle pool: lowest free ${S.minFree}, steps under 20 free ${S.under20}${S.lowFree ? `, at the low point ${JSON.stringify(S.lowFree)}` : ''}
 heap MB per game-minute: ${heap.filter((_, i) => i % 6 === 5).join(' ')}`);
 for (const e of S.events.slice(-10)) console.log('  ' + e);
+if (S.emitters) {
+  const mean = k => ((S.live[k] || 0) / Math.max(S.watched, 1)).toFixed(1), at = k => ((S.starvedBy[k] || 0) / Math.max(S.starvedSteps, 1)).toFixed(0);
+  console.log(`\nparticle emitters: requested, dropped, mean live${S.starvedSteps ? ', mean held while a non-trail request was refused' : ''}`);
+  for (const e of [...S.emitters].sort((a, b) => b.dropped - a.dropped || b.requested - a.requested))
+    console.log(`  ${(e.name + (e.trail ? ' (trail)' : '')).padEnd(22)} ${String(e.requested).padStart(9)} ${String(e.dropped).padStart(8)}` +
+      ` ${(e.requested ? (100 * e.dropped / e.requested).toFixed(1) : '0.0').padStart(5)}%  ${mean(e.name).padStart(6)}${S.starvedSteps ? at(e.name).padStart(6) : ''}`);
+  console.log(`non-trail requests refused on ${S.starvedSteps} steps in ${S.episodes.length} episodes`);
+  for (const ep of S.episodes.slice(0, 12)) console.log('  ' + JSON.stringify({ ...ep, end: +ep.end.toFixed(1) }));
+}
 if (anomalies.length || errors.length) {
   console.error('\nFAIL');
   for (const [k, v] of anomalies) console.error(`  anomaly: ${k} x${v.n}, first at ${v.firstAt}s ${v.detail !== undefined ? JSON.stringify(v.detail) : ''}`);

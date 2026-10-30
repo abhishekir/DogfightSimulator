@@ -65,6 +65,7 @@ window.__g = {
   frame: __frame, THREE,
   get player(){return player}, get jet(){return playerJet}, get enemies(){return enemies}, keys,
   get bullets(){return bulletPool}, get missiles(){return missilePool}, get particles(){return activeParticles}, get freeParticles(){return freeParticles},
+  get emitters(){return emitters},
   get snd(){return snd}, get gameOver(){return gameOver}, get gameStarted(){return gameStarted}, get paused(){return paused},
   get wave(){return waveNumber}, get waveState(){return waveState}, get score(){return score}, get kills(){return kills},
   get lockProgress(){return lockProgress}, get deathCamTimer(){return deathCamTimer},

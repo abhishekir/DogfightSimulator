@@ -90,6 +90,10 @@ await p.evaluate(() => {
     S.maxMissiles = Math.max(S.maxMissiles, nm);
     S.maxParticles = Math.max(S.maxParticles, G.particles.length);
     const free = G.freeParticles.length;
+    // Running low is pressure, reported below; losing entries is a leak. Every entry is
+    // either active or free, so the two always sum to the pool's capacity.
+    if (G.particles.length + free !== G.MAX_PARTICLES)
+      A('particle pool entries lost or duplicated', { active: G.particles.length, free, capacity: G.MAX_PARTICLES });
     if (free < 20) S.under20++;
     if (free < S.minFree) {
       S.minFree = free;
@@ -144,15 +148,22 @@ for (let gameT = 0, shot = 0; gameT < MINUTES * 60; gameT += CHUNK * DT) {
   console.log(`[${((Date.now() - t0) / 1000).toFixed(0)}s] ${JSON.stringify(st)}`);
 }
 // Voices expire on the audio clock, which runs in real time while the soak runs much
-// faster, so many are legitimately alive at the end. Let real time pass until every one
-// should have finished, then require that none are left but live missile motors.
+// faster, so many are legitimately alive at the end. Let real time pass (up to 15 s) for
+// them to finish, then judge each remaining voice against its own deadline: one whose
+// deadline is still ahead is fine (a blast 10 km away is not heard for 29 s, and the
+// frame that triggers the cleanup can start new sounds); one that can never end, whose
+// deadline has passed, or whose deadline is implausibly far off is a leak. Live missile
+// motors are the exception: they end when their missile does.
 const wait = await p.evaluate(() => { const s = window.__g.snd, ends = s.voices.map(v => v.end).filter(Number.isFinite);
   return Math.min(15, Math.max(0, ...ends.map(e => e - s.ctx.currentTime))); });
 await p.waitForTimeout(wait * 1000 + 500);
 const leftover = await p.evaluate(() => { const G = window.__g; G.keys.Space = false; G.frame(1 / 60, false);
-  return G.snd.voices.filter(v => !(v.follow && v.release)).length; });
+  const now = G.snd.ctx.currentTime;
+  return G.snd.voices.filter(v => !(v.follow && v.release))
+    .filter(v => !Number.isFinite(v.end) || v.end < now || v.end - now > 120)
+    .map(v => Number.isFinite(v.end) ? +(v.end - now).toFixed(1) : 'never'); });
 const S = await p.evaluate(() => ({ ...window.__soak, lastKills: window.__g.kills }));
-if (leftover) S.anomalies['voices not released after they finished'] = { n: leftover, firstAt: +S.t.toFixed(2) };
+if (leftover.length) S.anomalies['voices that will never be released'] = { n: leftover.length, firstAt: +S.t.toFixed(2), detail: { secondsUntilDeadline: leftover } };
 await game.close();
 
 const anomalies = Object.entries(S.anomalies), errors = [...game.errors.entries()];

@@ -72,7 +72,7 @@ window.__g = {
   ground: getGroundHeight, togglePause,
   start(){document.getElementById('blocker').style.display='none';gameStarted=true;startGame()},
   restart(){startGame()},
-  MAX_BULLETS, MAX_PLAYER_HP, MAX_MISSILE_AMMO,
+  MAX_BULLETS, MAX_PLAYER_HP, MAX_MISSILE_AMMO, MAX_PARTICLES,
 };
 `;
   return html.slice(0, a0) + body + api + splice(html.slice(a1), 'animate();\n</script>', '</script>');

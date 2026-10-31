@@ -66,8 +66,10 @@ before/after comparison is done.
 - `soak.mjs [--minutes 10] [--screens]` — a bot flies the game at a fixed
   timestep (lead pursuit, guns, missiles, forced crashes, random pauses) with a
   watchdog after every step: non-finite values, pool and voice leaks, audio out
-  of step with the trigger, page errors. Ten game-minutes take about a minute.
-  It also reports how close the particle pool came to empty.
+  of step with the trigger, page errors, and an explosion, impact or hit spark
+  refused a particle. Ten game-minutes take about a minute. It also reports
+  how close the particle pool came to empty and, per emitter, how many
+  particles were requested, dropped and evicted.
 - `ui-test.mjs` — plays through the real UI in real time: overlays, keys,
   pause, focus loss, crash, game over, restart, settings across a reload.
 - `audio-check.mjs [--render]` — renders the SoundEngine offline and checks the

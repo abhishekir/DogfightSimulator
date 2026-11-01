@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Three more tools in `.github/tools/` go further. They run locally, not in CI,
+Four more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -75,13 +75,20 @@ before/after comparison is done.
 - `audio-check.mjs [--render]` — renders the SoundEngine offline and checks the
   mix against the engine, positional audio, Doppler, the limiter, volume, and
   regressions the audio has actually had. `--render` writes WAVs to listen to.
+- `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
+  frames on every run: level flight, then a kill with the particle pool under
+  heavy-fight pressure. Run it on two copies of the game with different tags
+  and compare the frames in `.github/tools/out/`; they match until the copies
+  behave differently.
 
 Everything below is still on you.
 
 - Drive it headless: Chromium with `--use-angle=swiftshader`, a generated copy
   of `index.html` with the spawn point and camera overridden, screenshot after a
-  fixed settle time. Slow but deterministic, and it surfaces shader compile
-  errors.
+  fixed settle time. It is slow, and it surfaces shader compile errors. A frame
+  renders the same every time, but two runs do not reach the same frame unless
+  you remove the wall-clock dependencies `scene.mjs` removes (TODO.md,
+  "Verifying a change", lists them).
 - For any numeric knob — coverage, density, wave amplitude — port the function
   to a CPU script and measure before touching the shader. Guessing at these has
   cost more time than measuring ever has.

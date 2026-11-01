@@ -5,8 +5,10 @@ Read "Orientation" first; a couple of the conventions are easy to break by
 accident.
 
 The tasks are sorted by priority, highest first. Each says what is there now,
-what is missing, and what done looks like. How finished systems work is under
-"Reference" at the end, so a task can point there instead of repeating it.
+what is missing, and what done looks like. A task's number is only its rank and
+changes whenever a task is added or finished, so tasks refer to each other by
+title. How finished systems work is under "Reference" at the end, so a task can
+point there instead of repeating it.
 
 | Priority | Meaning |
 |---|---|
@@ -55,6 +57,37 @@ what is missing, and what done looks like. How finished systems work is under
 
 Line numbers drift; search by symbol name.
 
+### The game loop
+
+Where the gameplay lives, for anyone changing how the game plays:
+
+- **Waves** (`updateEnemies`, `getWaveConfig`). Wave *w* has `min(2 + w, 10)`
+  enemies, at most 8 alive at once, spawned 0.8–1.2 s apart and 1,500–2,300 m
+  out. Each wave adds 8 m/s of enemy speed and 5 HP to the base 40, and raises
+  the floor of their aggression and skill by 0.07, up to 0.7. A 3 s intermission
+  comes before each wave; clearing one restores 25 hull and refills the missile
+  rack.
+- **Enemy behaviour** (`updateEnemies`). A state machine built to avoid turn
+  fights. *inbound* sets up ahead of the player. *attack* flies a committed pass
+  at a fixed aim point, shooting inside 500 m when nearly facing the player.
+  After the merge, *extend* runs straight, at least 140 m/s faster than the
+  player (650 m/s at most), for 3–4 s and until it is 700 m away. *reposition*
+  sets up the next pass in the player's forward view.
+  A hit, a player round passing within 60 m or a missile within 250 m triggers
+  *evade* (a roll, a split-S or a climb), with a 2.5 s cooldown.
+- **Damage.** The player has 100 HP. An enemy round costs 5, an enemy missile
+  30, and touching the terrain is fatal in under half a second. A player round
+  does 2.5 (`GUN_DAMAGE`), so a wave-1 enemy takes 16 hits; a missile does 50,
+  which kills outright through wave 3.
+- **Scoring and resupply** (`killEnemy`). A gun kill scores 100 and a missile
+  kill 200. Every kill adds 2 missiles, up to 12.
+- **Flight and weapons** (`updatePlayer`). Roll, pitch and yaw are rates driven
+  by the keys; "Roll response is sluggish" has the measured figures. ↓ pulls the
+  nose up and ↑ pushes it down, as in a flight sim. Throttle sets the target
+  speed directly, 40–450 m/s. A missile locks after F is held for 1.5 s with a
+  target within about 32° of the nose and 1,500 m.
+- **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame.
+
 ### Verifying a change
 
 There is no test suite, and graphics work cannot be verified by reading the
@@ -63,7 +96,18 @@ diff. What worked during the rendering overhaul:
 - Headless Chromium with SwiftShader (`--use-angle=swiftshader`), a generated
   copy of `index.html` with the spawn point and camera overridden, and a
   screenshot after a fixed settle time. Software rendering is slow (seconds per
-  frame) but deterministic, and it does surface shader compile errors.
+  frame), and it does surface shader compile errors.
+- A frame renders the same way every time, but two runs of the game do not
+  reach the same frame, even with `Math.random` seeded, because three things
+  follow the wall clock. three.js takes a random number for every UUID, inside
+  a terrain build budgeted at 4 ms a frame (`stepTerrainBuild`), so the random
+  stream shifts by however many chunks the clock allowed. The sound engine draws
+  random numbers on the audio clock. The HUD's radar sweep and warning blinks
+  follow `Date.now()`. For a before/after comparison, seed `Math.random`, build
+  the terrain queue without the budget, never start the `AudioContext`, and
+  hide the HUD. `.github/tools/scene.mjs` does all four in a scripted fight
+  (level flight, then a kill with the particle pool under heavy-fight
+  pressure), and two runs of it give byte-identical frames.
 - For anything with a numeric knob — cloud coverage, density, wave amplitude —
   port the function to a small CPU script and measure the distribution before
   touching the shader. Several rounds were wasted guessing at values that a
@@ -126,7 +170,18 @@ What to do:
 they have, how many they started with and how to get more, and never fires one
 they did not mean to.
 
-### 2. The gunsight is off the gun line and shows no lead — P1
+### 2. The controls screen has pitch backwards — P1
+
+The start and pause screens say "↑ / ↓ — Pitch Up / Down", but ↑ pushes the
+nose down and ↓ pulls it up, as in a flight sim (`updatePlayer`: "up arrow =
+nose dips down"). A player who presses ↑ to climb dives instead. Fix the label,
+for example "↑ / ↓ — Nose down / up", and offer the other convention as an
+option in "Settings screen".
+
+**Done when:** both screens describe the keys as they work, and the inverted
+option is listed in "Settings screen".
+
+### 3. The gunsight is off the gun line and shows no lead — P1
 
 The reticle is a fixed circle at the centre of the screen, but the guns do not
 point there. In steady flight the chase camera trails about 12 m above and 78 m
@@ -159,7 +214,7 @@ What to do:
 hits it at every range from 200 to 1,000 m, checked by a script that does
 exactly that, and the gun cross stays on the gun line through turns.
 
-### 3. Roll response is sluggish — P1
+### 4. Roll response is sluggish — P1
 
 Roll is a rate. A held key adds 6.5 rad/s² to it while it decays by 7% a frame
 (`updatePlayer`). Porting that update to a script gives a steady roll rate of
@@ -176,19 +231,49 @@ What to do: raise the roll rate and shorten its onset. Tune by measurement first
 within about 0.2 s, is a reasonable place to start. Write the rate as an
 approach to a target rate using `smoothT`, so it no longer depends on frame
 rate. Consider scaling it with airspeed, so the jet rolls more slowly when slow.
-Task 15, the 30+ G question, is the same knob on the pitch axis; decide the two
-together.
+"The flight model allows 30+ G" is the same knob on the pitch axis; decide the
+two together.
 
 **Done when:** a 90° bank takes about half a second from wings level at combat
 speed, the response is the same at 30 and 60 fps, and a playtest no longer
 finds the roll sluggish.
 
-### 4. Aim assist for the gun — P2
+### 5. Difficulty is unmeasured — P2
 
-Do this after task 2: the assist needs the same lead solution the pipper shows.
-Even with a correct pipper, holding it on a manoeuvring target with keyboard
-controls is hard. The options, in order of how much control they take from the
-player:
+The only player in the tools is the soak bot, and it plays far better than a
+person can. It leads its target using the target's exact velocity, aims along
+the true gun line (so it never meets the offset described in "The gunsight is
+off the gun line and shows no lead"), and fires once the lead point is within
+about 14° of the nose and 1,200 m. In eight 15-minute soaks it killed 42–61
+enemies and reached waves 3–5, and nearly all its deaths were crashes it was
+told to make. None of that says how hard the game is for a person, so the
+playability tasks have nothing to measure against.
+
+What to do: give the soak, or a new tool, a pilot that flies like a person.
+
+- Aim with a couple of degrees of noise and a reaction delay of 150–250 ms.
+- Steer by what the HUD shows (the reticle now, the pipper once it exists),
+  not by exact positions.
+- Use missiles the way a player does: hold F when it sees the lock diamond.
+
+Report for each run:
+
+- time to the first kill
+- kills per minute, split into gun and missile kills
+- hits per round fired
+- missiles fired without a lock
+- deaths per wave, other than forced crashes
+
+**Done when:** the soak reports those figures for the person-like pilot, a
+baseline from the current game is written into this task, and each playability
+task quotes its before/after figures against that baseline.
+
+### 6. Aim assist for the gun — P2
+
+Do this after "The gunsight is off the gun line and shows no lead": the assist
+needs the same lead solution the pipper shows. Even with a correct pipper,
+holding it on a manoeuvring target with keyboard controls is hard. The options,
+in order of how much control they take from the player:
 
 - **Round assist.** Rounds fired with the pipper within a degree or two of the
   target bend toward the lead point. The controls are untouched, so it never
@@ -199,16 +284,15 @@ player:
   the trigger is held and the pipper is close. It is the strongest option and
   the one most likely to feel like losing control.
 
-Start with round assist. Make its strength one constant (a setting later, task
-16) and set it by measurement. Give the soak bot human-sized aim error, a couple
-of degrees of noise and a reaction delay, and compare its time to a gun kill
-with and without the assist.
+Start with round assist. Make its strength one constant (a setting later, in
+"Settings screen") and set it by measurement: compare the person-like pilot from
+"Difficulty is unmeasured" with and without the assist.
 
 **Done when:** a player who keeps the pipper roughly on a wave-1 enemy gets a
-gun kill, and the bot with human-sized aim error kills measurably faster with
-the assist than without it.
+gun kill, and the person-like pilot kills measurably faster with the assist
+than without it.
 
-### 5. GPU cost is unmeasured — P2 (needs real hardware)
+### 7. GPU cost is unmeasured — P2 (needs real hardware)
 
 Every performance figure in the commit history comes from a software
 rasteriser, which does not predict GPU cost for an ALU-heavy raymarch. The
@@ -220,7 +304,7 @@ false` is the fallback. This cannot be done in a headless container.
 one integrated and one discrete GPU, and a default for `USE_VOLUMETRIC_CLOUDS`
 is chosen from it.
 
-### 6. Enemy aircraft make no sound — P2
+### 8. Enemy aircraft make no sound — P2
 
 Only the player's engine is audible, so a merge has no audio. Give each entry in
 `enemies` a cheap engine voice through `_voice(..., follow)` (see "Reference:
@@ -235,7 +319,7 @@ nothing but explosions).
 across the stereo field with a Doppler drop, and eight enemies cost less than
 the player's engine.
 
-### 7. Hits and enemy gunfire make no physical sound — P2
+### 9. Hits and enemy gunfire make no physical sound — P2
 
 `hitMarker()` is a UI confirmation tone (limited to one per 80 ms) and should
 stay one, but there is no *physical* impact sound. Rounds striking an airframe
@@ -254,7 +338,7 @@ bake or pool them, and rate-limit per target.
 100 m, and different again from hosing the sea; you hear an enemy firing at
 you.
 
-### 8. Enemy damage you can read at range — P2
+### 10. Enemy damage you can read at range — P2
 
 An enemy carries no visible damage state: you cannot tell one that is about to
 die from a fresh one. Smoke from a damaged enemy, thickening as HP falls, would
@@ -264,7 +348,7 @@ continuous emitter: see "Reference: the particle pool" for how to tag it.
 
 **Done when:** at 1 km you can tell a nearly dead enemy from a fresh one.
 
-### 9. Enemies leave no contrails — P2
+### 11. Enemies leave no contrails — P2
 
 `updateContrails` draws one contrail, the player's, from the fuselage origin.
 At altitude a contrail is how you spot a bandit before the radar does, so
@@ -274,7 +358,7 @@ persistence with altitude rather than the hard 300 m cut while doing it.
 **Done when:** an enemy above 3,000 m is visible by its contrail before it is
 visible as an aircraft.
 
-### 10. Cockpit view — P3
+### 12. Cockpit view — P3
 
 There is one chase camera (`camOff`, `camLookOff`) and nothing else. A cockpit
 or virtual-cockpit view would change how the game reads more than any other
@@ -294,9 +378,10 @@ already modelled. Before starting:
 **Done when:** a key toggles views, the canopy is transparent from inside
 without sorting artefacts, and the HUD sits on the combiner.
 
-### 11. Battle damage on the airframe — P3
+### 13. Battle damage on the airframe — P3
 
-Beyond task 8's smoke, both the player and enemies go from pristine to
+Beyond the smoke in "Enemy damage you can read at range", both the player and
+enemies go from pristine to
 exploding with nothing in between.
 
 - **Surface damage.** Scorch and soot around hit locations. The airframe
@@ -309,7 +394,11 @@ exploding with nothing in between.
 Reuse the particle pool rather than adding another (see "Reference: the
 particle pool").
 
-### 12. Time of day — P3
+**Done when:** an aircraft that has taken hits shows scorch where it was hit,
+heavy hits knock pieces off, a killed engine trails flame, no texture assets
+are added, and the soak still drops nothing outside the trails.
+
+### 14. Time of day — P3
 
 The sun direction is a module-scope constant, and a good deal of tuning assumes
 it: `uCloudShadowOffset` is computed once from it at load, the terrain's
@@ -330,11 +419,15 @@ both tuned at its current elevation of about 21 degrees. So the order matters:
 Even a fixed choice of three or four presets — dawn, noon, golden hour, dusk —
 would be worth a lot and avoids most of the dynamic-shadowing problem.
 
-### 13. Wingtip vortices and contrail polish — P3
+**Done when:** at least those four presets can be chosen, and in a render of
+each, the sky, the water's specular, the cloud lighting and the terrain's
+shadowing all agree with where the sun is.
+
+### 15. Wingtip vortices and contrail polish — P3
 
 **Wingtip vapour** exists in `updatePlayer` under `// Wing vapor`: above 3 G it
 spawns pale smoke particles at both wingtips. It is a puff emitter, not a
-vortex. Remaining (enemy contrails are task 9):
+vortex. Remaining (enemy contrails are in "Enemies leave no contrails"):
 
 - Emit contrails from each wingtip rather than the centreline, so a roll
   visibly twists the pair.
@@ -342,9 +435,13 @@ vortex. Remaining (enemy contrails are task 9):
   and scale it with G rather than switching on at 3.
 - The wingtip positions are hardcoded as `±12 * 1.8` (semi-span times model
   scale). Derive them from the wing stations so they survive the next airframe
-  change.
+  change. That is part of the aircraft definition in "More aircraft:
+  sixth-generation designs", so whichever task comes first does it.
 
-### 14. More aircraft: sixth-generation designs — P3
+**Done when:** a roll visibly twists the pair of wingtip contrails, the vapour
+grows smoothly with G, and the wingtip positions come from the wing geometry.
+
+### 16. More aircraft: sixth-generation designs — P3
 
 Do this last of the large features, once the gameplay and graphics tasks above
 are settled.
@@ -358,7 +455,7 @@ live in `updatePlayer` and the `player` object, and the airframe's geometry is
 repeated as numbers through the code:
 
 - exhaust points at `±.7*1.8, 13*1.8`
-- wingtips at `±12*1.8`
+- wingtips at `±12*1.8` (also in "Wingtip vortices and contrail polish")
 - muzzles at `(±2.5, -.6, -14)`
 - missile rails at `(±5, -1.7, -1)`
 - two nozzles and two afterburner cones, reached through `userData`
@@ -367,8 +464,8 @@ repeated as numbers through the code:
 So start with an aircraft definition holding the geometry builder, the hard
 points (nozzles, muzzles, rails, wingtips), the handling and the engine count.
 Move the current player jet onto it with no visible change, proved by a
-pixel-identical render, before adding anything. Then add the new types, and an
-aircraft choice on the start screen (with task 16).
+pixel-identical render (`.github/tools/scene.mjs`), before adding anything.
+Then add the new types, and an aircraft choice (see "Settings screen").
 
 The two designs wanted are sixth-generation, and both are largely unknown in
 public, so treat the shapes as interpretations, not replicas:
@@ -395,21 +492,31 @@ are assigned.
 its own silhouette and handling, and the soak, the UI test and the smoke test
 pass with each.
 
-### 15. The flight model allows 30+ G — P4 (decision)
+### 17. The flight model allows 30+ G — P4 (decision)
 
-The HUD's G readout regularly shows 30–37 G in hard turns: steady pitch rate
-reaches about 1.15 rad/s, which at 300 m/s is about 35 G. That is the arcade
+The HUD's G readout regularly shows 30–37 G in hard turns. Steady pitch rate
+reaches about 1.05 rad/s (60°/s, measured as in "Roll response is sluggish"),
+which at 300 m/s is about 32 G. That is the arcade
 handling working as built, not a bug, but it sits oddly next to realistic
 airspeed, cannon and missile cues. Decide whether to cap turn rate by speed (a
 real fighter manages about 9 G) or to leave it and stop showing the number.
-Decide it together with task 3: it is the same knob, on the pitch axis.
+Decide it together with "Roll response is sluggish": it is the same knob, on
+the pitch axis.
 
-### 16. Settings screen — P4
+### 18. Settings screen — P4
 
 There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
-(`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source.
+(`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Other tasks
+add settings of their own: inverted pitch ("The controls screen has pitch
+backwards"), aim assist strength ("Aim assist for the gun"), the aircraft ("More
+aircraft: sixth-generation designs") and the time of day ("Time of day").
 
-### 17. Cloud and water quality — P4
+**Done when:** a settings screen, reachable from the start and pause screens,
+sets volume, mute, the graphics options and whichever of those other settings
+exist; they persist across a reload as volume does now, and `ui-test.mjs`
+covers them.
+
+### 19. Cloud and water quality — P4
 
 - The cloud march is half resolution (`CLOUD_SCALE = 0.5`) and resolved with a
   four-tap rotated-grid blur. Temporal reprojection would do better if anyone
@@ -418,7 +525,7 @@ There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
   mirrored camera can see; everything off-screen falls back to the analytic sky
   plus the analytic cloud tint. Look for the seam at grazing angles.
 
-### 18. Small things to keep in mind — P4
+### 20. Small things to keep in mind — P4
 
 - **Below 20 fps, game time runs slow but audio does not.** `dt` is clamped to
   0.05 s, so the simulation slows while the audio clock keeps real time; the
@@ -552,9 +659,10 @@ trails as well was measured too, and rejected. They share the trail cap with
 the missile trails and run earlier in each frame, and missile-trail drops
 doubled to 13–18%. They also began dropping 0.2–2.5% of their own requests.
 That bought nothing, since eviction alone already stopped every one-off drop.
-A new continuous emitter (enemy damage smoke, task 8) can hold dozens of
+A new continuous emitter (the smoke in "Enemy damage you can read at range")
+can hold dozens of
 particles per aircraft, so tag it as a trail: untagged, it cannot be evicted
 and can starve explosions. The soak's table will show which way it went.
 
 `MAX_PARTICLES` is unchanged: eviction made raising it unnecessary, and what the
-particle batches cost on a GPU is unmeasured (task 5).
+particle batches cost on a GPU is unmeasured ("GPU cost is unmeasured").

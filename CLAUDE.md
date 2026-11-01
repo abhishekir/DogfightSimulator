@@ -77,8 +77,9 @@ before/after comparison is done.
   regressions the audio has actually had. `--render` writes WAVs to listen to.
 - `gunsight.mjs [--dt 1/30]` — holds the gun cross on the HUD's lead marker
   against targets flying straight lines at 200–1,000 m and checks the rounds
-  hit, and checks every round fired through a hard turn passes through the gun
-  cross's point. Run it after touching the gunsight, the camera or the guns.
+  hit, that the round assist hits inside its cone and not outside it, and that
+  every round fired through a hard turn passes through the gun cross's point.
+  Run it after touching the gunsight, the camera or the guns.
 - `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
   frames on every run: level flight, then a kill with the particle pool under
   heavy-fight pressure. Run it on two copies of the game with different tags

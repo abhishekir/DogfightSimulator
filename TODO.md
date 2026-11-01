@@ -86,7 +86,17 @@ Where the gameplay lives, for anyone changing how the game plays:
   nose up and ↑ pushes it down, as in a flight sim. Throttle sets the target
   speed directly, 40–450 m/s. A missile locks after F is held for 1.5 s with a
   target within about 32° of the nose and 1,500 m.
-- **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame.
+- **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame. The
+  gunsight is computed, not drawn at a fixed place (`gunSight`): the gun cross is
+  the gun line projected through the camera at the range the rounds will meet
+  the target, the lead marker is where the locked or nearest target will be when
+  they get there (time of flight solved against its velocity, `e.velocity`), and
+  the cross turns red when the marker is inside its ring, which is the 14 m hit
+  radius at that range. The chase camera sits above and behind the jet and lags
+  it, so the guns never pointed at the middle of the screen: the old fixed
+  reticle was 3–5° off the gun line, and a target held in it was missed beyond
+  about 250 m. `GUN_MUZZLE_SPEED`, `GUN_ROUND_LIFE`, `GUN_HIT_RADIUS` and
+  `GUN_ORIGIN` are the ballistics the sight and the cannon share.
 
 ### Verifying a change
 
@@ -181,48 +191,6 @@ option in "Settings screen".
 **Done when:** both screens describe the keys as they work, and the inverted
 option is listed in "Settings screen".
 
-### 3. The gunsight is off the gun line and shows no lead — P1
-
-The reticle is a fixed circle at the centre of the screen, but the guns do not
-point there. In steady flight the chase camera trails about 12 m above and 78 m
-behind the jet, looking slightly down. Measured headless at 960×540 in level
-flight, the gun line passes 22 px above the centre of the screen at 200 m, 30 px
-at 500 m and 35 px at 1,200 m (3.3° to 5.3°). A round hits if it passes within
-14 m of the enemy's centre, so an enemy held in the middle of the reticle is
-missed beyond about 250 m; at 500 m the rounds pass 40 m above it. The offset
-also changes with speed and turn rate, because the camera lags the jet.
-
-The reticle turns red whenever the nearest enemy is within 18° of the nose
-(`isEnemyInCrosshair`, a dot product above 0.95), at any range and however it
-is moving, so red does not mean "shoot". Nothing shows lead either. Rounds
-leave along the nose at the aircraft's speed plus 650 m/s and fly straight for
-2.5 s, so a crossing target has to be led by its velocity times the time of
-flight, and the player has to guess by how much. The enemies already compute a
-lead when they shoot at the player (`updateEnemies`).
-
-What to do:
-
-- Draw the gun cross by projecting a point on the gun line through the camera,
-  at the target's range (or a fixed range when there is no target), instead of
-  drawing it at the centre of the screen.
-- Add a lead marker: solve the time of flight to the nearest or locked target
-  at its current velocity, and project where the target will be when the rounds
-  arrive. The player puts the gun cross on the marker, not on the aircraft: at
-  500 m a target crossing at 100 m/s needs about 60 m of lead, far outside the
-  14 m hit radius.
-- Replace the 18° red cue with one that lights when the gun cross is on the
-  lead marker, within the hit radius at that range.
-
-A sight drawn the other way would also work: a compensated pipper, displaced
-by the lead, that the player lays on the aircraft itself. Whichever is chosen,
-the cue, the test below, "Aim assist for the gun" and the person-like pilot in
-"Difficulty is unmeasured" must all use the same convention.
-
-**Done when:** holding the gun cross on the lead marker of a target flying
-straight at constant speed hits it at every range from 200 to 1,000 m, checked
-by a script that does exactly that, and the gun cross stays on the gun line
-through turns.
-
 ### 4. Roll response is sluggish — P1
 
 Roll is a rate. A held key adds 6.5 rad/s² to it while it decays by 7% a frame
@@ -251,8 +219,8 @@ finds the roll sluggish.
 
 The only player in the tools is the soak bot, and it plays far better than a
 person can. It leads its target using the target's exact velocity, aims along
-the true gun line (so it never meets the offset described in "The gunsight is
-off the gun line and shows no lead"), and fires once the lead point is within
+the true gun line (so it never met the offset the old fixed reticle had), and
+fires once the lead point is within
 about 14° of the nose and 1,200 m. In eight 15-minute soaks it killed 42–61
 enemies and reached waves 3–5, and nearly all its deaths were crashes it was
 told to make. None of that says how hard the game is for a person, so the
@@ -261,8 +229,8 @@ playability tasks have nothing to measure against.
 What to do: give the soak, or a new tool, a pilot that flies like a person.
 
 - Aim with a couple of degrees of noise and a reaction delay of 150–250 ms.
-- Steer by what the HUD shows (the reticle now, the gun cross and lead marker
-  once they exist), not by exact positions.
+- Steer by what the HUD shows (the gun cross and lead marker, `gunSight()`),
+  not by exact positions.
 - Use missiles the way a player does: hold F when it sees the lock diamond.
 
 Report for each run:
@@ -279,8 +247,9 @@ task quotes its before/after figures against that baseline.
 
 ### 6. Aim assist for the gun — P2
 
-Do this after "The gunsight is off the gun line and shows no lead": the assist
-needs the same lead solution the lead marker shows. Even with a correct marker,
+The lead solution the assist needs is the one the lead marker shows: `gunSight()`
+returns the target, the time of flight, the lead marker and the cue, and both the
+HUD and `.github/tools/gunsight.mjs` read it. Even with a correct marker,
 holding the gun cross on it while the target manoeuvres is hard with keyboard
 controls. The options, in order of how much control they take from the player:
 

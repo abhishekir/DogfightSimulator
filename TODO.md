@@ -205,14 +205,23 @@ What to do:
 - Draw the gun cross by projecting a point on the gun line through the camera,
   at the target's range (or a fixed range when there is no target), instead of
   drawing it at the centre of the screen.
-- Add a lead pipper: solve the time of flight to the nearest or locked target
-  at its current velocity, and project where it will be.
-- Replace the 18° red cue with one that means the pipper is on the target, that
-  is, within the hit radius at that range.
+- Add a lead marker: solve the time of flight to the nearest or locked target
+  at its current velocity, and project where the target will be when the rounds
+  arrive. The player puts the gun cross on the marker, not on the aircraft: at
+  500 m a target crossing at 100 m/s needs about 60 m of lead, far outside the
+  14 m hit radius.
+- Replace the 18° red cue with one that lights when the gun cross is on the
+  lead marker, within the hit radius at that range.
 
-**Done when:** holding the pipper on a target flying straight at constant speed
-hits it at every range from 200 to 1,000 m, checked by a script that does
-exactly that, and the gun cross stays on the gun line through turns.
+A sight drawn the other way would also work: a compensated pipper, displaced
+by the lead, that the player lays on the aircraft itself. Whichever is chosen,
+the cue, the test below, "Aim assist for the gun" and the person-like pilot in
+"Difficulty is unmeasured" must all use the same convention.
+
+**Done when:** holding the gun cross on the lead marker of a target flying
+straight at constant speed hits it at every range from 200 to 1,000 m, checked
+by a script that does exactly that, and the gun cross stays on the gun line
+through turns.
 
 ### 4. Roll response is sluggish — P1
 
@@ -252,8 +261,8 @@ playability tasks have nothing to measure against.
 What to do: give the soak, or a new tool, a pilot that flies like a person.
 
 - Aim with a couple of degrees of noise and a reaction delay of 150–250 ms.
-- Steer by what the HUD shows (the reticle now, the pipper once it exists),
-  not by exact positions.
+- Steer by what the HUD shows (the reticle now, the gun cross and lead marker
+  once they exist), not by exact positions.
 - Use missiles the way a player does: hold F when it sees the lock diamond.
 
 Report for each run:
@@ -271,26 +280,26 @@ task quotes its before/after figures against that baseline.
 ### 6. Aim assist for the gun — P2
 
 Do this after "The gunsight is off the gun line and shows no lead": the assist
-needs the same lead solution the pipper shows. Even with a correct pipper,
-holding it on a manoeuvring target with keyboard controls is hard. The options,
-in order of how much control they take from the player:
+needs the same lead solution the lead marker shows. Even with a correct marker,
+holding the gun cross on it while the target manoeuvres is hard with keyboard
+controls. The options, in order of how much control they take from the player:
 
-- **Round assist.** Rounds fired with the pipper within a degree or two of the
-  target bend toward the lead point. The controls are untouched, so it never
+- **Round assist.** Rounds fired with the gun cross within a degree or two of
+  the lead marker bend toward it. The controls are untouched, so it never
   fights the player.
 - **Hit tolerance.** The 14 m hit radius grows with range, so the same angular
   error counts at 1,000 m as at 300 m.
-- **Steering assist.** The nose is pulled gently toward the lead point while
-  the trigger is held and the pipper is close. It is the strongest option and
-  the one most likely to feel like losing control.
+- **Steering assist.** The nose is pulled gently toward the lead marker while
+  the trigger is held and the gun cross is close to it. It is the strongest
+  option and the one most likely to feel like losing control.
 
 Start with round assist. Make its strength one constant (a setting later, in
 "Settings screen") and set it by measurement: compare the person-like pilot from
 "Difficulty is unmeasured" with and without the assist.
 
-**Done when:** a player who keeps the pipper roughly on a wave-1 enemy gets a
-gun kill, and the person-like pilot kills measurably faster with the assist
-than without it.
+**Done when:** a player who keeps the gun cross roughly on a wave-1 enemy's
+lead marker gets a gun kill, and the person-like pilot kills measurably faster
+with the assist than without it.
 
 ### 7. GPU cost is unmeasured — P2 (needs real hardware)
 

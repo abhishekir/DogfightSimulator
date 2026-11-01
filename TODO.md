@@ -83,7 +83,8 @@ Where the gameplay lives, for anyone changing how the game plays:
   kill 200. Every kill adds 2 missiles, up to 12.
 - **Flight and weapons** (`updatePlayer`). Roll, pitch and yaw are rates driven
   by the keys; "Roll response is sluggish" has the measured figures. ↓ pulls the
-  nose up and ↑ pushes it down, as in a flight sim. Throttle sets the target
+  nose up and ↑ pushes it down, as in a flight sim, and the start and pause
+  screens say so. Throttle sets the target
   speed directly, 40–450 m/s. A missile locks after F is held for 1.5 s with a
   target within about 32° of the nose and 1,500 m.
 - **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame.
@@ -169,17 +170,6 @@ What to do:
 **Done when:** a player who has not read the source can say how many missiles
 they have, how many they started with and how to get more, and never fires one
 they did not mean to.
-
-### 2. The controls screen has pitch backwards — P1
-
-The start and pause screens say "↑ / ↓ — Pitch Up / Down", but ↑ pushes the
-nose down and ↓ pulls it up, as in a flight sim (`updatePlayer`: "up arrow =
-nose dips down"). A player who presses ↑ to climb dives instead. Fix the label,
-for example "↑ / ↓ — Nose down / up", and offer the other convention as an
-option in "Settings screen".
-
-**Done when:** both screens describe the keys as they work, and the inverted
-option is listed in "Settings screen".
 
 ### 3. The gunsight is off the gun line and shows no lead — P1
 
@@ -515,10 +505,17 @@ the pitch axis.
 ### 18. Settings screen — P4
 
 There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
-(`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Other tasks
-add settings of their own: inverted pitch ("The controls screen has pitch
-backwards"), aim assist strength ("Aim assist for the gun"), the aircraft ("More
-aircraft: sixth-generation designs") and the time of day ("Time of day").
+(`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Settings
+other work wants:
+
+- **Pitch keys.** ↑ pushes the nose down and ↓ pulls it up, as a stick does
+  (`updatePlayer`, the `pI` line), and the start and pause screens say so. Offer
+  the other convention, ↑ for nose up, as an option, and have both screens
+  describe whichever is chosen. `ui-test.mjs` checks that the keys do what the
+  screens say ("↑ pushes the nose down"); it will need to follow the option.
+- Aim assist strength ("Aim assist for the gun").
+- The aircraft ("More aircraft: sixth-generation designs").
+- The time of day ("Time of day").
 
 **Done when:** a settings screen, reachable from the start and pause screens,
 sets volume, mute, the graphics options and whichever of those other settings

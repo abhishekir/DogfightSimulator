@@ -27,6 +27,10 @@ const clickCentre = () => p.mouse.click(320, 180);
 await p.waitForFunction(() => window.__snd, null, { timeout: 90000 });
 await p.waitForTimeout(3000);
 
+// The title screen says how the missile rack works.
+const title = await ev(() => document.getElementById('blocker').innerText);
+check('start screen explains the missile rack', /12 in the rack/.test(title) && /\+2 per kill/.test(title) && /wave is cleared/.test(title));
+
 // Volume keys on the title screen, before the audio context exists.
 for (let i = 0; i < 3; i++) await p.keyboard.press('Minus');
 check('volume keys work before start', await ev(() => window.__snd.volume) === 0.7, await ev(() => window.__snd.volume));
@@ -81,6 +85,15 @@ check('seeker audible while F held', await until(() => window.__snd.seekGain.gai
 await p.keyboard.up('KeyF');
 check('seeker fades out after F released', await until(() => window.__snd.seekGain.gain.value < 0.01, 20000),
       await ev(() => window.__snd.seekGain.gain.value));
+
+// F with an empty rack sounds the empty cue and fires nothing.
+await ev(() => { window.__pl.missileAmmo = 0; });
+const before = await ev(() => window.__snd._lastRackEmpty);
+await p.keyboard.down('KeyF');
+check('F with an empty rack sounds the empty cue', await until(() => window.__snd._lastRackEmpty > 0, 10000), await ev(() => window.__snd._lastRackEmpty));
+await p.keyboard.up('KeyF');
+check('an empty rack stays empty', await ev(() => window.__pl.missileAmmo) === 0 && before < 0);
+await ev(() => { window.__pl.missileAmmo = 12; });
 
 // Crash into the ground while firing.
 await p.keyboard.down('Space');

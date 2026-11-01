@@ -36,7 +36,8 @@ canvas{display:block}
     <span>↑ / ↓</span> — Pitch Up / Down<br>
     <span>← / →</span> — Roll Left / Right<br>
     <span>SPACE</span> — Fire Cannons<br>
-    <span>F (hold)</span> — Lock &amp; Fire Missile<br>
+    <span>F (hold)</span> — Lock on; fires when locked<br>
+    <span>MISSILES</span> — 12 in the rack, +2 per kill, full reload when a wave is cleared<br>
     <span>− / +</span> — Volume &nbsp; <span>M</span> — Mute<br>
     <span>ESC</span> — Pause
   </div>
@@ -55,7 +56,8 @@ canvas{display:block}
     <span>↑ / ↓</span> — Pitch Up / Down<br>
     <span>← / →</span> — Roll Left / Right<br>
     <span>SPACE</span> — Fire Cannons<br>
-    <span>F (hold)</span> — Lock &amp; Fire Missile<br>
+    <span>F (hold)</span> — Lock on; fires when locked<br>
+    <span>MISSILES</span> — 12 in the rack, +2 per kill, full reload when a wave is cleared<br>
     <span>− / +</span> — Volume &nbsp; <span>M</span> — Mute<br>
     <span>ESC</span> — Resume
   </div>
@@ -101,7 +103,7 @@ class SoundEngine {
     this.ctx = null; this.noiseBuffer = null;
     this.voices = [];
     this.listenerPos = new THREE.Vector3(); this.listenerVel = new THREE.Vector3(); this._listenerPlaced = false;
-    this._fireDuck = 1; this._gun = null; this._lastHitMarker = 0;
+    this._fireDuck = 1; this._gun = null; this._lastHitMarker = 0; this._lastRackEmpty = -1;
     this.volume = 1; this.muted = false;
     try {
       const s = JSON.parse(localStorage.getItem(AUDIO_SETTINGS_KEY));
@@ -653,6 +655,27 @@ class SoundEngine {
     g.gain.setValueAtTime(0.1, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
     o.connect(g); g.connect(this.buses.cockpit); o.start(now); o.stop(now + 0.07);
   }
+  // The missile rack is empty: two short falling beeps over the headset, when the last
+  // missile leaves the rail and whenever F is pressed with none left. Fixed pitches, so it is
+  // never mistaken for the seeker, whose pitch moves with the lock; band-limited and softly
+  // saturated like the seeker, so the two sound like the same headset.
+  rackEmpty() {
+    if (!this.ctx) return;
+    const ctx = this.ctx, now = ctx.currentTime;
+    if (now - this._lastRackEmpty < 0.3) return;
+    this._lastRackEmpty = now;
+    const hp = ctx.createBiquadFilter(), lp = ctx.createBiquadFilter(), drive = ctx.createWaveShaper(), out = ctx.createGain();
+    hp.type = 'highpass'; hp.frequency.value = 300; lp.type = 'lowpass'; lp.frequency.value = 3400;
+    drive.curve = this.softClip; out.gain.value = 0.12;
+    hp.connect(lp); lp.connect(drive); drive.connect(out); out.connect(this.buses.cockpit);
+    for (const [hz, at] of [[880, 0], [587, 0.12]]) {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t = now + at;
+      o.type = 'square'; o.frequency.value = hz;
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.5, t + 0.006);
+      g.gain.setValueAtTime(0.5, t + 0.075); g.gain.linearRampToValueAtTime(0, t + 0.09);
+      o.connect(g); g.connect(hp); o.start(t); o.stop(t + 0.1);
+    }
+  }
   // Volume runs 0-1 in tenths and is applied squared, so the steps sound roughly even.
   // It and the mute flag persist across sessions where the browser allows storage.
   setVolume(v) { this.volume = Math.round(THREE.MathUtils.clamp(v, 0, 1) * 10) / 10; this.muted = false; this._applyOutput(); }
@@ -679,7 +702,10 @@ let sunDirection = new THREE.Vector3();
 let gForce = 1, screenShake = 0, hitFlash = 0, fovPulse = 0;
 let incomingThreat = false, threatDir = new THREE.Vector3();
 let lockTarget = null, lockProgress = 0;
-const LOCK_TIME = 1.5, LOCK_CONE = 0.85, LOCK_WAIT_PROGRESS = 0.99;
+// What the seeker is doing while F is held, for the HUD: null with F up, else 'search',
+// 'range' (a target in the cone but beyond lock range), 'locking', 'locked' or 'empty'.
+let seekerState = null, rackEmptyFlash = 0;
+const LOCK_TIME = 1.5, LOCK_CONE = 0.85, LOCK_RANGE = 1500, LOCK_WAIT_PROGRESS = 0.99;
 const MAX_PLAYER_HP = 100, MAX_MISSILE_AMMO = 12;
 let deathCamTimer = 0, deathCamCenter = new THREE.Vector3(), deathCamAngle = 0;
 const killNotifications = [];
@@ -2576,7 +2602,7 @@ function createPlayerJet(){
 const playerJet=createPlayerJet();playerJet.position.set(0,350,0);scene.add(playerJet);
 const player={minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,0,-120),
   rollRate:0,pitchRate:0,yawRate:0,hp:MAX_PLAYER_HP,gunSpin:0,gunPhase:0,gunRound:0,onGround:false,missileCooldown:0,missileAmmo:MAX_MISSILE_AMMO,
-  missileSide:1,prevVelocity:new THREE.Vector3(),prevPosition:playerJet.position.clone()};
+  missileSide:1,fWasDown:false,prevVelocity:new THREE.Vector3(),prevPosition:playerJet.position.clone()};
 
 /* ═══════════════════ ENEMY JET ═══════════════════ */
 const eBMat=airframeMaterial(0x74413a,{roughness:.56});
@@ -3008,7 +3034,7 @@ function emitMissileTrail(m,activeMissiles){
     distanceToNext+=spacing}
   u.trailDistance=(u.trailDistance+travel)%spacing;u.prevPos.copy(m.position);
 }
-function addKillNotification(sv){killNotifications.push({text:'ENEMY DESTROYED',score:sv,timer:2.5,maxTimer:2.5})}
+function addKillNotification(sv,missiles){killNotifications.push({text:'ENEMY DESTROYED',score:sv,missiles,timer:2.5,maxTimer:2.5})}
 
 /* ═══════════════════ CAMERA ═══════════════════ */
 // The airframe is about 47 m nose to tail. At the old 28-unit offset the camera sat five
@@ -3113,30 +3139,38 @@ function updatePlayer(dt){
       if(Math.random()<.4)emitMuzzle(_gunPos)}}
   else player.gunPhase=0;
 
-  // Lock-on system
+  // Lock-on system. A missile leaves only on a lock: with nothing in the seeker no lock
+  // builds, and one lost before it completes starts again from nothing. (Holding F with
+  // nothing locked used to fire unguided every half second, which emptied the rack of a
+  // player holding F while manoeuvring for a shot.)
   player.missileCooldown-=dt;let seekSignal=-1;
-  if(keys['KeyF']&&player.missileAmmo>0){
+  const fDown=!!keys['KeyF'];
+  if(fDown&&!player.fWasDown&&player.missileAmmo<=0){snd.rackEmpty();rackEmptyFlash=2}
+  player.fWasDown=fDown;
+  if(fDown&&player.missileAmmo>0){
     const fwd=_fwd;
     const maxLockProgress=missilePool.some(m=>!m.userData.active)?1:LOCK_WAIT_PROGRESS;
-    let best=null,bestD=LOCK_CONE;
+    let best=null,bestD=LOCK_CONE,outOfRange=false;
     for(const e of enemies){if(!e.alive)continue;const dir=new THREE.Vector3().subVectors(e.mesh.position,playerJet.position).normalize();
       const dot=dir.dot(fwd),dist=e.mesh.position.distanceTo(playerJet.position);
-      if(dot>bestD&&dist<1500){bestD=dot;best=e}}
+      if(dot>LOCK_CONE&&dist>=LOCK_RANGE)outOfRange=true;
+      if(dot>bestD&&dist<LOCK_RANGE){bestD=dot;best=e}}
     // Seeker signal: stronger the more centred and the closer the target.
-    if(best)seekSignal=.15+.85*(.6*(bestD-LOCK_CONE)/(1-LOCK_CONE)+.4*(1-best.mesh.position.distanceTo(playerJet.position)/1500));
+    if(best)seekSignal=.15+.85*(.6*(bestD-LOCK_CONE)/(1-LOCK_CONE)+.4*(1-best.mesh.position.distanceTo(playerJet.position)/LOCK_RANGE));
     else seekSignal=0;
     if(best){if(lockTarget!==best){lockTarget=best;lockProgress=0}
       lockProgress=Math.min(lockProgress+dt/LOCK_TIME,maxLockProgress)}
-    else{lockTarget=null;lockProgress=Math.min(lockProgress+dt*2,maxLockProgress);
-      // Dumb-fire if no target and held long enough
-    }
-    if(lockProgress>=1&&player.missileCooldown<=0){
+    else{lockTarget=null;lockProgress=0}
+    if(lockTarget&&lockProgress>=1&&player.missileCooldown<=0){
       const launchSide=player.missileSide;
       const mp=new THREE.Vector3(launchSide*5,-1.7,-1).applyQuaternion(playerJet.quaternion).add(playerJet.position);
       const launched=spawnMissile(mp,fwd.clone(),player.velocity,lockTarget,false,launchSide);
-      if(launched){lockProgress=0;player.missileCooldown=.5;player.missileSide*=-1;player.missileAmmo--;snd.missileLaunch(launched)}
+      if(launched){lockProgress=0;player.missileCooldown=.5;player.missileSide*=-1;player.missileAmmo--;snd.missileLaunch(launched);
+        if(player.missileAmmo<=0){snd.rackEmpty();rackEmptyFlash=2}}
       else lockProgress=LOCK_WAIT_PROGRESS}
-  }else{lockTarget=null;lockProgress=0}
+    seekerState=best?(lockProgress>=1?'locked':'locking'):outOfRange?'range':'search';
+  }else{lockTarget=null;lockProgress=0;seekerState=fDown?'empty':null}
+  if(rackEmptyFlash>0)rackEmptyFlash=Math.max(rackEmptyFlash-dt,0);
 
   // Speed lines
   if(player.throttle>.7)for(const sl of speedLines)if(!sl.userData.active&&Math.random()<.35){
@@ -3350,8 +3384,8 @@ function updateEnemies(dt){
 function killEnemy(e,sv){e.alive=false;spawnExplosion(e.mesh.position,sv>100?55:40,emitters.explosion);
   snd.explosion(e.mesh.position);snd.hitMarker();
   scene.remove(e.mesh);const idx=enemies.indexOf(e);if(idx>=0)enemies.splice(idx,1);
-  score+=sv;kills++;player.missileAmmo=Math.min(player.missileAmmo+2,MAX_MISSILE_AMMO);
-  addKillNotification(sv);fovPulse=.3;
+  score+=sv;kills++;const ammo=player.missileAmmo;player.missileAmmo=Math.min(ammo+2,MAX_MISSILE_AMMO);
+  addKillNotification(sv,player.missileAmmo-ammo);fovPulse=.3;
   waveKilled++;
   if(waveKilled>=waveTotal&&enemies.length===0){
     waveState='cleared';waveTimer=4;waveDisplayText=`WAVE ${waveNumber} CLEARED`;waveDisplayTimer=3;
@@ -3471,6 +3505,17 @@ function drawHUD(){
   for(const a of [0,Math.PI,Math.PI/2,-Math.PI/2]){hud.beginPath();hud.arc(cx,cy,38,a-.15,a+.15);hud.stroke()}
   hud.shadowBlur=0;
 
+  // Missiles beside the reticle, where the eye is in a fight: the count against the rack,
+  // and while F is held what the seeker is doing. Outside the attitude box, which is 70 px.
+  { const mx=cx+78,empty=player.missileAmmo<=0,blink=rackEmptyFlash>0&&Math.floor(rackEmptyFlash*6)%2===0;
+    hud.textAlign='left';hud.font='bold 12px Courier New';hud.shadowColor='rgba(0,0,0,.85)';hud.shadowBlur=3;
+    hud.fillStyle=empty?(blink?'transparent':'#ff3333'):'#ff9933';
+    hud.fillText(empty?'NO MISSILES':`MSL ${player.missileAmmo}/${MAX_MISSILE_AMMO}`,mx,cy-2);
+    const st={search:['SEARCHING','#8cf'],range:['OUT OF RANGE','#fa0'],locking:[`LOCKING ${Math.round(lockProgress*100)}%`,'#ffcc00'],
+      locked:['LOCKED','#ff3333']}[seekerState];
+    if(st){hud.font='bold 11px Courier New';hud.fillStyle=st[1];hud.fillText(st[0],mx,cy+12)}
+    hud.shadowBlur=0; }
+
   if(nearest&&nearest.alive){const sp=nearest.mesh.position.clone().project(camera);
     if(sp.z<1){const sx=(sp.x*.5+.5)*w,sy=(-sp.y*.5+.5)*h;hud.strokeStyle=overE?'#ff0000':'#ff8800';hud.lineWidth=1.5;hud.shadowColor=hud.strokeStyle;hud.shadowBlur=8;const s=overE?20:26;
       hud.beginPath();hud.moveTo(sx-s,sy-s);hud.lineTo(sx-s+10,sy-s);hud.moveTo(sx+s,sy-s);hud.lineTo(sx+s-10,sy-s);hud.moveTo(sx+s,sy+s);hud.lineTo(sx+s-10,sy+s);hud.moveTo(sx-s,sy+s);hud.lineTo(sx-s+10,sy+s);
@@ -3505,7 +3550,8 @@ function drawHUD(){
   hud.fillStyle=player.throttle>.85?'#ff4400':'#00dd66';hud.fillRect(lpX,lpY+130,160*player.throttle,8);
   hud.strokeStyle='rgba(0,255,200,.15)';hud.strokeRect(lpX,lpY+130,160,8);
   hud.fillStyle='#0884';hud.font='9px Courier New';hud.fillText('THROTTLE',lpX+55,lpY+150);
-  hud.fillStyle='#f80';hud.font='11px Courier New';hud.fillText(`MSL: ${'|'.repeat(player.missileAmmo)}`,lpX,lpY+172);
+  hud.fillStyle=player.missileAmmo>0?'#f80':'#f44';hud.font='12px Courier New';
+  hud.fillText(`MSL   ${String(player.missileAmmo).padStart(2)}/${MAX_MISSILE_AMMO} ${'|'.repeat(player.missileAmmo)}`,lpX,lpY+172);
 
   const rpX=w-210,rpY=h-200;hud.fillStyle='rgba(0,15,30,.5)';hud.fillRect(rpX-8,rpY-8,200,185);hud.strokeStyle='rgba(0,255,200,.12)';hud.strokeRect(rpX-8,rpY-8,200,185);
   hud.font='10px Courier New';hud.fillStyle='#0aa';hud.fillText('COMBAT DATA',rpX+50,rpY+5);
@@ -3581,7 +3627,10 @@ function drawHUD(){
     const alpha=ratio<.3?ratio/.3:1;const yOff=cy-80-i*40+(1-ratio)*-20;
     hud.save();hud.globalAlpha=alpha;hud.font='bold 22px Courier New';hud.fillStyle='#ff4444';
     hud.shadowColor='#ff0000';hud.shadowBlur=15;hud.textAlign='center';hud.fillText(kn.text,cx,yOff);
-    hud.font='bold 16px Courier New';hud.fillStyle='#ffcc00';hud.fillText(`+${kn.score}`,cx,yOff+25);
+    // The score, and what the kill put back in the rack (each kill adds 2, up to 12).
+    const sc=`+${kn.score}`,ms=kn.missiles>0?`+${kn.missiles} MSL`:'RACK FULL';
+    hud.font='bold 16px Courier New';const scW=hud.measureText(sc+'   ').width,msW=hud.measureText(ms).width,x0=cx-(scW+msW)/2;
+    hud.textAlign='left';hud.fillStyle='#ffcc00';hud.fillText(sc,x0,yOff+25);hud.fillStyle='#ff9933';hud.fillText(ms,x0+scW,yOff+25);
     hud.restore();hud.textAlign='left'}
 
   // Wave announcement
@@ -3612,11 +3661,11 @@ function checkGameOver(){if(player.hp<=0&&!gameOver){gameOver=true;snd.silence()
 function resetPool(pool){for(const item of pool){item.userData.active=false;item.visible=false}}
 function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.set(0,0,-120);
   player.rollRate=player.pitchRate=player.yawRate=0;player.missileCooldown=0;player.gunSpin=player.gunPhase=player.gunRound=0;player.onGround=false;
-  player.missileAmmo=MAX_MISSILE_AMMO;player.missileSide=1;
+  player.missileAmmo=MAX_MISSILE_AMMO;player.missileSide=1;player.fWasDown=false;
   playerJet.position.set(0,350,0);player.prevPosition.copy(playerJet.position);playerJet.quaternion.identity();playerJet.visible=true;
   rebuildWorldAround(playerJet.position.x,playerJet.position.z);
   score=0;kills=0;gameTime=0;gameOver=false;paused=false;camInit=false;screenShake=0;hitFlash=0;gForce=1;fovPulse=0;
-  lockTarget=null;lockProgress=0;incomingThreat=false;
+  lockTarget=null;lockProgress=0;seekerState=null;rackEmptyFlash=0;incomingThreat=false;
   waveNumber=1;waveTotal=0;waveSpawned=0;waveKilled=0;waveState='intermission';waveTimer=3;waveSpawnDelay=0;
   waveDisplayText='WAVE 1';waveDisplayTimer=3;
   deathCamTimer=0;killNotifications.length=0;contrailPos.length=0;

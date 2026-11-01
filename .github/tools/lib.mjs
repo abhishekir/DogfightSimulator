@@ -68,15 +68,30 @@ window.__g = {
   get emitters(){return emitters},
   get snd(){return snd}, get gameOver(){return gameOver}, get gameStarted(){return gameStarted}, get paused(){return paused},
   get wave(){return waveNumber}, get waveState(){return waveState}, get score(){return score}, get kills(){return kills},
-  get lockProgress(){return lockProgress}, get deathCamTimer(){return deathCamTimer},
+  get lockProgress(){return lockProgress}, get lockTarget(){return lockTarget}, get deathCamTimer(){return deathCamTimer},
   get terrainQueue(){return terrainQueue.length}, get camera(){return camera},
   ground: getGroundHeight, togglePause,
+  // What the HUD's sight is built from, for the person-like pilot. Looked up with typeof so
+  // a copy of the game that has replaced one of them still loads.
+  nearest: typeof findNearestEnemy === 'function' ? findNearestEnemy : null,
+  inCrosshair: typeof isEnemyInCrosshair === 'function' ? isEnemyInCrosshair : null,
+  sight: typeof gunSight === 'function' ? gunSight : null,
   start(){document.getElementById('blocker').style.display='none';gameStarted=true;startGame()},
   restart(){startGame()},
   MAX_BULLETS, MAX_PLAYER_HP, MAX_MISSILE_AMMO, MAX_PARTICLES,
 };
 `;
   return html.slice(0, a0) + body + api + splice(html.slice(a1), 'animate();\n</script>', '</script>');
+}
+
+/**
+ * Count what the soak's figures need and the game does not keep: every player round that
+ * hits an enemy, and every kill with its score (100 for the gun, 200 for a missile). Calls
+ * window.__stats.hit(enemy) and window.__stats.kill(enemy, score) when they are defined.
+ */
+export function gameStats(html) {
+  html = splice(html, 'e.hp-=GUN_DAMAGE;e.wasHit=true;', 'e.hp-=GUN_DAMAGE;e.wasHit=true;window.__stats&&window.__stats.hit(e);');
+  return splice(html, 'function killEnemy(e,sv){', 'function killEnemy(e,sv){window.__stats&&window.__stats.kill(e,sv);');
 }
 
 /**

@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Four more tools in `.github/tools/` go further. They run locally, not in CI,
+Five more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -75,6 +75,9 @@ before/after comparison is done.
 - `audio-check.mjs [--render]` — renders the SoundEngine offline and checks the
   mix against the engine, positional audio, Doppler, the limiter, volume, and
   regressions the audio has actually had. `--render` writes WAVs to listen to.
+- `handling.mjs` — holds each control key from rest in the game loop at 60 and
+  30 fps and reports the steady rate, the time to 63% of it and to 90°, and the
+  overrun after release; fails if the roll is not 90° in about 0.5 s at both.
 - `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
   frames on every run: level flight, then a kill with the particle pool under
   heavy-fight pressure. Run it on two copies of the game with different tags

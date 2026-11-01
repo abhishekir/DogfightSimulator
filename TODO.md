@@ -122,6 +122,10 @@ diff. What worked during the rendering overhaul:
   game-minutes take about a minute.
 - For anything a player touches, `.github/tools/ui-test.mjs`, which plays
   through the real overlays and keys in real time.
+- For anything that changes how the game plays, the person-like pilot in
+  "Difficulty is unmeasured": four tagged 15-minute runs of
+  `soak.mjs --pilot person` on the old copy (`--page`) and four on the new, then
+  `.github/tools/figures.mjs` on the two tags.
 - For audio, `.github/tools/audio-check.mjs`: it renders the SoundEngine
   offline, each bus soloed, measured A-weighted, and checks the mix and the
   regressions listed in it. Ears and headphones differ; its numbers do not.
@@ -249,33 +253,80 @@ finds the roll sluggish.
 
 ### 5. Difficulty is unmeasured — P2
 
-The only player in the tools is the soak bot, and it plays far better than a
-person can. It leads its target using the target's exact velocity, aims along
-the true gun line (so it never meets the offset described in "The gunsight is
-off the gun line and shows no lead"), and fires once the lead point is within
-about 14° of the nose and 1,200 m. In eight 15-minute soaks it killed 42–61
-enemies and reached waves 3–5, and nearly all its deaths were crashes it was
-told to make. None of that says how hard the game is for a person, so the
-playability tasks have nothing to measure against.
+The soak bot plays far better than a person can: it leads its target using the
+target's exact velocity, aims along the true gun line, and reacts within a
+frame. So `soak.mjs --pilot person` flies a pilot built to play like one
+(`.github/tools/person.mjs`; its header has the details):
 
-What to do: give the soak, or a new tool, a pilot that flies like a person.
+- It steers by what the HUD draws, read off the screen: it puts the mark it is
+  steering for on the aim point and turns the screen-space error into a
+  direction through the camera. Today that is the target box on the centre of
+  the reticle. When the page defines `gunSight()`, it reads the sight from there
+  instead (see below).
+- It sees 150–250 ms late (drawn per life) and aims with 1.5° of correlated
+  noise per axis (about 2° in all); whether the mark is in the ring it judges
+  from the symbols as drawn. An enemy off the screen it knows to about 8°.
+- It presses keys like a person, with an 80 ms minimum hold, tapping each axis
+  for a turn rate proportional to the error, with lead and, near the mark, an
+  integral term; more than 10° off it rolls the mark above the canopy and
+  pulls. It learns the jet's turn rates by watching it turn.
+- It fires the gun while the HUD's shoot cue is lit and the mark is inside the
+  ring, under 1,000 m on the range readout. It holds F when a target box is near
+  the aim point under 1,500 m, keeps holding while the lock diamond shows, and
+  lets go when it sees none or sees the launch.
 
-- Aim with a couple of degrees of noise and a reaction delay of 150–250 ms.
-- Steer by what the HUD shows (the reticle now, the gun cross and lead marker
-  once they exist), not by exact positions.
-- Use missiles the way a player does: hold F when it sees the lock diamond.
+`.github/tools/track.mjs` calibrates it against one target flying a straight
+line with its AI frozen: it holds the box a median 2.5–3.1° from the reticle,
+and about 1.3° with the aim noise turned off.
 
-Report for each run:
+For either pilot the soak now reports time to the first kill, kills per minute
+split into gun and missile kills, hits per round fired, missiles fired without a
+lock and deaths per wave other than forced crashes, and `--tag` writes them to
+`.github/tools/out/soak-<tag>.json`. `.github/tools/figures.mjs` pools several
+tagged runs and sets groups side by side. Runs vary a lot (kills per minute
+ranged 0.00–1.14 over four runs of the same game), so compare pooled groups of
+at least four 15-minute runs, never one run against another. A 15-minute run
+takes about 70 s, and four run side by side on four cores.
 
-- time to the first kill
-- kills per minute, split into gun and missile kills
-- hits per round fired
-- missiles fired without a lock
-- deaths per wave, other than forced crashes
+**Baseline**, `main` at 56841cd, four 15-minute runs of the person-like pilot
+and two of the soak bot:
 
-**Done when:** the soak reports those figures for the person-like pilot, a
-baseline from the current game is written into this task, and each playability
-task quotes its before/after figures against that baseline.
+| | person | bot |
+|---|---|---|
+| game-minutes alive | 59.3 | 29.6 |
+| time to first kill, median over lives | 39.1 s (4 of 15 lives made none) | 8.0 s |
+| kills per minute | 0.62 (runs 0.00–1.14) | 3.75 |
+| — gun | 0.05 (three gun kills) | 2.40 |
+| — missile | 0.57 | 1.35 |
+| hits per round fired | 1.33% (86 of 6,460) | 2.45% |
+| missiles fired, without a lock | 212, 69 (33%) | 427, 196 (46%) |
+| deaths on wave 1, 2, 3 (of lives that reached it) | 6/15, 4/7, 1/1 | none in 10 lives |
+
+What it says:
+
+- **The gun does not work for a person.** Three gun kills in an hour. With the
+  noise off, `track.mjs` holds the box within about 1.3° of the reticle's
+  centre on a target crossing at 60–100 m/s and lands no hits at all in
+  1,591–1,764 rounds: the rounds go where the nose points, not where the
+  reticle is, and nothing shows the lead. The few hits the person gets come
+  from its aim noise. That is "The gunsight is off the gun line and shows no
+  lead", measured.
+- **Missiles make nearly every kill, and a third leave without a lock** —
+  the lock is lost or the target dies late in the lock, F is still held, and
+  the rack fires anyway ("Missile count, resupply and dumb-fire are invisible").
+- **A person rarely gets past wave 2**: 7 of 15 lives reached it and one
+  reached wave 3; the bot reached wave 4 in half its lives.
+
+What remains: each playability task quotes its before/after figures against
+this baseline. The sight convention: when "The gunsight is off the gun line and
+shows no lead" lands, define `gunSight()` in the page, returning
+`{ cross, box, lead, target, cue, ring }` (points in HUD pixels, `ring` the
+radius inside which the mark counts as on the cross), draw the HUD from it, and
+the pilot, `track.mjs` and "Aim assist for the gun" all read the same thing.
+
+**Done when:** the P1 playability tasks have quoted before/after figures
+against the baseline; then move the pilot's description to "Reference" and
+drop this task.
 
 ### 6. Aim assist for the gun — P2
 

@@ -63,13 +63,20 @@ take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
 
-- `soak.mjs [--minutes 10] [--screens]` — a bot flies the game at a fixed
-  timestep (lead pursuit, guns, missiles, forced crashes, random pauses) with a
-  watchdog after every step: non-finite values, pool and voice leaks, audio out
-  of step with the trigger, page errors, and an explosion, impact or hit spark
-  refused a particle. Ten game-minutes take about a minute. It also reports
-  how close the particle pool came to empty and, per emitter, how many
-  particles were requested, dropped and evicted.
+- `soak.mjs [--minutes 10] [--pilot bot|person] [--tag name] [--screens]` — a
+  bot flies the game at a fixed timestep (lead pursuit, guns, missiles, forced
+  crashes, random pauses) with a watchdog after every step: non-finite values,
+  pool and voice leaks, audio out of step with the trigger, page errors, and an
+  explosion, impact or hit spark refused a particle. Ten game-minutes take
+  about a minute. It also reports how close the particle pool came to empty
+  and, per emitter, how many particles were requested, dropped and evicted.
+  `--pilot person` flies the person-like pilot (`person.mjs`: steers by the
+  HUD, with a reaction delay and aim noise) instead, and for either pilot it
+  reports how hard the game was: time to first kill, gun and missile kills per
+  minute, hits per round, missiles fired without a lock, deaths per wave.
+  `--tag` saves those figures; `figures.mjs <tag> <tag>` pools tagged runs and
+  sets them side by side, and `track.mjs` checks the pilot's tracking against
+  a target flying a straight line.
 - `ui-test.mjs` — plays through the real UI in real time: overlays, keys,
   pause, focus loss, crash, game over, restart, settings across a reload.
 - `audio-check.mjs [--render]` — renders the SoundEngine offline and checks the
@@ -97,6 +104,9 @@ Everything below is still on you.
 - For simulation changes run `soak.mjs`; for anything a player touches,
   `ui-test.mjs`; for any sound, `audio-check.mjs`, and listen to its renders.
   Set audio levels by measurement, not by ear on one pair of headphones.
+- For anything that changes how the game plays, measure it with the
+  person-like pilot: four 15-minute runs before and four after, compared with
+  `figures.mjs`. Single runs vary too much to compare.
 
 ## Notes
 

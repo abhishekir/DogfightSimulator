@@ -3046,6 +3046,7 @@ function updateCamera(dt){
 const _qP=new THREE.Quaternion(),_qR=new THREE.Quaternion(),_qY=new THREE.Quaternion();
 const _axisX=new THREE.Vector3(1,0,0),_axisY=new THREE.Vector3(0,1,0),_axisZ=new THREE.Vector3(0,0,1);
 const _tmpV1=new THREE.Vector3(),_tmpQ=new THREE.Quaternion(),_gunPos=new THREE.Vector3();
+const _gunAimFrom=new THREE.Vector3(),_gunAimAt=new THREE.Vector3(),_gunDir=new THREE.Vector3();
 const _hudEuler=new THREE.Euler();
 
 // Throttle sets the speed the jet is flying toward, and the guns fire at it plus the muzzle speed.
@@ -3061,12 +3062,24 @@ function findNearestEnemy(){let n=null,md=Infinity;for(const e of enemies){if(!e
 //  - the lead marker is where the target will be when they get there: the time of flight is
 //    solved against its current velocity, |T + V t - M| = s t for target T, muzzle M and
 //    round speed s, which is a quadratic with one positive root since s > |V|;
-//  - the ring is GUN_HIT_RADIUS at that range in pixels, and the cue lights while the lead
-//    marker is inside it and the rounds can get there within their life.
+//  - the ring is how far off the marker the cross can be and still hit: the larger of
+//    GUN_HIT_RADIUS at that range and the assist's cone, GUN_ASSIST (rounds fired with the
+//    lead point that close to the nose are aimed at it); the cue lights while the lead marker
+//    is inside it and the rounds can get there within their life.
 // Put the cross on the marker and the rounds arrive where the target will be. The HUD draws
 // from this, and the test tools read it, so they cannot disagree about where the guns point.
 const GUN_SIGHT_RANGE=600;
+// Round assist ("Aim assist for the gun"): a round fired while the lead point is within this
+// angle of the nose leaves aimed at the lead point instead of straight along the nose. The
+// controls are untouched, so it never fights the player; 0 turns it off.
+const GUN_ASSIST=1.5*Math.PI/180;
 const _gsM=new THREE.Vector3(),_gsF=new THREE.Vector3(),_gsD=new THREE.Vector3(),_gsL=new THREE.Vector3(),_gsP=new THREE.Vector3();
+// Where `target` will be when a round fired from `muzzle` at `speed` gets to it, into `out`;
+// returns the time of flight. |T + V t - M| = s t, the positive root since s > |V|.
+function gunLead(target,muzzle,speed,out){
+  const V=target.velocity;_gsD.subVectors(target.mesh.position,muzzle);
+  const a=V.lengthSq()-speed*speed,b=2*_gsD.dot(V),c=_gsD.lengthSq(),tof=(-b-Math.sqrt(b*b-4*a*c))/(2*a);
+  out.copy(target.mesh.position).addScaledVector(V,tof);return tof}
 function hudPoint(v,w,h){const p=_gsP.copy(v).project(camera);return p.z<1?{x:(p.x*.5+.5)*w,y:(-p.y*.5+.5)*h}:null}
 function gunSight(){
   const w=hudCanvas.width,h=hudCanvas.height;
@@ -3076,15 +3089,12 @@ function gunSight(){
   const s=commandedSpeed()+GUN_MUZZLE_SPEED,target=lockTarget&&lockTarget.alive?lockTarget:findNearestEnemy();
   const out={cross:null,ring:0,target,range:GUN_SIGHT_RANGE,tof:GUN_SIGHT_RANGE/s,inRange:false,box:null,lead:null,cue:false};
   if(target){
-    const V=target.velocity;_gsD.subVectors(target.mesh.position,_gsM);
-    const a=V.lengthSq()-s*s,b=2*_gsD.dot(V),c=_gsD.lengthSq();
-    out.tof=(-b-Math.sqrt(b*b-4*a*c))/(2*a);
-    _gsL.copy(target.mesh.position).addScaledVector(V,out.tof);
+    out.tof=gunLead(target,_gsM,s,_gsL);
     out.range=_gsL.distanceTo(_gsM);out.inRange=out.tof<=GUN_ROUND_LIFE;
     out.box=hudPoint(target.mesh.position,w,h);out.lead=hudPoint(_gsL,w,h);
   }
   out.cross=hudPoint(_gsL.copy(_gsM).addScaledVector(_gsF,out.range),w,h)||{x:w/2,y:h/2};
-  out.ring=(h/2)/Math.tan(camera.fov*Math.PI/360)*GUN_HIT_RADIUS/out.range;
+  out.ring=(h/2)/Math.tan(camera.fov*Math.PI/360)*Math.max(GUN_HIT_RADIUS/out.range,Math.tan(GUN_ASSIST));
   out.cue=!!(out.lead&&out.inRange&&Math.hypot(out.lead.x-out.cross.x,out.lead.y-out.cross.y)<out.ring);
   return out;
 }
@@ -3147,9 +3157,16 @@ function updatePlayer(dt){
   player.gunSpin=trigger?Math.min(player.gunSpin+dt/GUN_SPINUP,1):Math.max(player.gunSpin-dt/GUN_SPINDOWN,0);
   if(trigger){const rate=GUN_RATE*player.gunSpin;player.gunPhase+=rate*dt;
     if(player.gunPhase>=1){
+      // Round assist: with the sight's lead point within GUN_ASSIST of the nose and in reach,
+      // each round leaves its muzzle aimed at it.
+      let assist=false;const tgt=GUN_ASSIST>0&&(lockTarget&&lockTarget.alive?lockTarget:findNearestEnemy());
+      if(tgt){_gunAimFrom.copy(GUN_ORIGIN).applyQuaternion(playerJet.quaternion).add(playerJet.position);
+        const tof=gunLead(tgt,_gunAimFrom,speed+GUN_MUZZLE_SPEED,_gunAimAt);
+        assist=tof<=GUN_ROUND_LIFE&&_gunDir.subVectors(_gunAimAt,_gunAimFrom).normalize().dot(_fwd)>=Math.cos(GUN_ASSIST)}
       while(player.gunPhase>=1){player.gunPhase-=1;
         _gunPos.set(player.gunRound&1?2.5:-2.5,0,0).add(GUN_ORIGIN).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-        const b=spawnBullet(_gunPos,_fwd,speed+GUN_MUZZLE_SPEED,false,player.gunRound%GUN_TRACER_EVERY===0);
+        if(assist)_gunDir.subVectors(_gunAimAt,_gunPos).normalize();
+        const b=spawnBullet(_gunPos,assist?_gunDir:_fwd,speed+GUN_MUZZLE_SPEED,false,player.gunRound%GUN_TRACER_EVERY===0);
         if(b)b.position.addScaledVector(b.userData.vel,player.gunPhase/rate);
         player.gunRound++}
       // A flash on roughly the old gun's cadence; one every frame would flood the particle pool.

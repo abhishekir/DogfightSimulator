@@ -14,9 +14,11 @@
  *   reads the sight from there; otherwise it reads the HUD as drawn before that existed: a
  *   fixed 35 px reticle at the centre of the screen, red when the nearest enemy within
  *   1,500 m is within 18 degrees of the nose, and a box round that enemy.
- * - It sees with a reaction delay drawn per life from 150-250 ms, and with aim noise: a
- *   correlated random offset on where it sees the mark, 1.5 degrees per axis (about 2 all
- *   told) with a 0.4 s time constant. An enemy off the screen it knows only roughly
+ * - It sees with a reaction delay drawn per life from 150-250 ms, and aims with noise: a
+ *   correlated random offset on where it steers the mark to, 1.5 degrees per axis (about 2
+ *   all told) with a 0.4 s time constant. The noise is in its aim, not its eyes: whether
+ *   the mark is inside the ring, or a box near the aim point, it judges from the symbols
+ *   as drawn (late, like everything else). An enemy off the screen it knows only roughly
  *   (8 degrees), as from the radar and a glance over the shoulder.
  * - It presses keys like a person: no key changes state less than 80 ms after it last
  *   changed, and a burst of fire lasts at least 150 ms. It steers by tapping: on each
@@ -102,6 +104,7 @@ export function installPerson(C) {
       q.setFromUnitVectors(ray(a, aim.x, aim.y), ray(m, px, py));
       s.local = v.copy(fwd).applyQuaternion(q).applyQuaternion(qi).clone();
       s.err = Math.hypot(px - aim.x, py - aim.y);
+      s.seen = Math.hypot(mark.x - aim.x, mark.y - aim.y);   // what it sees: the symbols themselves
     } else {
       // Off the screen: the HUD's target if it has one, else the nearest blip, known roughly.
       let tgt = target && target.alive ? target : null;
@@ -111,7 +114,7 @@ export function installPerson(C) {
         s.local.x += P.cx; s.local.y += P.cy; s.local = s.local.normalize().clone();
         if (s.range === Infinity) s.range = Math.round(tgt.mesh.position.distanceTo(jet.position)); }
       else { s.local = s.level; s.range = Infinity; }
-      s.err = Infinity;
+      s.err = s.seen = Infinity;
     }
     const lt = G.lockTarget;
     s.diamond = !!(lt && lt.alive && onScreen(project(lt.mesh.position)));
@@ -154,11 +157,11 @@ export function installPerson(C) {
     if (K.KeyF) {
       wantF = P.t < P.noMissileUntil ? false : s.fHeld ? s.diamond : true;   // no diamond seen while holding: give up
       if (!wantF && P.t >= P.noMissileUntil) P.noMissileUntil = P.t + C.retryLock;
-    } else wantF = P.t >= P.noMissileUntil && s.ammo > 0 && s.onScreen && s.range < C.missileRange && s.err < innerHeight * C.missileWindow;
+    } else wantF = P.t >= P.noMissileUntil && s.ammo > 0 && s.onScreen && s.range < C.missileRange && s.seen < innerHeight * C.missileWindow;
     axis('missile', null, 'KeyF', wantF ? 1 : 0);
 
     // The gun.
-    axis('gun', null, 'Space', s.onScreen && s.cue && s.err < s.ring && s.range < C.fireRange ? 1 : 0, C.minBurst);
+    axis('gun', null, 'Space', s.onScreen && s.cue && s.seen < s.ring && s.range < C.fireRange ? 1 : 0, C.minBurst);
 
     // Steering, toward the mark, or nose up and wings level when the ground is close.
     const ground = s.agl < 350 || (s.vy < 0 && s.agl < -s.vy * 5), L = ground ? s.safe : s.local;

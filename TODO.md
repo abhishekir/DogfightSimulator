@@ -263,8 +263,9 @@ frame. So `soak.mjs --pilot person` flies a pilot built to play like one
   direction through the camera. Today that is the target box on the centre of
   the reticle. When the page defines `gunSight()`, it reads the sight from there
   instead (see below).
-- It sees 150–250 ms late (drawn per life), with 1.5° of correlated aim noise
-  per axis (about 2° in all); an enemy off the screen it knows to about 8°.
+- It sees 150–250 ms late (drawn per life) and aims with 1.5° of correlated
+  noise per axis (about 2° in all); whether the mark is in the ring it judges
+  from the symbols as drawn. An enemy off the screen it knows to about 8°.
 - It presses keys like a person, with an 80 ms minimum hold, tapping each axis
   for a turn rate proportional to the error, with lead and, near the mark, an
   integral term; more than 10° off it rolls the mark above the canopy and
@@ -283,7 +284,7 @@ split into gun and missile kills, hits per round fired, missiles fired without a
 lock and deaths per wave other than forced crashes, and `--tag` writes them to
 `.github/tools/out/soak-<tag>.json`. `.github/tools/figures.mjs` pools several
 tagged runs and sets groups side by side. Runs vary a lot (kills per minute
-ranged 0.27–0.95 over four runs of the same game), so compare pooled groups of
+ranged 0.00–1.14 over four runs of the same game), so compare pooled groups of
 at least four 15-minute runs, never one run against another. A 15-minute run
 takes about 70 s, and four run side by side on four cores.
 
@@ -292,29 +293,29 @@ and two of the soak bot:
 
 | | person | bot |
 |---|---|---|
-| game-minutes alive | 59.2 | 29.6 |
-| time to first kill, median over lives | 39.2 s (3 of 16 lives made none) | 8.0 s |
-| kills per minute | 0.66 (runs 0.27–0.95) | 3.75 |
-| — gun | 0.02 (one gun kill) | 2.40 |
-| — missile | 0.64 | 1.35 |
-| hits per round fired | 0.51% (40 of 7,830) | 2.45% |
-| missiles fired, without a lock | 232, 59 (25%) | 427, 196 (46%) |
-| deaths on wave 1, 2, 3 (of lives that reached it) | 5/16, 6/7, 1/1 | none in 10 lives |
+| game-minutes alive | 59.3 | 29.6 |
+| time to first kill, median over lives | 39.1 s (4 of 15 lives made none) | 8.0 s |
+| kills per minute | 0.62 (runs 0.00–1.14) | 3.75 |
+| — gun | 0.05 (three gun kills) | 2.40 |
+| — missile | 0.57 | 1.35 |
+| hits per round fired | 1.33% (86 of 6,460) | 2.45% |
+| missiles fired, without a lock | 212, 69 (33%) | 427, 196 (46%) |
+| deaths on wave 1, 2, 3 (of lives that reached it) | 6/15, 4/7, 1/1 | none in 10 lives |
 
 What it says:
 
-- **The gun does not work for a person.** One gun kill in an hour. With the
+- **The gun does not work for a person.** Three gun kills in an hour. With the
   noise off, `track.mjs` holds the box within about 1.3° of the reticle's
   centre on a target crossing at 60–100 m/s and lands no hits at all in
   1,591–1,764 rounds: the rounds go where the nose points, not where the
   reticle is, and nothing shows the lead. The few hits the person gets come
   from its aim noise. That is "The gunsight is off the gun line and shows no
   lead", measured.
-- **Missiles make every kill, and a quarter of them leave without a lock** —
+- **Missiles make nearly every kill, and a third leave without a lock** —
   the lock is lost or the target dies late in the lock, F is still held, and
   the rack fires anyway ("Missile count, resupply and dumb-fire are invisible").
-- **Wave 2 is where a person dies**: six of the seven lives that reached it
-  ended there.
+- **A person rarely gets past wave 2**: 7 of 15 lives reached it and one
+  reached wave 3; the bot reached wave 4 in half its lives.
 
 What remains: each playability task quotes its before/after figures against
 this baseline. The sight convention: when "The gunsight is off the gun line and

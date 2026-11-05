@@ -94,7 +94,30 @@ Where the gameplay lives, for anyone changing how the game plays:
   is held, the seeker's state (`seekerState`): searching, out of range, locking,
   locked. An empty rack shows NO MISSILES and sounds `snd.rackEmpty()`, when the
   last missile leaves and whenever F is pressed with none left.
-- **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame.
+- **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame. The
+  gunsight is computed, not drawn at a fixed place (`gunSight`): the gun cross is
+  the gun line projected through the camera at the range the rounds will meet
+  the target, the lead marker is where the locked or nearest target will be when
+  they get there (time of flight solved against its velocity, `e.velocity`), and
+  the cross turns red when the marker is inside its ring, which is the 14 m hit
+  radius at that range. The chase camera sits above and behind the jet and lags
+  it, so the guns never pointed at the middle of the screen: the old fixed
+  reticle was 3–5° off the gun line, and a target held in it was missed beyond
+  about 250 m. `GUN_MUZZLE_SPEED`, `GUN_ROUND_LIFE`, `GUN_HIT_RADIUS` and
+  `GUN_ORIGIN` are the ballistics the sight and the cannon share.
+  Round assist: a round fired while the lead point is within `GUN_ASSIST` (1.5°)
+  of the nose leaves aimed at the lead point (`gunLead`, the sight's own
+  solution), and the sight's ring is the larger of the hit radius and that cone,
+  so the cue still means the rounds will hit. The controls are never touched.
+  Measured with the person-like pilot (four 15-minute runs each, on top of the
+  gunsight): gun kills per minute 0.02 without it, 0.10, 0.08 and 0.13 at 1°,
+  1.5° and 2°; total kills per minute did not separate from the run-to-run
+  spread, because missiles still make most kills. 1.5° was chosen because
+  `.github/tools/gunsight.mjs` can show at that strength that the assist, not
+  the hit radius, makes the hits. Stronger options, if gun kills are still too
+  rare in play: a hit radius that grows with range, or a gentle steering pull
+  toward the marker while the trigger is held (most likely to feel like losing
+  control).
 
 ### Verifying a change
 
@@ -145,48 +168,6 @@ See CLAUDE.md for how to run them.
 
 ## Tasks
 
-
-### 3. The gunsight is off the gun line and shows no lead — P1
-
-The reticle is a fixed circle at the centre of the screen, but the guns do not
-point there. In steady flight the chase camera trails about 12 m above and 78 m
-behind the jet, looking slightly down. Measured headless at 960×540 in level
-flight, the gun line passes 22 px above the centre of the screen at 200 m, 30 px
-at 500 m and 35 px at 1,200 m (3.3° to 5.3°). A round hits if it passes within
-14 m of the enemy's centre, so an enemy held in the middle of the reticle is
-missed beyond about 250 m; at 500 m the rounds pass 40 m above it. The offset
-also changes with speed and turn rate, because the camera lags the jet.
-
-The reticle turns red whenever the nearest enemy is within 18° of the nose
-(`isEnemyInCrosshair`, a dot product above 0.95), at any range and however it
-is moving, so red does not mean "shoot". Nothing shows lead either. Rounds
-leave along the nose at the aircraft's speed plus 650 m/s and fly straight for
-2.5 s, so a crossing target has to be led by its velocity times the time of
-flight, and the player has to guess by how much. The enemies already compute a
-lead when they shoot at the player (`updateEnemies`).
-
-What to do:
-
-- Draw the gun cross by projecting a point on the gun line through the camera,
-  at the target's range (or a fixed range when there is no target), instead of
-  drawing it at the centre of the screen.
-- Add a lead marker: solve the time of flight to the nearest or locked target
-  at its current velocity, and project where the target will be when the rounds
-  arrive. The player puts the gun cross on the marker, not on the aircraft: at
-  500 m a target crossing at 100 m/s needs about 60 m of lead, far outside the
-  14 m hit radius.
-- Replace the 18° red cue with one that lights when the gun cross is on the
-  lead marker, within the hit radius at that range.
-
-A sight drawn the other way would also work: a compensated pipper, displaced
-by the lead, that the player lays on the aircraft itself. Whichever is chosen,
-the cue, the test below, "Aim assist for the gun" and the person-like pilot in
-"Difficulty is unmeasured" must all use the same convention.
-
-**Done when:** holding the gun cross on the lead marker of a target flying
-straight at constant speed hits it at every range from 200 to 1,000 m, checked
-by a script that does exactly that, and the gun cross stays on the gun line
-through turns.
 
 ### 4. Roll response is sluggish — P1
 
@@ -288,30 +269,6 @@ the pilot, `track.mjs` and "Aim assist for the gun" all read the same thing.
 **Done when:** the P1 playability tasks have quoted before/after figures
 against the baseline; then move the pilot's description to "Reference" and
 drop this task.
-
-### 6. Aim assist for the gun — P2
-
-Do this after "The gunsight is off the gun line and shows no lead": the assist
-needs the same lead solution the lead marker shows. Even with a correct marker,
-holding the gun cross on it while the target manoeuvres is hard with keyboard
-controls. The options, in order of how much control they take from the player:
-
-- **Round assist.** Rounds fired with the gun cross within a degree or two of
-  the lead marker bend toward it. The controls are untouched, so it never
-  fights the player.
-- **Hit tolerance.** The 14 m hit radius grows with range, so the same angular
-  error counts at 1,000 m as at 300 m.
-- **Steering assist.** The nose is pulled gently toward the lead marker while
-  the trigger is held and the gun cross is close to it. It is the strongest
-  option and the one most likely to feel like losing control.
-
-Start with round assist. Make its strength one constant (a setting later, in
-"Settings screen") and set it by measurement: compare the person-like pilot from
-"Difficulty is unmeasured" with and without the assist.
-
-**Done when:** a player who keeps the gun cross roughly on a wave-1 enemy's
-lead marker gets a gun kill, and the person-like pilot kills measurably faster
-with the assist than without it.
 
 ### 7. GPU cost is unmeasured — P2 (needs real hardware)
 

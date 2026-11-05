@@ -3125,6 +3125,9 @@ function gunSight(){
   return out;
 }
 
+// Roll: full rate in rad/s, how fast the rate follows the keys (1/s), and the share of the
+// rate left with the hull under 20 (the old per-frame damping gave about the same share).
+const ROLL_RATE=210*Math.PI/180,ROLL_RESPONSE=15,ROLL_DAMAGED=.63;
 function updatePlayer(dt){
   player.prevPosition.copy(playerJet.position);player.prevVelocity.copy(player.velocity);
   if(keys['KeyW'])player.throttle=Math.min(player.throttle+dt*.5,1);
@@ -3137,12 +3140,17 @@ function updatePlayer(dt){
   // Yaw (A/D)
   const yI=(keys['KeyA']?1:0)-(keys['KeyD']?1:0);
   player.yawRate+=yI*3.0*dt;player.yawRate*=Math.pow(.92,dt*60);
-  // Roll (arrow left/right)
+  // Roll (arrow left/right). The rate approaches ROLL_RATE while a key is held and zero when
+  // it is let go, at ROLL_RESPONSE per second, and the roll is integrated exactly over the
+  // step, so it responds the same at any frame rate: 90 degrees from wings level in 0.5 s.
+  // (It used to add 6.5 rad/s^2 and decay 7% a frame: 82 deg/s at 60 fps, 80 at 30, and
+  // 1.3 s to 90 degrees, which made every gun solution late.)
   const rI=(keys['ArrowLeft']?1:0)-(keys['ArrowRight']?1:0);
-  player.rollRate+=rI*6.5*dt;player.rollRate*=Math.pow(.93,dt*60);
+  const rT=rI*ROLL_RATE*(player.hp<20?ROLL_DAMAGED:1),rE=Math.exp(-ROLL_RESPONSE*dt);
+  const rollStep=rT*dt+(player.rollRate-rT)*(1-rE)/ROLL_RESPONSE;player.rollRate=rT+(player.rollRate-rT)*rE;
 
-  if(player.hp<20){player.rollRate*=.96;player.pitchRate*=.96}
-  _qR.setFromAxisAngle(_axisZ,player.rollRate*dt);
+  if(player.hp<20)player.pitchRate*=.96;
+  _qR.setFromAxisAngle(_axisZ,rollStep);
   _qP.setFromAxisAngle(_axisX,player.pitchRate*dt);
   _qY.setFromAxisAngle(_axisY,player.yawRate*dt);
   playerJet.quaternion.multiply(_qY).multiply(_qP).multiply(_qR).normalize();

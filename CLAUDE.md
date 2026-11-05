@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Five more tools in `.github/tools/` go further. They run locally, not in CI,
+Six more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -87,6 +87,9 @@ before/after comparison is done.
   hit, that the round assist hits inside its cone and not outside it, and that
   every round fired through a hard turn passes through the gun cross's point.
   Run it after touching the gunsight, the camera or the guns.
+- `handling.mjs` — holds each control key from rest in the game loop at 60 and
+  30 fps and reports the steady rate, the time to 63% of it and to 90°, and the
+  overrun after release; fails if the roll is not 90° in about 0.5 s at both.
 - `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
   frames on every run: level flight, then a kill with the particle pool under
   heavy-fight pressure. Run it on two copies of the game with different tags

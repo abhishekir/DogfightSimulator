@@ -86,7 +86,14 @@ Where the gameplay lives, for anyone changing how the game plays:
   nose up and ↑ pushes it down, as in a flight sim, and the start and pause
   screens say so. Throttle sets the target
   speed directly, 40–450 m/s. A missile locks after F is held for 1.5 s with a
-  target within about 32° of the nose and 1,500 m.
+  target within about 32° of the nose and 1,500 m (`LOCK_CONE`, `LOCK_RANGE`),
+  and leaves only on a lock: with nothing in the seeker no lock builds, and a
+  lock lost before it completes starts again. (Holding F with nothing locked
+  used to fire unguided every half second; a quarter of a person's missiles went
+  that way.) Beside the reticle the HUD shows the rack (`MSL 7/12`) and, while F
+  is held, the seeker's state (`seekerState`): searching, out of range, locking,
+  locked. An empty rack shows NO MISSILES and sounds `snd.rackEmpty()`, when the
+  last missile leaves and whenever F is pressed with none left.
 - **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame.
 
 ### Verifying a change
@@ -138,42 +145,6 @@ See CLAUDE.md for how to run them.
 
 ## Tasks
 
-### 1. Missile count, resupply and dumb-fire are invisible — P1
-
-The rack holds 12 (`MAX_MISSILE_AMMO`). The HUD shows them as `MSL:` followed
-by one bar per missile, in 11 px type at the foot of the flight-data panel: no
-number, no maximum, and nothing happens when it reaches zero. Holding F with an
-empty rack does nothing at all, with no tone and no message.
-
-Resupply exists, but nothing tells the player about it. Each kill adds 2, up
-to 12 (`killEnemy`), and clearing a wave refills the rack along with 25 hull,
-which only the wave-cleared banner mentions. The start and pause screens say
-"F (hold) — Lock & Fire Missile" and nothing more.
-
-Worse, holding F with no enemy in the seeker cone (within about 32° of the nose
-and 1,500 m: `LOCK_CONE`, 0.85) fires an unguided missile every half second, and
-nothing on the HUD says so. That is the "dumb-fire" branch of the lock-on code
-in `updatePlayer`. Measured headless: holding F with nothing locked, 11 of the
-12 missiles were gone in 6 seconds. A player holding F while manoeuvring for a
-shot empties the rack, which is probably where a new player's missiles go.
-
-What to do:
-
-- Show the count as a number against the maximum (`MSL 7/12`), somewhere the
-  eye goes in a fight (beside the reticle or the lock diamond), not only in
-  the corner panel.
-- Announce an empty rack with a HUD flag and a short tone, and do the same when
-  F is pressed with none left.
-- Add "+2 MSL" to each kill notification (`addKillNotification`).
-- Put one line on the start and pause screens: 12 missiles, 2 more per kill,
-  full reload when a wave is cleared.
-- Stop a held key from dumb-firing. Either fire only on a lock, or make an
-  unguided shot a deliberate fresh press with nothing locked. While F is held,
-  show the seeker's state: searching, locking, locked, or target out of range.
-
-**Done when:** a player who has not read the source can say how many missiles
-they have, how many they started with and how to get more, and never fires one
-they did not mean to.
 
 ### 3. The gunsight is off the gun line and shows no lead — P1
 
@@ -606,7 +577,7 @@ worth preserving.
 **Measure levels before changing them.** Every level in the class was set
 against A-weighted loudness measured offline. At 70% throttle the engine bus is
 about -38 dBA. The seek tone is 2 dB below it; the growl 5–10 dB above, rising
-with lock quality; the track tone 11 dB above; a sustained gun burst about
+with lock quality; the track tone 11 dB above; the empty-rack cue 8 dB above; a sustained gun burst about
 12 dB above; a missile launch about 11 dB above. An enemy blowing up 300 m away
 is about 5 dB above in its first half second, the player's crash 15 dB above,
 peaking into the limiter. Judging by ear on one pair of headphones is how the

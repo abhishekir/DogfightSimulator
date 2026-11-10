@@ -33,7 +33,7 @@ with the wave number. Clearing one restores 25 hull and refills the missile
 rails; each kill returns two missiles, up to the rack's twelve. Missile lock
 takes 1.5 s inside a forward cone and 1,500 m; the seeker growls as it acquires
 and settles into a steady tone on lock, and a missile leaves only on a lock.
-The count and the seeker's state sit beside the reticle.
+The count and the seeker's state are in the flight-data panel, bottom left.
 
 ---
 

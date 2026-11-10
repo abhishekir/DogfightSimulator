@@ -89,10 +89,12 @@ Where the gameplay lives, for anyone changing how the game plays:
   and leaves only on a lock: with nothing in the seeker no lock builds, and a
   lock lost before it completes starts again. (Holding F with nothing locked
   used to fire unguided every half second; a quarter of a person's missiles went
-  that way.) Beside the reticle the HUD shows the rack (`MSL 7/12`) and, while F
-  is held, the seeker's state (`seekerState`): searching, out of range, locking,
-  locked. An empty rack shows NO MISSILES and sounds `snd.rackEmpty()`, when the
-  last missile leaves and whenever F is pressed with none left.
+  that way.) The flight-data panel, bottom left, shows the rack (`MSL 7/12`) and
+  under it the seeker's state (`seekerState`): searching, out of range, locking,
+  locked, or a prompt to hold F. An empty rack reads NO MISSILES, blinking, and
+  sounds `snd.rackEmpty()`, when the last missile leaves and whenever F is
+  pressed with none left. The two corner panels scale with the window (1.25x at
+  720p, 1.5x at 1080p, 2x at 1440p); at their old size the text was 9-12 px.
 - **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame.
 
 ### Verifying a change

@@ -99,8 +99,8 @@ Where the gameplay lives, for anyone changing how the game plays:
   under it the seeker's state (`seekerState`): searching, out of range, locking,
   locked, or a prompt to hold F. An empty rack reads NO MISSILES, blinking, and
   sounds `snd.rackEmpty()`, when the last missile leaves and whenever F is
-  pressed with none left. The two corner panels scale with the window (1.25x at
-  720p, 1.5x at 1080p, 2x at 1440p); at their old size the text was 9-12 px.
+  pressed with none left. The two corner panels scale with the window (1.375x at
+  720p, 1.65x at 1080p, 2.2x at 1440p); at their old size the text was 9-12 px.
 - **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame. The
   gunsight is computed, not drawn at a fixed place (`gunSight`): the gun cross is
   the gun line projected through the camera at the range the rounds will meet

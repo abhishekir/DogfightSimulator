@@ -10,10 +10,11 @@
  *   for (the target box, or the lead marker once the HUD has one) on the aim point (the
  *   reticle, or the gun cross), and turns the screen-space error into a direction through
  *   the camera. It never sees the gun line or the target's velocity. When the page defines
- *   gunSight() (see "The gunsight is off the gun line and shows no lead" in TODO.md) it
- *   reads the sight from there; otherwise it reads the HUD as drawn before that existed: a
- *   fixed 35 px reticle at the centre of the screen, red when the nearest enemy within
- *   1,500 m is within 18 degrees of the nose, and a box round that enemy.
+ *   gunSight() (the game's gunsight: see "The game loop" in TODO.md) it reads the sight
+ *   from there; otherwise, on a copy of the game from before the gunsight, it reads the HUD
+ *   as it was drawn then: a fixed 35 px reticle at the centre of the screen, red when the
+ *   nearest enemy within 1,500 m is within 18 degrees of the nose, and a box round that
+ *   enemy.
  * - It sees with a reaction delay drawn per life from 150-250 ms, and aims with noise: a
  *   correlated random offset on where it steers the mark to, 1.5 degrees per axis (about 2
  *   all told) with a 0.4 s time constant. The noise is in its aim, not its eyes: whether

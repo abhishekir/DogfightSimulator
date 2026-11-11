@@ -157,9 +157,10 @@ diff. What worked during the rendering overhaul:
 - For anything a player touches, `.github/tools/ui-test.mjs`, which plays
   through the real overlays and keys in real time.
 - For anything that changes how the game plays, the person-like pilot in
-  "Difficulty is unmeasured": eight tagged 15-minute runs of
-  `soak.mjs --pilot person` on the old copy (`--page`) and eight on the new,
-  then `.github/tools/figures.mjs` on the two tags. That task says why eight.
+  "Reference: the person-like pilot and the difficulty figures": eight tagged
+  15-minute runs of `soak.mjs --pilot person` on the old copy (`--page`) and
+  eight on the new, then `.github/tools/figures.mjs` on the two tags. That
+  section says why eight.
 - For how the enemies fly, `.github/tools/enemy-flight.mjs`: turn rate, roll
   rate, speed changes and terrain hops of every live enemy, every frame, at 60
   and at 30 fps.
@@ -175,93 +176,82 @@ See CLAUDE.md for how to run them.
 ## Tasks
 
 
-### 5. Difficulty is unmeasured — P2
+### 1. Enemies fly twitchily — P1
 
-The soak bot plays far better than a person can: it leads its target using the
-target's exact velocity, aims along the true gun line, and reacts within a
-frame. So `soak.mjs --pilot person` flies a pilot built to play like one
-(`.github/tools/person.mjs`; its header has the details):
+The first playtest found enemy movement unnatural and twitchy.
+`.github/tools/enemy-flight.mjs` measures it: the person-like pilot fights for
+five game-minutes while every live enemy is sampled every frame. Three runs at
+each frame rate on `main`, as ranges over the runs:
 
-- It steers by what the HUD draws, read off the screen: it puts the mark it is
-  steering for on the aim point and turns the screen-space error into a
-  direction through the camera. Today that is the target box on the centre of
-  the reticle. When the page defines `gunSight()`, it reads the sight from there
-  instead (see below).
-- It sees 150–250 ms late (drawn per life) and aims with 1.5° of correlated
-  noise per axis (about 2° in all); whether the mark is in the ring it judges
-  from the symbols as drawn. An enemy off the screen it knows to about 8°.
-- It presses keys like a person, with an 80 ms minimum hold, tapping each axis
-  for a turn rate proportional to the error, with lead and, near the mark, an
-  integral term; more than 10° off it rolls the mark above the canopy and
-  pulls. It learns the jet's turn rates by watching it turn.
-- It fires the gun while the HUD's shoot cue is lit and the mark is inside the
-  ring, under 1,000 m on the range readout. It holds F when the target box (the
-  aircraft itself, not a lead marker) is near the aim point under 1,500 m, keeps
-  holding while the lock diamond shows, and lets go when it sees none or sees
-  the launch.
+| | fps | median | 95th percentile | 99th | peak |
+|---|---|---|---|---|---|
+| turn rate of the nose, °/s | 60 | 16 | 106–110 | 151–156 | 469–520 |
+| | 30 | 13–18 | 98–114 | 144–159 | 352–529 |
+| roll rate, °/s | 60 | 16–17 | 161–169 | 542–635 | 2,094–2,293 |
+| | 30 | 14–16 | 143–161 | 461–566 | 1,162–1,195 |
+| change of commanded speed, g | 60 | 2.6–3.3 | 10–14 | 35–39 | a step |
+| | 30 | 3.0–3.6 | 10–14 | 37–53 | a step |
 
-`.github/tools/track.mjs` calibrates it against one target flying a straight
-line, its AI skipped altogether (`straightTargets` in `lib.mjs`; moving a
-target from outside and undoing its AI afterwards is not the same, because
-rounds are tested against wherever the AI put it that frame): it holds the box
-a median 2.3–2.9° from the reticle, and 1.0–1.3° with the aim noise turned off.
+The player's jet pitches at 60°/s at most. What the two frame rates show:
 
-For either pilot the soak now reports time to the first kill, kills per minute
-split into gun and missile kills, hits per round fired, missiles fired without a
-lock and deaths per wave other than forced crashes, and `--tag` writes them to
-`.github/tools/out/soak-<tag>.json`. `.github/tools/figures.mjs` pools several
-tagged runs and sets groups side by side, with the mean of the runs and its
-standard error.
+- **Turn rate does not depend on the frame rate.** The medians and percentiles
+  agree, and the peaks overlap from run to run (a peak is one frame of one
+  enemy).
+- **Roll does.** The roll peak halves at 30 fps, because the bank is added once
+  a frame, not per second (below). So enemies roll differently at different
+  frame rates, which is a bug in its own right.
+- **Speed changes are steps.** The commanded speed jumps by up to 394–452 m/s
+  in a single frame at either frame rate, so its "g" is only the step divided
+  by one frame time.
+- **1.7–4.5% of enemy-frames are moved by the ground rules**, not by flying:
+  the terrain clamp, and the 80 m/s climb below 80 m.
 
-**Runs vary a lot, and four a side is not enough.** Kills per minute ranged
-0.40–1.28 over eight runs of the same game, and the standard error of an
-eight-run mean is about 0.1. Two eight-run groups less than about 0.3 kills per
-minute apart have not been told apart. The first comparisons made with this
-pilot used four runs a side and read noise as results (two four-run pools of
-one game gave 0.75 and 0.95). Use eight 15-minute runs a side at least, sixteen
-for anything rare such as gun kills, and say what the standard error is. A
-15-minute run takes about 70 s, and four run side by side on four cores.
+Where it comes from (`updateEnemies`, `smoothLookAt`):
 
-**Baseline**, `main` at 56841cd: eight 15-minute runs of the person-like pilot
-and four of the soak bot.
+- **Steering.** Each frame the nose slerps toward a target point by
+  `smoothT(turnRate, dt)` of the angle left, so the turn rate is proportional to
+  the error, with no limit: a point 180° away swings the nose at
+  `turnRate × π` rad/s to begin with, and evade's `turnRate` reaches 3.2. Every
+  state change picks a new point at once (an aim point, a fixed extend vector, a
+  random evade direction), so the nose flicks at each one; evade peaks highest.
+- **Bank.** The look rotation is wings-level, and a roll of 0.6 rad × (direction
+  to the target point · right wing) is multiplied in after it every frame, with
+  no `dt`: up to 34° a frame, which is about 2,060°/s at 60 fps and 1,030°/s at
+  30. The wings follow where the target point is, not the turn being flown, and
+  flip when the point swings across.
+- **Speed.** Each state assigns `currentSpeed` outright every frame
+  (`enemyPositioningSpeed` follows the range and the player's speed), so speed
+  has no inertia and jumps at a state change: extend demands at least the
+  player's speed plus 140 m/s.
+- **Terrain.** Below 60 m above the ground the position is clamped up, a visible
+  hop, and below 80 m altitude it climbs 80 m/s whatever its attitude.
 
-| | person | bot |
-|---|---|---|
-| game-minutes alive | 118.8 | 59.2 |
-| time to first kill, median over lives | 68.8 s (5 of 29 lives made none) | 7.9 s |
-| kills per minute | 0.67 (runs 0.40–1.28; mean 0.67 ± 0.09) | 3.61 (3.62 ± 0.11) |
-| — gun | 0.03 (three gun kills) | 2.43 |
-| — missile | 0.65 | 1.18 |
-| hits per round fired | 1.06% (169 of 15,891) | 2.65% |
-| missiles fired, without a lock | 481, 123 (26%) | 867, 417 (48%) |
-| deaths on wave 1, 2, 3 (of lives that reached it) | 10/29, 9/15, 2/2 | none in 20 lives |
+What to do: fly the enemies on a flight model with limits, keeping the state
+machine (inbound, attack, extend, reposition, evade) as the thing that chooses
+where to go.
 
-What it says:
+- A bounded turn rate, no higher than the player's at the same speed (or a
+  g limit), instead of an exponential approach to the target direction.
+- Roll to the bank the turn needs (tan(bank) = speed × turn rate / g) at a
+  bounded roll rate, per second, then pull, so turns start with a roll the way
+  the player's do.
+- Speed changing at a bounded acceleration toward what the state asks for.
+- Terrain avoidance that pulls up early, from the ground ahead, not a clamp.
+- Smooth with `smoothT`, never `lerp(a, b, k * dt)`.
 
-- **The gun does not work for a person.** Three gun kills in two hours. With
-  the noise off, `track.mjs` holds the box 1.0–1.3° from the reticle's centre
-  on a target crossing at 60–100 m/s and lands 0–12 hits in 1,500–1,860 rounds:
-  the rounds go where the nose points, not where the reticle is, and nothing
-  shows the lead. That is "The gunsight is off the gun line and shows no lead",
-  measured.
-- **Missiles make nearly every kill, and a quarter leave without a lock** —
-  the lock is lost or the target dies late in the lock, F is still held, and
-  the rack fires anyway ("Missile count, resupply and dumb-fire are invisible").
-- **A person rarely gets past wave 2**: 15 of 29 lives reached it and two
-  reached wave 3; the bot reached wave 4 in 9 of its 20 lives.
+It will change how hard the game is (smoother targets are easier to track;
+slower turns make passes longer), so measure with the person-like pilot before
+and after, eight 15-minute runs a side.
 
-What remains: each playability task quotes its before/after figures against
-this baseline. The sight convention: when "The gunsight is off the gun line and
-shows no lead" lands, define `gunSight()` in the page, returning
-`{ cross, box, lead, target, cue, ring }` (points in HUD pixels, `ring` the
-radius inside which the mark counts as on the cross), draw the HUD from it, and
-the pilot, `track.mjs` and "Aim assist for the gun" all read the same thing.
+**Done when:**
 
-**Done when:** the P1 playability tasks have quoted before/after figures
-against the baseline; then move the pilot's description to "Reference" and
-drop this task.
+- `enemy-flight.mjs --check` passes at 60 and at 30 fps: the nose never turns
+  faster than 60°/s, roll stays under 270°/s, commanded speed changes by no
+  more than 2 g, and nothing is moved by the ground rules.
+- The person-like pilot's figures are quoted before and after.
+- A playtest no longer finds the enemies twitchy.
 
-### 6. Aim assist for the gun — P2
+### 2. Aim assist for the gun — P2
 
 Even with a correct lead marker, holding the gun cross on it while the target
 manoeuvres is hard with keyboard controls. The options, in order of how much
@@ -318,7 +308,7 @@ chosen by playtest, and a comparison of at least sixteen runs a side shows the
 person-like pilot killing measurably faster with the assist than without it, or
 the task records that it does not.
 
-### 7. GPU cost is unmeasured — P2 (needs real hardware)
+### 3. GPU cost is unmeasured — P2 (needs real hardware)
 
 Every performance figure in the commit history comes from a software
 rasteriser, which does not predict GPU cost for an ALU-heavy raymarch. The
@@ -330,7 +320,7 @@ false` is the fallback. This cannot be done in a headless container.
 one integrated and one discrete GPU, and a default for `USE_VOLUMETRIC_CLOUDS`
 is chosen from it.
 
-### 8. Enemy aircraft make no sound — P2
+### 4. Enemy aircraft make no sound — P2
 
 Only the player's engine is audible, so a merge has no audio. Give each entry in
 `enemies` a cheap engine voice through `_voice(..., follow)` (see "Reference:
@@ -345,7 +335,7 @@ nothing but explosions).
 across the stereo field with a Doppler drop, and eight enemies cost less than
 the player's engine.
 
-### 9. Hits and enemy gunfire make no physical sound — P2
+### 5. Hits and enemy gunfire make no physical sound — P2
 
 `hitMarker()` is a UI confirmation tone (limited to one per 80 ms) and should
 stay one, but there is no *physical* impact sound. Rounds striking an airframe
@@ -364,7 +354,7 @@ bake or pool them, and rate-limit per target.
 100 m, and different again from hosing the sea; you hear an enemy firing at
 you.
 
-### 10. Enemy damage you can read at range — P2
+### 6. Enemy damage you can read at range — P2
 
 An enemy carries no visible damage state: you cannot tell one that is about to
 die from a fresh one. Smoke from a damaged enemy, thickening as HP falls, would
@@ -374,7 +364,7 @@ continuous emitter: see "Reference: the particle pool" for how to tag it.
 
 **Done when:** at 1 km you can tell a nearly dead enemy from a fresh one.
 
-### 11. Enemies leave no contrails — P2
+### 7. Enemies leave no contrails — P2
 
 `updateContrails` draws one contrail, the player's, from the fuselage origin.
 At altitude a contrail is how you spot a bandit before the radar does, so
@@ -384,7 +374,7 @@ persistence with altitude rather than the hard 300 m cut while doing it.
 **Done when:** an enemy above 3,000 m is visible by its contrail before it is
 visible as an aircraft.
 
-### 12. Cockpit view — P3
+### 8. Cockpit view — P3
 
 There is one chase camera (`camOff`, `camLookOff`) and nothing else. A cockpit
 or virtual-cockpit view would change how the game reads more than any other
@@ -404,7 +394,73 @@ already modelled. Before starting:
 **Done when:** a key toggles views, the canopy is transparent from inside
 without sorting artefacts, and the HUD sits on the combiner.
 
-### 13. Battle damage on the airframe — P3
+### 9. The player's jet does not look like an F-22 — P3
+
+The first playtest found the player's aircraft still does not look like an
+F-22, in its shape or in how its control surfaces move. What
+`createPlayerJet` builds now:
+
+- a lofted fuselage, round and pointed at the nose, with a radome band and a
+  pitot boom;
+- swept, tapered wings with washout, and all-moving tailerons;
+- canted twin fins with root fillets;
+- round intakes (a lip ring and a dark duct);
+- four pylons with external stores;
+- two round exhaust cans in shrouds.
+
+The only part that moves is the pair of nozzles, which tilt with pitch rate
+(`tvAngle` in `updatePlayer`). The wings, tailerons and fins never move.
+
+What the F-22 has that this does not. This list is written from memory; the
+angles especially are approximate. Check each item against published reference
+drawings before modelling:
+
+- **Wing.** A clipped diamond: leading edge swept about 42°, trailing edge
+  swept forward about 17°. The stabilators' edges run parallel to the wing's.
+- **Forebody.** Faceted, with sharp chines from the nose back into the wing
+  leading edge. No round nose section and no pitot boom.
+- **Intakes.** Caret intakes beside the cockpit: raked, trapezoidal openings.
+- **Tails.** Vertical tails canted outward about 28°, with rudders.
+- **Nozzles.** Two-dimensional: flat and rectangular, vectoring in pitch only.
+- **Weapons.** Carried in internal bays, so the clean aircraft has no pylons.
+- **Canopy and edges.** A one-piece frameless canopy, and serrated edges on
+  doors and panels.
+- **Moving surfaces.** Stabilators (pitch, and differential for roll),
+  flaperons and ailerons, leading-edge flaps, rudders, and the vectoring
+  nozzles.
+
+What to do:
+
+- Rework the shape against references, keeping the proportions the chase
+  camera was tuned for (`camOff`). The fins were kept low so the camera does not
+  look straight into one, and an F-22's are large, so expect to retune the
+  camera.
+- Split each control surface into its own mesh, pivoting on its hinge line, and
+  drive it from the controls:
+  - stabilators from pitch, plus differential deflection for roll;
+  - flaperons and ailerons from roll;
+  - rudders from yaw;
+  - leading-edge flaps from g or angle of attack;
+  - nozzles as now.
+- Smooth the deflections with `smoothT`, and keep them large enough to read
+  from the chase camera.
+- Keep it procedural, with no texture assets, and keep its silhouette distinct
+  from the enemy's tailless canard delta.
+- Do this on the aircraft definition from "More aircraft: sixth-generation
+  designs". The exhaust points, wingtips, muzzles, missile rails and camera
+  offset are all numbers for the current airframe, and a new shape moves them,
+  so build the definition first, then the F-22, then the new types.
+  `.github/tools/gunsight.mjs` checks that the muzzles and the gun cross still
+  agree.
+
+**Done when:**
+
+- Plan, side and front views match reference drawings side by side.
+- Each control surface visibly moves with its input in a seeded render
+  (`scene.mjs` or a script like it).
+- The smoke test, the soak and the gunsight check pass.
+
+### 10. Battle damage on the airframe — P3
 
 Beyond the smoke in "Enemy damage you can read at range", both the player and
 enemies go from pristine to
@@ -424,7 +480,7 @@ particle pool").
 heavy hits knock pieces off, a killed engine trails flame, no texture assets
 are added, and the soak still drops nothing outside the trails.
 
-### 14. Time of day — P3
+### 11. Time of day — P3
 
 The sun direction is a module-scope constant, and a good deal of tuning assumes
 it: `uCloudShadowOffset` is computed once from it at load, the terrain's
@@ -449,7 +505,7 @@ would be worth a lot and avoids most of the dynamic-shadowing problem.
 each, the sky, the water's specular, the cloud lighting and the terrain's
 shadowing all agree with where the sun is.
 
-### 15. Wingtip vortices and contrail polish — P3
+### 12. Wingtip vortices and contrail polish — P3
 
 **Wingtip vapour** exists in `updatePlayer` under `// Wing vapor`: above 3 G it
 spawns pale smoke particles at both wingtips. It is a puff emitter, not a
@@ -467,7 +523,7 @@ vortex. Remaining (enemy contrails are in "Enemies leave no contrails"):
 **Done when:** a roll visibly twists the pair of wingtip contrails, the vapour
 grows smoothly with G, and the wingtip positions come from the wing geometry.
 
-### 16. More aircraft: sixth-generation designs — P3
+### 13. More aircraft: sixth-generation designs — P3
 
 Do this last of the large features, once the gameplay and graphics tasks above
 are settled.
@@ -491,6 +547,9 @@ So start with an aircraft definition holding the geometry builder, the hard
 points (nozzles, muzzles, rails, wingtips), the handling and the engine count.
 Move the current player jet onto it with no visible change, proved by a
 pixel-identical render (`.github/tools/scene.mjs`), before adding anything.
+"The player's jet does not look like an F-22" needs this definition too, so the
+definition step comes before either: definition, then the F-22, then the new
+types.
 Then add the new types, and an aircraft choice (see "Settings screen").
 
 The two designs wanted are sixth-generation, and both are largely unknown in
@@ -518,7 +577,7 @@ are assigned.
 its own silhouette and handling, and the soak, the UI test and the smoke test
 pass with each.
 
-### 17. The flight model allows 30+ G — P4 (decision)
+### 14. The flight model allows 30+ G — P4 (decision)
 
 The HUD's G readout regularly shows 30–37 G in hard turns. Steady pitch rate
 reaches about 1.05 rad/s (60°/s, `.github/tools/handling.mjs`),
@@ -551,7 +610,7 @@ setting ("Settings screen"), and measure candidates the same way: something
 between 82 and 210°/s may keep the quick bank without the overshoot.
 `.github/tools/handling.mjs` says what any pair of values gives.
 
-### 18. Settings screen — P4
+### 15. Settings screen — P4
 
 There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
 (`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Settings
@@ -562,7 +621,14 @@ other work wants:
   the other convention, ↑ for nose up, as an option, and have both screens
   describe whichever is chosen. `ui-test.mjs` checks that the keys do what the
   screens say ("↑ pushes the nose down"); it will need to follow the option.
-- Aim assist strength (`GUN_ASSIST`; see "Aim assist for the gun").
+- **Roll sensitivity**, a slider, reachable from the pause menu. The first
+  playtest found the 210°/s roll a bit too twitchy, and the person-like pilot
+  agrees ("The flight model allows 30+ G"). The slider scales `ROLL_RATE`; its
+  default should come from playtesting it.
+- **Aim assist strength.** The first playtest wanted a strong assist. Offer
+  levels from off, through the round assist (`GUN_ASSIST`), to the stronger
+  options in "Aim assist for the gun": a hit radius that grows with range, and
+  a steering pull toward the lead marker.
 - The aircraft ("More aircraft: sixth-generation designs").
 - The time of day ("Time of day").
 
@@ -571,7 +637,7 @@ sets volume, mute, the graphics options and whichever of those other settings
 exist; they persist across a reload as volume does now, and `ui-test.mjs`
 covers them.
 
-### 19. Cloud and water quality — P4
+### 16. Cloud and water quality — P4
 
 - The cloud march is half resolution (`CLOUD_SCALE = 0.5`) and resolved with a
   four-tap rotated-grid blur. Temporal reprojection would do better if anyone
@@ -580,7 +646,7 @@ covers them.
   mirrored camera can see; everything off-screen falls back to the analytic sky
   plus the analytic cloud tint. Look for the seam at grazing angles.
 
-### 20. Small things to keep in mind — P4
+### 17. Small things to keep in mind — P4
 
 - **Below 20 fps, game time runs slow but audio does not.** `dt` is clamped to
   0.05 s, so the simulation slows while the audio clock keeps real time; the
@@ -606,6 +672,89 @@ covers them.
   the roar to a tail there.
 
 ---
+
+## Reference: the person-like pilot and the difficulty figures
+
+The soak bot plays far better than a person can: it leads its target using the
+target's exact velocity, aims along the true gun line, and reacts within a
+frame. So `soak.mjs --pilot person` flies a pilot built to play like one
+(`.github/tools/person.mjs`; its header has the details), and every change to
+how the game plays is measured with it:
+
+- It steers by what the HUD draws, read off the screen: it puts the mark it is
+  steering for on the aim point and turns the screen-space error into a
+  direction through the camera. It reads the sight from the game's `gunSight()`
+  (`cross`, `box`, `lead`, `target`, `cue` and `ring`, in HUD pixels): the lead
+  marker onto the gun cross. On a copy of the game from before the gunsight it
+  reads the old HUD instead: the target box onto a fixed reticle at the centre
+  of the screen.
+- It sees 150–250 ms late (drawn per life) and aims with 1.5° of correlated
+  noise per axis (about 2° in all); whether the mark is in the ring it judges
+  from the symbols as drawn. An enemy off the screen it knows to about 8°.
+- It presses keys like a person, with an 80 ms minimum hold, tapping each axis
+  for a turn rate proportional to the error, with lead and, near the mark, an
+  integral term; more than 10° off it rolls the mark above the canopy and
+  pulls. It learns the jet's turn rates by watching it turn.
+- It fires the gun while the HUD's shoot cue is lit and the mark is inside the
+  ring, under 1,000 m on the range readout. It holds F when the target box (the
+  aircraft itself, not a lead marker) is near the aim point under 1,500 m, keeps
+  holding while the lock diamond shows, and lets go when it sees none or sees
+  the launch.
+
+`.github/tools/track.mjs` calibrates it against one target flying a straight
+line, its AI skipped altogether (`straightTargets` in `lib.mjs`; moving a
+target from outside and undoing its AI afterwards is not the same, because
+rounds are tested against wherever the AI put it that frame): it holds the box
+a median 2.3–2.9° from the reticle, and 1.0–1.3° with the aim noise turned off.
+
+For either pilot the soak reports time to the first kill, kills per minute
+split into gun and missile kills, hits per round fired, missiles fired without a
+lock and deaths per wave other than forced crashes, and `--tag` writes them to
+`.github/tools/out/soak-<tag>.json`. `.github/tools/figures.mjs` pools several
+tagged runs and sets groups side by side, with the mean of the runs and its
+standard error.
+
+**Runs vary a lot, and four a side is not enough.** Kills per minute ranged
+0.40–1.28 over eight runs of the same game, and the standard error of an
+eight-run mean is about 0.1. Two eight-run groups less than about 0.3 kills per
+minute apart have not been told apart. The first comparisons made with this
+pilot used four runs a side and read noise as results (two four-run pools of
+one game gave 0.75 and 0.95). Use eight 15-minute runs a side at least, sixteen
+for anything rare such as gun kills, and say what the standard error is. A
+15-minute run takes about 70 s, and four run side by side on four cores.
+
+**What each playability change measured.** One campaign, the person-like pilot
+as corrected after review, 15-minute runs; kills per minute is the mean of the
+runs with its standard error. "All" is the game as it now stands.
+
+| game | runs | kills per minute | gun kills | hits per round | missiles without a lock | first kill, median |
+|---|---|---|---|---|---|---|
+| before any of it (56841cd) | 8 | 0.67 ± 0.09 | 3 in 2 h | 1.06% | 26% | 68.8 s |
+| lock-only missiles alone | 8 | 0.57 ± 0.09 | 4 in 2 h | 0.59% | 0 | 41.1 s |
+| 210°/s roll alone | 8 | 0.75 ± 0.08 | 3 in 2 h | 0.79% | 28% | 36.6 s |
+| gunsight alone | 16 | 0.99 ± 0.10 | 5 in 4 h | 6.96% | 8% | 8.1 s |
+| gunsight and round assist | 16 | 1.26 ± 0.12 | 13 in 4 h | 5.83% | 8% | 14.3 s |
+| all | 16 | 0.93 ± 0.09 | 10 in 4 h | 5.62% | 0 | 20.4 s |
+| all, with the old 82°/s roll | 16 | 1.19 ± 0.09 | 15 in 4 h | 5.59% | 0 | 15.7 s |
+| all, with unguided fire put back | 16 | 0.92 ± 0.08 | 10 in 4 h | 4.92% | 9% | 27.1 s |
+
+What it says:
+
+- **The gunsight put the rounds where the sight says.** Hits per round went
+  from 1% to 6–7%, the first kill of a life from over a minute to seconds, and
+  kills from 0.67 to 0.99 a minute (2.4 standard errors).
+- **The gun still rarely kills**: 1.5 to 4 gun kills an hour in every row.
+  Missiles make nearly every kill. Whether the round assist helps is not
+  settled ("Aim assist for the gun").
+- **Lock-only missiles cost nothing**: 0.93 against 0.92 with unguided fire put
+  back, and a quarter of the old game's missiles were fired without a lock.
+- **The 210°/s roll costs about 0.3 kills a minute once the gunsight is in**
+  (0.93 against 1.19, and the playtest found it a bit twitchy): "The flight
+  model allows 30+ G".
+- **A person rarely gets past wave 3.** In the game as it stands, 32 of 50
+  lives reached wave 2, 11 reached wave 3 and 2 reached wave 4. The soak bot,
+  on the game before any of this, reached wave 4 in 9 of 20 lives and killed
+  3.6 enemies a minute, 2.4 of them with the gun.
 
 ## Reference: the sound engine
 

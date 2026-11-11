@@ -10,8 +10,11 @@
  *
  * Each argument is a tag prefix: it pools .github/tools/out/soak-<prefix>.json and every
  * soak-<prefix>-*.json. Rates are pooled (total kills over total minutes, total hits over
- * total rounds), the time to first kill is the median over every life that made one, and
- * the range across runs is shown for kills per minute.
+ * total rounds) and the time to first kill is the median over every life that made one.
+ * Kills per minute also gets the mean of the runs with its standard error (the spread of
+ * the runs over the square root of how many): two groups whose means are within about two
+ * standard errors of the difference have not been told apart. Four runs a side told apart
+ * nothing smaller than a factor of two; use eight or more.
  */
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -33,7 +36,10 @@ for (const g of groups) {
   const rounds = runs.reduce((n, r) => n + r.rounds, 0), hits = runs.reduce((n, r) => n + r.hits, 0);
   const missiles = sum('missiles'), unguided = sum('unguided'), gun = sum('gun'), missile = sum('missile');
   const firsts = lives.map(l => l.firstKill).filter(t => t !== null);
-  const kpm = runs.map(r => r.killsPerMin);
+  const kpm = runs.map(r => r.killsPerMin), gpm = runs.map(r => r.gunKillsPerMin);
+  const meanSe = a => { const m = a.reduce((x, y) => x + y, 0) / a.length;
+    const se = a.length > 1 ? Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1) / a.length) : NaN;
+    return `${m.toFixed(2)} ± ${se.toFixed(2)}`; };
   const waves = [];
   for (const r of runs) for (const w of r.deathsPerWave) {
     const c = waves[w.wave - 1] ||= { died: 0, reached: 0 }; c.died += w.died; c.reached += w.reached; }
@@ -44,8 +50,10 @@ for (const g of groups) {
     'time to first kill (median)': firsts.length ? `${median(firsts).toFixed(1)} s` : '-',
     'lives without a kill': `${lives.length - firsts.length} of ${lives.length}`,
     'kills per minute': `${((gun + missile) / minutes).toFixed(2)} (runs ${Math.min(...kpm).toFixed(2)}-${Math.max(...kpm).toFixed(2)})`,
-    '  gun': (gun / minutes).toFixed(2),
-    '  missile': (missile / minutes).toFixed(2),
+    '  mean of runs ± s.e.': meanSe(kpm),
+    '  gun': `${(gun / minutes).toFixed(2)} (${gun} kills)`,
+    '  gun, mean of runs ± s.e.': meanSe(gpm),
+    '  missile': `${(missile / minutes).toFixed(2)} (${missile} kills)`,
     'hits per round fired': `${(100 * hits / Math.max(rounds, 1)).toFixed(2)}% (${hits}/${rounds})`,
     'missiles fired': String(missiles),
     '  without a lock': `${unguided} (${(100 * unguided / Math.max(missiles, 1)).toFixed(0)}%)`,

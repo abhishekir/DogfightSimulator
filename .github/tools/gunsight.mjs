@@ -31,7 +31,16 @@
  *    the target once a frame, and at this closure and 30 fps a round can cross the whole
  *    hit radius between two frames ("Rounds can pass through a target between frames" in
  *    TODO.md). Run with --dt 0.0333 to see it.
- * 4. The gun line through turns. The jet pulls and rolls at full rate with the trigger held
+ * 4. Round assist, when the page has one (GUN_ASSIST): rounds fired with the lead point
+ *    inside the assist's cone are aimed at it, and the cue shows the same rule. At 1,000 m,
+ *    where the cone is wider than the hit radius: held 0.9 of the cone's angle off the
+ *    marker, in four directions, every round must leave lit and pass inside the hit radius,
+ *    and most must hit; held 1.1 of it off, every round must leave unlit and pass outside,
+ *    and none hit. A sweep through the cone: no round that left lit passes outside the
+ *    radius. And a wave-1 enemy (40 HP) dies while the cross wanders round its marker
+ *    inside the cone. (With an assist, check 2 runs at 300 m, where the hit radius is the
+ *    wider of the two and so still the cue's edge.)
+ * 5. The gun line through turns. The jet pulls and rolls at full rate with the trigger held
  *    and no target, so the chase camera lags; for every round fired, the gun cross's point
  *    (GUN_ORIGIN along the nose at the sight's range) must lie on the round's path, within
  *    the muzzles' 2.5 m offset either side, and the round must fly at the sight's speed.
@@ -49,7 +58,8 @@ const transform = html => {
   html = splice(html, "for(let i=enemies.length-1;i>=0;i--){const e=enemies[i];if(!e.alive)continue;e.prevPosition.copy(e.mesh.position);",
     "for(let i=enemies.length-1;i>=0;i--){const e=enemies[i];if(!e.alive)continue;e.prevPosition.copy(e.mesh.position);if(e.straight){e.mesh.position.addScaledVector(e.straight,dt);continue}");
   html = splice(html, 'e.hp-=GUN_DAMAGE;e.wasHit=true;', 'e.hp-=GUN_DAMAGE;e.wasHit=true;window.__hits=(window.__hits||0)+1;');
-  return splice(html, 'window.__g = {', 'window.__x = { gunSight, GUN_ORIGIN, commandedSpeed, GUN_MUZZLE_SPEED, GUN_HIT_RADIUS, GUN_MUZZLE_OFFSET };\nwindow.__g = {');
+  return splice(html, 'window.__g = {', `window.__x = { gunSight, GUN_ORIGIN, commandedSpeed, GUN_MUZZLE_SPEED, GUN_HIT_RADIUS, GUN_MUZZLE_OFFSET,
+  assist: typeof GUN_ASSIST === 'number' ? GUN_ASSIST : 0 };\nwindow.__g = {`);
 };
 const game = await openGame({ transform, viewport: { width: 1280, height: 720 } });
 const p = game.page;
@@ -97,20 +107,25 @@ await p.evaluate(() => {
     },
     // Hold the trigger for `secs`, calling aim(time) before every frame, then let the rounds
     // in flight land. For every round: whether the cue was lit as it left, and how close its
-    // own straight path passes the target `e`, from the two positions and velocities.
+    // own straight path passes the target `e`, from the two positions and velocities. The
+    // HUD draws the cue a frame before the cannon acts on it, so a round fired within a
+    // frame of the cue changing is set aside: `cue` is lit and steady, `dark` unlit and
+    // steady, and such a round is neither.
     shoot(e, secs, dt, aim = () => window.__t.hold()) {
       const live = new Set(G.bullets.filter(b => b.userData.active)), rounds = [], D = new T.Vector3(), rel = new T.Vector3();
-      window.__hits = 0; let lit = 0, n = 0;
+      window.__hits = 0; let lit = 0, n = 0; const seen = [];
       for (let i = 0; i < Math.round(secs / dt); i++) {
-        aim(i * dt); const cue = X.gunSight().cue; if (cue) lit++; n++;
+        aim(i * dt); const cue = X.gunSight().cue; seen.push(cue); if (cue) lit++; n++;
         G.keys.Space = true; G.frame(dt, false);
         for (const b of G.bullets) { if (!b.userData.active || b.userData.isEnemy || live.has(b)) continue; live.add(b);
           D.subVectors(e.mesh.position, b.position); rel.copy(b.userData.vel).sub(e.straight);
           const tca = D.dot(rel) / rel.lengthSq();
-          rounds.push({ cue, miss: tca > 0 ? D.addScaledVector(rel, -tca).length() : D.length() }); }
+          rounds.push({ frame: i, miss: tca > 0 ? D.addScaledVector(rel, -tca).length() : D.length() }); }
         for (const b of [...live]) if (!b.userData.active) live.delete(b);
       }
       G.keys.Space = false;
+      for (const r of rounds) { const c = seen[r.frame], steady = (seen[r.frame - 1] ?? c) === c && (seen[r.frame + 1] ?? c) === c;
+        r.cue = c && steady; r.dark = !c && steady; }
       for (let i = 0; i < Math.round(2.6 / dt); i++) { aim(secs); G.frame(dt, false); }
       return { rounds, hits: window.__hits, cueLit: +(lit / n).toFixed(2), endRange: Math.round(e.mesh.position.distanceTo(G.jet.position)) };
     },
@@ -138,27 +153,29 @@ for (const r of [200, 400, 600, 800, 1000]) { const at = rows.filter(x => x.rang
 check('the cue is lit while the cross is held on the marker (over 90% of the time)', rows.every(x => x.cueLit > 0.9), rows.map(x => x.cueLit));
 
 // 2. The cue's edge: lit means the rounds pass inside the hit radius, unlit means they do not.
-const edge = await p.evaluate(dt => {
+const ASSIST = await p.evaluate(() => window.__x.assist), EDGE_RANGE = ASSIST > 0 ? 300 : 800;
+const edge = await p.evaluate(([dt, RANGE]) => {
   const G = window.__g, t = window.__t, R = window.__x.GUN_HIT_RADIUS, out = { inside: [], outside: [], R };
   for (const [name, k] of [['inside', 0.7], ['outside', 1.4]]) for (const dir of [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2]) {
-    const e = t.target(800, [60, 0, 0]); G.frame(dt, false);
+    const e = t.target(RANGE, [60, 0, 0]); G.frame(dt, false);
     const r = t.shoot(e, 1, dt, () => t.hold(0, dir, k * R));
     out[name].push({ dir: Math.round(dir * 180 / Math.PI), rounds: r.rounds.length, lit: r.rounds.filter(x => x.cue).length,
-      within: r.rounds.filter(x => x.miss < R).length, hits: r.hits });
+      dark: r.rounds.filter(x => x.dark).length, within: r.rounds.filter(x => x.miss < R).length, hits: r.hits });
   }
   // A slow sweep of the cross through the marker, 2.2 radii either side.
-  const e = t.target(800, [60, 0, 0]); G.frame(dt, false);
+  const e = t.target(RANGE, [60, 0, 0]); G.frame(dt, false);
   const r = t.shoot(e, 4, dt, time => { const m = (time / 4 * 2 - 1) * 2.2 * R; t.hold(0, m < 0 ? 3 * Math.PI / 2 : Math.PI / 2, Math.abs(m) || 1e-6); });
   const stale = 60 * dt, lit = r.rounds.filter(x => x.cue), well = r.rounds.filter(x => x.miss < R - 2 * window.__x.GUN_MUZZLE_OFFSET - stale);
   out.sweep = { rounds: r.rounds.length, lit: lit.length, litPassingOutside: lit.filter(x => x.miss > R + stale).length,
-    worstLitMiss: +Math.max(...lit.map(x => x.miss)).toFixed(1), wellInside: well.length, wellInsideLit: well.filter(x => x.cue).length, hits: r.hits };
+    worstLitMiss: +Math.max(...lit.map(x => x.miss)).toFixed(1), wellInside: well.length, wellInsideLit: well.filter(x => !x.dark).length,
+    firedAsTheCueChanged: r.rounds.filter(x => !x.cue && !x.dark).length, hits: r.hits };
   return out;
-}, DT);
-console.log(`\nthe cue's edge at 800 m, target crossing at 60 m/s (hit radius ${edge.R} m)`);
+}, [DT, EDGE_RANGE]);
+console.log(`\nthe cue's edge at ${EDGE_RANGE} m, target crossing at 60 m/s (hit radius ${edge.R} m)`);
 check('held 0.7 radii off the marker: every round leaves lit and passes inside the radius, and some hit',
   edge.inside.every(x => x.rounds > 50 && x.lit === x.rounds && x.within === x.rounds && x.hits > 0), edge.inside);
 check('held 1.4 radii off the marker: every round leaves unlit and passes outside the radius, and none hit',
-  edge.outside.every(x => x.rounds > 50 && x.lit === 0 && x.within === 0 && x.hits === 0), edge.outside);
+  edge.outside.every(x => x.rounds > 50 && x.dark === x.rounds && x.within === 0 && x.hits === 0), edge.outside);
 check('sweeping the cross through the marker: no round that left lit passes outside the radius, and every round well inside left lit',
   edge.sweep.lit > 20 && edge.sweep.wellInside > 20 && edge.sweep.litPassingOutside === 0 && edge.sweep.wellInsideLit === edge.sweep.wellInside, edge.sweep);
 
@@ -181,7 +198,39 @@ const counted = fast.reduce((n, x) => n + x.hits, 0), fired = fast.reduce((n, x)
 console.log(`      the game counted ${counted} of those ${fired} rounds as hits (${Math.round(100 * counted / fired)}%)` +
   (counted < fired ? ': the rest crossed the hit radius between two frames' : ''));
 
-// 4. The gun line through turns.
+// 4. Round assist, when the page has one.
+if (ASSIST > 0) {
+  const a = await p.evaluate(([dt, A]) => {
+    const G = window.__g, t = window.__t, R = window.__x.GUN_HIT_RADIUS, out = { inside: [], outside: [] };
+    for (const [name, k] of [['inside', 0.9], ['outside', 1.1]]) for (const dir of [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2]) {
+      const e = t.target(1000, [60, 0, 0]); G.frame(dt, false);
+      const r = t.shoot(e, 1, dt, () => t.hold(k * A, dir));
+      out[name].push({ dir: Math.round(dir * 180 / Math.PI), rounds: r.rounds.length, lit: r.rounds.filter(x => x.cue).length,
+        dark: r.rounds.filter(x => x.dark).length, within: r.rounds.filter(x => x.miss < R).length, hits: r.hits });
+    }
+    let e = t.target(1000, [60, 0, 0]); G.frame(dt, false);
+    const r = t.shoot(e, 4, dt, time => { const k = (time / 4 * 2 - 1) * 1.6; t.hold(Math.abs(k) * A || 1e-6, k < 0 ? 3 * Math.PI / 2 : Math.PI / 2); });
+    const lit = r.rounds.filter(x => x.cue);
+    out.sweep = { rounds: r.rounds.length, lit: lit.length, litPassingOutside: lit.filter(x => x.miss > R + 60 * dt).length,
+      firedAsTheCueChanged: r.rounds.filter(x => !x.cue && !x.dark).length, hits: r.hits };
+    e = t.target(900, [80, 0, 0], 40); G.frame(dt, false); out.wave1KilledAfterS = null;
+    for (let i = 0; i < Math.round(4 / dt) && out.wave1KilledAfterS === null; i++) {
+      t.hold(0.8 * A * (0.5 + 0.5 * Math.abs(Math.sin(i * dt * 2.3))), i * dt * 3.1); G.keys.Space = true; G.frame(dt, false);
+      if (!e.alive) out.wave1KilledAfterS = +(i * dt).toFixed(2);
+    }
+    G.keys.Space = false; return out;
+  }, [DT, ASSIST]);
+  console.log(`\nround assist ${(ASSIST * 180 / Math.PI).toFixed(2)} deg, at 1,000 m against a target crossing at 60 m/s`);
+  check('held 0.9 of the cone off the marker: every round leaves lit and passes inside the hit radius, and most hit',
+    a.inside.every(x => x.rounds > 50 && x.lit === x.rounds && x.within === x.rounds && x.hits > x.rounds / 2), a.inside);
+  check('held 1.1 of the cone off the marker: every round leaves unlit and passes outside the hit radius, and none hit',
+    a.outside.every(x => x.rounds > 50 && x.dark === x.rounds && x.within === 0 && x.hits === 0), a.outside);
+  check('sweeping the cross through the cone: no round that left lit passes outside the hit radius',
+    a.sweep.lit > 50 && a.sweep.litPassingOutside === 0, a.sweep);
+  check('a wave-1 enemy dies while the cross wanders round its marker inside the cone', a.wave1KilledAfterS !== null, a.wave1KilledAfterS);
+} else console.log('\nno round assist in this page (GUN_ASSIST): its checks skipped');
+
+// 5. The gun line through turns.
 const turn = await p.evaluate(dt => {
   const G = window.__g, T = G.THREE, X = window.__x;
   G.restart();

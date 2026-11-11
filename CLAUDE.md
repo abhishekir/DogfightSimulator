@@ -75,11 +75,14 @@ before/after comparison is done.
 - `audio-check.mjs [--render]` — renders the SoundEngine offline and checks the
   mix against the engine, positional audio, Doppler, the limiter, volume, and
   regressions the audio has actually had. `--render` writes WAVs to listen to.
-- `gunsight.mjs [--dt 1/30]` — holds the gun cross on the HUD's lead marker
+- `gunsight.mjs [--dt 0.0333]` — holds the gun cross on the HUD's lead marker
   against targets flying straight lines at 200–1,000 m and checks the rounds
-  hit, that the round assist hits inside its cone and not outside it, and that
-  every round fired through a hard turn passes through the gun cross's point.
-  Run it after touching the gunsight, the camera or the guns.
+  hit; follows every round to check the cue was lit exactly when its path
+  passes inside the hit radius, at the cue's edge, at the edge of the round
+  assist's cone and against a target flying at the jet; and checks every round
+  fired through a hard turn passes through
+  the gun cross's point. Run it after touching the gunsight, the camera or the
+  guns.
 - `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
   frames on every run: level flight, then a kill with the particle pool under
   heavy-fight pressure. Run it on two copies of the game with different tags

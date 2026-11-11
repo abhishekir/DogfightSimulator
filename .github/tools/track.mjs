@@ -1,8 +1,8 @@
 /**
  * Calibration for the person-like pilot (person.mjs): how well it holds a target that is
- * not trying to get away. One enemy flies a straight line at constant speed, its AI frozen
- * and its hit points made endless, while the pilot tracks it and shoots for 20 s; the rest
- * of the wave is taken out of play. Reports the angle between the target and the HUD's aim
+ * not trying to get away. One enemy flies a straight line at constant speed, its AI skipped
+ * (straightTargets in lib.mjs) and its hit points made endless, while the pilot tracks it
+ * and shoots for 20 s; the rest of the wave is taken out of play. Reports the angle between the target and the HUD's aim
  * point (median, 90th percentile, share of the time under 2 degrees), how much of the time
  * the trigger was held, and rounds and hits.
  *
@@ -14,11 +14,11 @@
  * to the mark the pilot steers for, the lead marker when there is one and the target box
  * otherwise. Exits 1 on page errors.
  */
-import { openGame, stepper, gameStats, arg } from './lib.mjs';
+import { openGame, stepper, gameStats, straightTargets, arg } from './lib.mjs';
 import { installPerson, PERSON } from './person.mjs';
 
 const CASES = JSON.parse(arg('cases', '[[500,0,20],[500,100,20],[800,60,20]]'));
-const game = await openGame({ transform: h => gameStats(stepper(h)), viewport: { width: 1280, height: 720 } });
+const game = await openGame({ transform: h => straightTargets(gameStats(stepper(h))), viewport: { width: 1280, height: 720 } });
 const p = game.page;
 await p.waitForFunction(() => window.__g, null, { timeout: 90000 });
 await p.evaluate(() => { window.__g.snd.init = () => {}; window.__g.start(); });
@@ -32,9 +32,9 @@ for (const [range, cross, secs] of CASES) rows.push(await p.evaluate(([range, cr
   if (G.gameOver || !G.enemies.length) throw new Error('no wave to borrow a target from');
   P.reset();
   const e = G.enemies[0]; for (const x of G.enemies.slice(1)) x.alive = false;
-  e.hp = Infinity;
-  const vel = new T.Vector3(cross, 0, -SPEED), q = new T.Quaternion().setFromUnitVectors(new T.Vector3(0, 0, -1), vel.clone().normalize());
-  e.mesh.position.set(-cross * 2, 1500, -range);
+  e.hp = Infinity; e.straight = new T.Vector3(cross, 0, -SPEED);
+  e.mesh.quaternion.setFromUnitVectors(new T.Vector3(0, 0, -1), e.straight.clone().normalize());
+  e.mesh.position.set(-cross * 2, 1500, -range); e.prevPosition.copy(e.mesh.position);
   let hits = 0; window.__stats = { hit() { hits++; }, kill() {} };
   const rounds0 = G.player.gunRound, errs = []; let firing = 0;
   const aimErr = () => {
@@ -47,12 +47,8 @@ for (const [range, cross, secs] of CASES) rows.push(await p.evaluate(([range, cr
     return mark ? Math.min(Math.atan(Math.hypot(mark.x - aim.x, mark.y - aim.y) / f), Math.PI / 2) * 180 / Math.PI : 90;
   };
   for (let i = 0; i < secs * 60; i++) {
-    const next = e.mesh.position.clone().addScaledVector(vel, DT);
-    e.prevPosition.copy(e.mesh.position); e.mesh.position.copy(next); e.mesh.quaternion.copy(q);
     P.step(DT);
     G.frame(DT, false);
-    // Undo whatever the frozen enemy's AI did to it this frame.
-    e.mesh.position.copy(next); e.mesh.quaternion.copy(q); e.state = 'reposition'; e.stateTimer = 0; e.wasHit = false;
     if (G.gameOver) throw new Error('the pilot died during the track');
     if (G.keys.Space) firing++;
     if (i >= 120) errs.push(aimErr());

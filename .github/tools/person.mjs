@@ -26,19 +26,21 @@
  *   rate (the lead a person adds so as not to overshoot) and, near the mark, the error's
  *   integral (how a person comes to match a target drifting steadily across the screen),
  *   and it taps the key for that fraction of the time. It learns how fast the jet turns on
- *   each axis by watching it turn while a key is held. Pitch and yaw take the error above
+ *   each axis by watching it turn while a key is held (at a rate per second, so the
+ *   frame time does not change what it learns). Pitch and yaw take the error above
  *   and beside the nose; more than 10 degrees off, it also rolls to put the mark above the
  *   canopy, so that pulling brings the nose round to it.
  * - It fires the gun while the HUD's shoot cue is lit and the mark is inside the ring,
  *   at under 1,000 m on the range readout.
- * - It uses missiles the way a player does: it holds F when a target box is near the aim
+ * - It uses missiles the way a player does: it holds F when the target box is near the aim
  *   point and the range readout is under 1,500 m, keeps holding while it sees the lock
  *   diamond, lets go when it sees none (or sees the launch), and watches a missile it has
- *   fired for 2.5 s before trying again.
+ *   fired for 2.5 s before trying again. The box, not the mark: once the HUD has a lead
+ *   marker the gun goes by the marker and the missile by the aircraft itself, on any HUD.
  *
  * track.mjs measures how well it tracks, against one target flying a straight line 500-800 m
- * ahead with its AI frozen, level or crossing at up to 100 m/s: it holds the target box a
- * median 2.5-3.1 degrees from the reticle, and about 1.3 degrees with the aim noise off.
+ * ahead with its AI skipped, level or crossing at up to 100 m/s: it holds the target box a
+ * median 2.3-2.9 degrees from the reticle, and 1.0-1.3 degrees with the aim noise off.
  *
  * installPerson runs in the page (it is passed to page.evaluate) and defines
  * window.__person.step(dt), called once per step before the frame, and .reset(), called
@@ -49,6 +51,7 @@ export const PERSON = {
   minHold: 0.08, minBurst: 0.15, fireRange: 1000, missileRange: 1500,
   fineDeg: 10, gain: 2, rollGain: 3, lead: 0.3, integral: 1, rateWindow: 0.15, tapBand: 0.04,
   rates: { pitch: 1, yaw: 0.6, roll: 1.4 },   // rad/s with a key held, to start with; learnt as it flies
+  learn: 1.2,                  // per second: how fast a learnt rate follows what it sees
   missileWindow: 0.2,          // of the screen height: how near the aim point a box has to be to try for a lock
   watchMissile: 2.5, retryLock: 0.5,
 };
@@ -98,6 +101,10 @@ export function installPerson(C) {
     }
     s.range = target ? Math.round(target.mesh.position.distanceTo(jet.position)) : Infinity;
     s.cue = cue; s.ring = ring; s.onScreen = onScreen(mark);
+    // The target box, apart from the mark: it is what a missile lock is judged by, and with a
+    // lead marker on the HUD the two are different points.
+    const box = sight ? sight.box : mark;
+    s.boxSeen = onScreen(box) ? Math.hypot(box.x - aim.x, box.y - aim.y) : Infinity;
     if (s.onScreen) {
       const f = (h / 2) / Math.tan(cam.fov * rad / 2);      // pixels per radian near the centre
       const px = mark.x + P.nx * f, py = mark.y + P.ny * f;
@@ -157,7 +164,7 @@ export function installPerson(C) {
     if (K.KeyF) {
       wantF = P.t < P.noMissileUntil ? false : s.fHeld ? s.diamond : true;   // no diamond seen while holding: give up
       if (!wantF && P.t >= P.noMissileUntil) P.noMissileUntil = P.t + C.retryLock;
-    } else wantF = P.t >= P.noMissileUntil && s.ammo > 0 && s.onScreen && s.range < C.missileRange && s.seen < innerHeight * C.missileWindow;
+    } else wantF = P.t >= P.noMissileUntil && s.ammo > 0 && s.range < C.missileRange && s.boxSeen < innerHeight * C.missileWindow;
     axis('missile', null, 'KeyF', wantF ? 1 : 0);
 
     // The gun.
@@ -176,7 +183,7 @@ export function installPerson(C) {
     else tap('roll', 'ArrowLeft', 'ArrowRight', clamp(C.rollGain * (e.bank + C.lead * rate('bank')) / P.rates.roll), dt);
     // What it learns of the jet: the turn rate on an axis whose key has been held a while.
     for (const [k, r] of [['pitch', G.player.pitchRate], ['yaw', G.player.yawRate], ['roll', G.player.rollRate]]) {
-      const ax = P.axes[k]; if (ax && ax.v && P.t - ax.since > 0.4) P.rates[k] += (Math.abs(r) - P.rates[k]) * 0.02; }
+      const ax = P.axes[k]; if (ax && ax.v && P.t - ax.since > 0.4) P.rates[k] += (Math.abs(r) - P.rates[k]) * (1 - Math.exp(-C.learn * dt)); }
     const wantThr = s.range > 1500 && s.range < Infinity ? 0.95 : 0.7;
     axis('throttle', 'KeyS', 'KeyW', s.throttle < wantThr - 0.03 ? 1 : s.throttle > wantThr + 0.03 ? -1 : 0);
   };

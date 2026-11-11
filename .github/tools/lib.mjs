@@ -95,6 +95,18 @@ export function gameStats(html) {
 }
 
 /**
+ * Targets that fly a straight line: an enemy given `straight` (a velocity, a Vector3) is
+ * moved along it each frame and skips its AI altogether, so it does not steer, evade, shoot
+ * or get lifted off the terrain, and what the game records of its motion (the position it
+ * tests rounds against, the velocity a gunsight leads by) is the straight line itself.
+ * Moving it from outside the frame and undoing the AI afterwards is not the same: rounds
+ * are tested against wherever the AI put it that frame.
+ */
+export const straightTargets = html => splice(html,
+  "for(let i=enemies.length-1;i>=0;i--){const e=enemies[i];if(!e.alive)continue;e.prevPosition.copy(e.mesh.position);",
+  "for(let i=enemies.length-1;i>=0;i--){const e=enemies[i];if(!e.alive)continue;e.prevPosition.copy(e.mesh.position);if(e.straight){e.mesh.position.addScaledVector(e.straight,dt);continue}");
+
+/**
  * Load the game with `transform` applied to its source. Returns the browser, the page and
  * `errors`, a Map of everything the page reported as broken (uncaught exceptions, console
  * errors, WebGL errors, failed requests) with a count for each.

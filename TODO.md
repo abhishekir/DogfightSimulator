@@ -165,9 +165,12 @@ diff. What worked during the rendering overhaul:
 - For anything a player touches, `.github/tools/ui-test.mjs`, which plays
   through the real overlays and keys in real time.
 - For anything that changes how the game plays, the person-like pilot in
-  "Difficulty is unmeasured": four tagged 15-minute runs of
-  `soak.mjs --pilot person` on the old copy (`--page`) and four on the new, then
-  `.github/tools/figures.mjs` on the two tags.
+  "Difficulty is unmeasured": eight tagged 15-minute runs of
+  `soak.mjs --pilot person` on the old copy (`--page`) and eight on the new,
+  then `.github/tools/figures.mjs` on the two tags. That task says why eight.
+- For how the enemies fly, `.github/tools/enemy-flight.mjs`: turn rate, roll
+  rate, speed changes and terrain hops of every live enemy, every frame, at 60
+  and at 30 fps.
 - For audio, `.github/tools/audio-check.mjs`: it renders the SoundEngine
   offline, each bus soloed, measured A-weighted, and checks the mix and the
   regressions listed in it. Ears and headphones differ; its numbers do not.
@@ -200,51 +203,60 @@ frame. So `soak.mjs --pilot person` flies a pilot built to play like one
   integral term; more than 10° off it rolls the mark above the canopy and
   pulls. It learns the jet's turn rates by watching it turn.
 - It fires the gun while the HUD's shoot cue is lit and the mark is inside the
-  ring, under 1,000 m on the range readout. It holds F when a target box is near
-  the aim point under 1,500 m, keeps holding while the lock diamond shows, and
-  lets go when it sees none or sees the launch.
+  ring, under 1,000 m on the range readout. It holds F when the target box (the
+  aircraft itself, not a lead marker) is near the aim point under 1,500 m, keeps
+  holding while the lock diamond shows, and lets go when it sees none or sees
+  the launch.
 
 `.github/tools/track.mjs` calibrates it against one target flying a straight
-line with its AI frozen: it holds the box a median 2.5–3.1° from the reticle,
-and about 1.3° with the aim noise turned off.
+line, its AI skipped altogether (`straightTargets` in `lib.mjs`; moving a
+target from outside and undoing its AI afterwards is not the same, because
+rounds are tested against wherever the AI put it that frame): it holds the box
+a median 2.3–2.9° from the reticle, and 1.0–1.3° with the aim noise turned off.
 
 For either pilot the soak now reports time to the first kill, kills per minute
 split into gun and missile kills, hits per round fired, missiles fired without a
 lock and deaths per wave other than forced crashes, and `--tag` writes them to
 `.github/tools/out/soak-<tag>.json`. `.github/tools/figures.mjs` pools several
-tagged runs and sets groups side by side. Runs vary a lot (kills per minute
-ranged 0.00–1.14 over four runs of the same game), so compare pooled groups of
-at least four 15-minute runs, never one run against another. A 15-minute run
-takes about 70 s, and four run side by side on four cores.
+tagged runs and sets groups side by side, with the mean of the runs and its
+standard error.
 
-**Baseline**, `main` at 56841cd, four 15-minute runs of the person-like pilot
-and two of the soak bot:
+**Runs vary a lot, and four a side is not enough.** Kills per minute ranged
+0.40–1.28 over eight runs of the same game, and the standard error of an
+eight-run mean is about 0.1. Two eight-run groups less than about 0.3 kills per
+minute apart have not been told apart. The first comparisons made with this
+pilot used four runs a side and read noise as results (two four-run pools of
+one game gave 0.75 and 0.95). Use eight 15-minute runs a side at least, sixteen
+for anything rare such as gun kills, and say what the standard error is. A
+15-minute run takes about 70 s, and four run side by side on four cores.
+
+**Baseline**, `main` at 56841cd: eight 15-minute runs of the person-like pilot
+and four of the soak bot.
 
 | | person | bot |
 |---|---|---|
-| game-minutes alive | 59.3 | 29.6 |
-| time to first kill, median over lives | 39.1 s (4 of 15 lives made none) | 8.0 s |
-| kills per minute | 0.62 (runs 0.00–1.14) | 3.75 |
-| — gun | 0.05 (three gun kills) | 2.40 |
-| — missile | 0.57 | 1.35 |
-| hits per round fired | 1.33% (86 of 6,460) | 2.45% |
-| missiles fired, without a lock | 212, 69 (33%) | 427, 196 (46%) |
-| deaths on wave 1, 2, 3 (of lives that reached it) | 6/15, 4/7, 1/1 | none in 10 lives |
+| game-minutes alive | 118.8 | 59.2 |
+| time to first kill, median over lives | 68.8 s (5 of 29 lives made none) | 7.9 s |
+| kills per minute | 0.67 (runs 0.40–1.28; mean 0.67 ± 0.09) | 3.61 (3.62 ± 0.11) |
+| — gun | 0.03 (three gun kills) | 2.43 |
+| — missile | 0.65 | 1.18 |
+| hits per round fired | 1.06% (169 of 15,891) | 2.65% |
+| missiles fired, without a lock | 481, 123 (26%) | 867, 417 (48%) |
+| deaths on wave 1, 2, 3 (of lives that reached it) | 10/29, 9/15, 2/2 | none in 20 lives |
 
 What it says:
 
-- **The gun does not work for a person.** Three gun kills in an hour. With the
-  noise off, `track.mjs` holds the box within about 1.3° of the reticle's
-  centre on a target crossing at 60–100 m/s and lands no hits at all in
-  1,591–1,764 rounds: the rounds go where the nose points, not where the
-  reticle is, and nothing shows the lead. The few hits the person gets come
-  from its aim noise. That is "The gunsight is off the gun line and shows no
-  lead", measured.
-- **Missiles make nearly every kill, and a third leave without a lock** —
+- **The gun does not work for a person.** Three gun kills in two hours. With
+  the noise off, `track.mjs` holds the box 1.0–1.3° from the reticle's centre
+  on a target crossing at 60–100 m/s and lands 0–12 hits in 1,500–1,860 rounds:
+  the rounds go where the nose points, not where the reticle is, and nothing
+  shows the lead. That is "The gunsight is off the gun line and shows no lead",
+  measured.
+- **Missiles make nearly every kill, and a quarter leave without a lock** —
   the lock is lost or the target dies late in the lock, F is still held, and
   the rack fires anyway ("Missile count, resupply and dumb-fire are invisible").
-- **A person rarely gets past wave 2**: 7 of 15 lives reached it and one
-  reached wave 3; the bot reached wave 4 in half its lives.
+- **A person rarely gets past wave 2**: 15 of 29 lives reached it and two
+  reached wave 3; the bot reached wave 4 in 9 of its 20 lives.
 
 What remains: each playability task quotes its before/after figures against
 this baseline. The sight convention: when "The gunsight is off the gun line and

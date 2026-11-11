@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Six more tools in `.github/tools/` go further. They run locally, not in CI,
+Seven more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -75,8 +75,8 @@ before/after comparison is done.
   reports how hard the game was: time to first kill, gun and missile kills per
   minute, hits per round, missiles fired without a lock, deaths per wave.
   `--tag` saves those figures; `figures.mjs <tag> <tag>` pools tagged runs and
-  sets them side by side, and `track.mjs` checks the pilot's tracking against
-  a target flying a straight line.
+  sets them side by side with their standard errors, and `track.mjs` checks
+  the pilot's tracking against a target flying a straight line.
 - `ui-test.mjs` — plays through the real UI in real time: overlays, keys,
   pause, focus loss, crash, game over, restart, settings across a reload.
 - `audio-check.mjs [--render]` — renders the SoundEngine offline and checks the
@@ -87,12 +87,16 @@ before/after comparison is done.
   hit; follows every round to check the cue was lit exactly when its path
   passes inside the hit radius, at the cue's edge, at the edge of the round
   assist's cone and against a target flying at the jet; and checks every round
-  fired through a hard turn passes through
-  the gun cross's point. Run it after touching the gunsight, the camera or the
-  guns.
+  fired through a hard turn passes through the gun cross's point. Run it after
+  touching the gunsight, the camera or the guns.
 - `handling.mjs` — holds each control key from rest in the game loop at 60 and
   30 fps and reports the steady rate, the time to 63% of it and to 90°, and the
   overrun after release; fails if the roll is not 90° in about 0.5 s at both.
+- `enemy-flight.mjs [--minutes 5] [--fps 60] [--check]` — samples every live
+  enemy every frame while the person-like pilot fights, and reports how fast
+  their noses turn, how fast they roll, how hard their commanded speed changes
+  and how often the ground rules move them. `--check` fails outside the limits
+  in TODO.md's "Enemies fly twitchily". Run it at 30 as well as 60 fps.
 - `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
   frames on every run: level flight, then a kill with the particle pool under
   heavy-fight pressure. Run it on two copies of the game with different tags
@@ -116,8 +120,9 @@ Everything below is still on you.
   `ui-test.mjs`; for any sound, `audio-check.mjs`, and listen to its renders.
   Set audio levels by measurement, not by ear on one pair of headphones.
 - For anything that changes how the game plays, measure it with the
-  person-like pilot: four 15-minute runs before and four after, compared with
-  `figures.mjs`. Single runs vary too much to compare.
+  person-like pilot: eight 15-minute runs before and eight after, compared with
+  `figures.mjs`, which gives each group's standard error. Single runs vary too
+  much to compare, and four a side has already been misread as a result.
 
 ## Notes
 

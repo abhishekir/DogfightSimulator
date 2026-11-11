@@ -494,9 +494,26 @@ It is the same knob as roll, on the pitch axis. Roll has been rewritten as a
 frame-rate-independent approach to a target rate (`ROLL_RATE`, `ROLL_RESPONSE`,
 90° in 0.5 s); pitch and yaw still use the old frame-rate-dependent update, so
 whatever is decided here should move them to the same form. Also open with it:
-whether roll should slow with airspeed. Nobody has yet played the 210°/s roll
-and said whether it still feels sluggish; the person-like pilot measured no
-difference in kills either way, with or without the new gunsight.
+whether roll should slow with airspeed.
+
+**The roll rate itself is not settled.** 210°/s meets "90° in half a second",
+but two things say it is too quick:
+
+- The first playtest found it a bit too twitchy.
+- The person-like pilot kills more slowly with it once the gunsight is in.
+  Sixteen 15-minute runs a side, everything else the same (gunsight, round
+  assist, lock-only missiles): 1.19 ± 0.09 kills per minute with the old 82°/s
+  roll, 0.93 ± 0.09 with 210°/s. A second pair that differs only in the roll
+  and the missile rule gave 1.26 ± 0.12 and 0.92 ± 0.08. Pooled, that is about
+  0.3 kills per minute, three standard errors. A tap of the roll key cannot be
+  shorter than about 80 ms, which at 210°/s is 17° plus a 14° overrun, so fine
+  bank corrections overshoot. (Without the gunsight the pilot showed no
+  difference: 0.67 ± 0.09 against 0.75 ± 0.08 over eight runs a side.)
+
+So choose `ROLL_RATE` and `ROLL_RESPONSE` by play, with a roll sensitivity
+setting ("Settings screen"), and measure candidates the same way: something
+between 82 and 210°/s may keep the quick bank without the overshoot.
+`.github/tools/handling.mjs` says what any pair of values gives.
 
 ### 18. Settings screen — P4
 

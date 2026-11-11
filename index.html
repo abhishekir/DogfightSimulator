@@ -3529,8 +3529,11 @@ function drawHUD(){
   // The two corner panels are laid out at 720p and scaled up from their outer bottom corner:
   // 1.375x up to a 900 px window, growing with its height to 2.2x at 1440. At their old size
   // the text was 9-12 px, too small to read at a glance on a desktop screen; 1.25x was
-  // playtested and found still a little small.
-  const hk=1.375*THREE.MathUtils.clamp(h/900,1,1.6);
+  // playtested and found still a little small. A narrow or short window gets less: never so
+  // wide that a panel reaches the radar in the middle (85 px either side of centre, with a
+  // 16 px gap), nor so tall that the left one reaches the compass strip. Below about 540 px
+  // wide nothing fits, and the scale stops at 0.75.
+  const hk=Math.max(.75,Math.min(1.375*THREE.MathUtils.clamp(h/900,1,1.6),(w/2-119)/200,(h-72)/218));
   const lpX=25,lpY=h-238;hud.save();hud.translate(lpX-8,h-28);hud.scale(hk,hk);hud.translate(-(lpX-8),-(h-28));
   hud.fillStyle='rgba(0,15,30,.5)';hud.fillRect(lpX-8,lpY-8,190,218);hud.strokeStyle='rgba(0,255,200,.12)';hud.strokeRect(lpX-8,lpY-8,190,218);
   hud.font='10px Courier New';hud.fillStyle='#0aa';hud.fillText('FLIGHT DATA',lpX+45,lpY+5);

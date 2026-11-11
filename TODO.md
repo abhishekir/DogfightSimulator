@@ -94,7 +94,8 @@ Where the gameplay lives, for anyone changing how the game plays:
   locked, or a prompt to hold F. An empty rack reads NO MISSILES, blinking, and
   sounds `snd.rackEmpty()`, when the last missile leaves and whenever F is
   pressed with none left. The two corner panels scale with the window (1.375x at
-  720p, 1.65x at 1080p, 2.2x at 1440p); at their old size the text was 9-12 px.
+  720p, 1.65x at 1080p, 2.2x at 1440p, less in a window too narrow or short for
+  that, so they never reach the radar); at their old size the text was 9-12 px.
 - **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame.
 
 ### Verifying a change

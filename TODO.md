@@ -91,8 +91,11 @@ Where the gameplay lives, for anyone changing how the game plays:
   the gun line projected through the camera at the range the rounds will meet
   the target, the lead marker is where the locked or nearest target will be when
   they get there (time of flight solved against its velocity, `e.velocity`), and
-  the cross turns red when the marker is inside its ring, which is the 14 m hit
-  radius at that range. The chase camera sits above and behind the jet and lags
+  the ring round the cross is the 14 m hit radius at that range. The cue (cross,
+  marker and box turning red) is not read off the screen: `gunSolution` works
+  out in world space how close a round fired now will pass the target, and
+  `gunOnTarget` lights the cue when rounds from both muzzles will pass inside
+  the hit radius within their life. The chase camera sits above and behind the jet and lags
   it, so the guns never pointed at the middle of the screen: the old fixed
   reticle was 3–5° off the gun line, and a target held in it was missed beyond
   about 250 m. `GUN_MUZZLE_SPEED`, `GUN_ROUND_LIFE`, `GUN_HIT_RADIUS` and
@@ -513,6 +516,17 @@ covers them.
   harness the build queue reaches several hundred chunks because the aircraft
   outruns it; at normal frame rates it drains. If you make the aircraft faster,
   re-check that.
+- **Rounds can pass through a target between frames.** `updateBullets` tests a
+  round against each enemy once a frame, at the round's position that frame, so
+  a round that crosses the 28 m hit sphere between two frames is not counted.
+  Chasing a target at 60 fps a round moves about 11 m a frame relative to it and
+  none are lost. Head-on at 600 m/s of closure it moves 21 m a frame at 60 fps
+  (still none lost, measured) and 42 m at 30 fps, where
+  `.github/tools/gunsight.mjs --dt 0.0333` counts 66% of rounds whose paths pass
+  inside the radius. It predates the gunsight, which only makes it visible: the
+  cue is right and the hit test drops the round. Fix it with a swept test, as
+  missiles already have (`movingSphereHitTime`); it will raise the hit rate of
+  head-on passes at low frame rates, so measure with the person-like pilot.
 - **Missile motors never burn out** (`motor` ramps to 1 and stays), so the
   motor sound runs for the missile's whole life. If burnout is modelled, cut
   the roar to a tail there.

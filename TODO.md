@@ -101,18 +101,10 @@ Where the gameplay lives, for anyone changing how the game plays:
   about 250 m. `GUN_MUZZLE_SPEED`, `GUN_ROUND_LIFE`, `GUN_HIT_RADIUS` and
   `GUN_ORIGIN` are the ballistics the sight and the cannon share.
   Round assist: a round fired while the lead point is within `GUN_ASSIST` (1.5°)
-  of the nose leaves aimed at the lead point (`gunLead`, the sight's own
-  solution), and the sight's ring is the larger of the hit radius and that cone,
-  so the cue still means the rounds will hit. The controls are never touched.
-  Measured with the person-like pilot (four 15-minute runs each, on top of the
-  gunsight): gun kills per minute 0.02 without it, 0.10, 0.08 and 0.13 at 1°,
-  1.5° and 2°; total kills per minute did not separate from the run-to-run
-  spread, because missiles still make most kills. 1.5° was chosen because
-  `.github/tools/gunsight.mjs` can show at that strength that the assist, not
-  the hit radius, makes the hits. Stronger options, if gun kills are still too
-  rare in play: a hit radius that grows with range, or a gentle steering pull
-  toward the marker while the trigger is held (most likely to feel like losing
-  control).
+  of the nose leaves aimed at the lead point. The cannon and the cue go by one
+  rule, `gunAssisted(gunSolution(target))`, and the sight's ring is the larger
+  of the hit radius and that cone. The controls are never touched. Whether it
+  helps a person is not yet shown: see "Aim assist for the gun".
 
 ### Verifying a change
 
@@ -260,6 +252,63 @@ Report for each run:
 **Done when:** the soak reports those figures for the person-like pilot, a
 baseline from the current game is written into this task, and each playability
 task quotes its before/after figures against that baseline.
+
+### 6. Aim assist for the gun — P2
+
+Even with a correct lead marker, holding the gun cross on it while the target
+manoeuvres is hard with keyboard controls. The options, in order of how much
+control they take from the player:
+
+- **Round assist.** Rounds fired with the gun cross within a degree or two of
+  the lead marker are aimed at it. The controls are untouched, so it never
+  fights the player.
+- **Hit tolerance.** The 14 m hit radius grows with range, so the same angular
+  error counts at 1,000 m as at 300 m.
+- **Steering assist.** The nose is pulled gently toward the lead marker while
+  the trigger is held and the gun cross is close to it. It is the strongest
+  option and the one most likely to feel like losing control.
+
+**Done so far:** the round assist, at `GUN_ASSIST` = 1.5° (0 turns it off). The
+mechanism works, and `.github/tools/gunsight.mjs` checks it: with the cross
+held 0.9 of the cone off the marker at 1,000 m every round hits; held 1.1 off,
+none does; and a wave-1 enemy dies 1.6 s into a hold that wanders inside the
+cone. Against a target flying a straight line, `track.mjs` has the person-like
+pilot landing 31–69% of its rounds with the assist, firing 19–39% of the time,
+where without it it fires 4–9% of the time.
+
+**Not shown: that a person gets more gun kills in the game.** Gun kills are
+rare with or without it, about one every 20 to 50 minutes of play, so they take
+a great deal of play to compare:
+
+- The first comparison, four 15-minute runs a side: one gun kill without the
+  assist against five. It was reported as an improvement and should not have
+  been: four runs cannot tell those apart.
+- A reviewer's re-run, eight runs a side: 10 gun kills without, 8 with.
+- A third, sixteen runs a side (four hours of play each) after the pilot and
+  the cue were corrected: 5 without, 13 with (0.02 ± 0.01 against
+  0.06 ± 0.01 per minute as the mean of the runs). Total kills per minute went
+  from 0.99 ± 0.10 to 1.26 ± 0.12, which is under two standard errors.
+
+Taken together that is no established effect, and the default strength of 1.5°
+is a guess from the middle of "a degree or two". The first playtest asked for a
+stronger assist.
+
+What to do next:
+
+- Decide the strength by play, not by this pilot alone: make it a setting
+  ("Settings screen"), try 1.5°, 3° and the two stronger options above, and keep
+  what a person can feel without the gun aiming itself.
+- For a measurement that can show an effect, raise how often the gun gets used
+  first. The person-like pilot fires only while the cue is lit and the marker is
+  in the ring, under 1,000 m, and enemies spend little time there; most kills
+  are missile kills either way. Counting hits per trigger-second, or runs with
+  the missiles taken away, would say more per hour than gun kills do.
+
+**Done when:** a player who keeps the gun cross roughly on a wave-1 enemy's
+lead marker gets a gun kill (checked by `gunsight.mjs`), the strength has been
+chosen by playtest, and a comparison of at least sixteen runs a side shows the
+person-like pilot killing measurably faster with the assist than without it, or
+the task records that it does not.
 
 ### 7. GPU cost is unmeasured — P2 (needs real hardware)
 
@@ -477,7 +526,7 @@ the pitch axis.
 There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
 (`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Other tasks
 add settings of their own: inverted pitch ("The controls screen has pitch
-backwards"), aim assist strength (`GUN_ASSIST`, 1.5°; 0 turns it off), the aircraft ("More
+backwards"), aim assist strength (`GUN_ASSIST`; see "Aim assist for the gun"), the aircraft ("More
 aircraft: sixth-generation designs") and the time of day ("Time of day").
 
 **Done when:** a settings screen, reachable from the start and pause screens,

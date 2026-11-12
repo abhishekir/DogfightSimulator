@@ -27,6 +27,10 @@ const clickCentre = () => p.mouse.click(320, 180);
 await p.waitForFunction(() => window.__snd, null, { timeout: 90000 });
 await p.waitForTimeout(3000);
 
+// Both screens describe the pitch keys as they work: ↑ nose down, ↓ nose up.
+const screens = await ev(() => ['blocker', 'pause'].map(id => document.getElementById(id).textContent));
+check('start and pause screens say ↑ / ↓ is nose down / up', screens.every(t => /↑ \/ ↓\s*— Nose down \/ up/.test(t)), screens.map(t => (t.match(/↑[^\n]*/) || [''])[0]));
+
 // The title screen says how the missile rack works.
 const title = await ev(() => document.getElementById('blocker').innerText);
 check('start screen explains the missile rack', /12 in the rack/.test(title) && /\+2 per kill/.test(title) && /wave is cleared/.test(title));
@@ -40,6 +44,14 @@ check('click starts the game', !(await shown('blocker')) && await ev(() => windo
 check('audio running at start', await until(() => window.__snd.ctx.state === 'running', 5000));
 check('output level is volume squared', await until(() => Math.abs(window.__snd.output.gain.value - 0.49) < 0.01, 5000),
       await ev(() => window.__snd.output.gain.value));
+
+// The pitch keys do what the screens say.
+const noseY = () => ev(() => new window.__THREE.Vector3(0, 0, -1).applyQuaternion(window.__pj.quaternion).y);
+const pitchKey = async key => { const y0 = await noseY(); await p.keyboard.down(key);
+  const sign = key === 'ArrowUp' ? -1 : 1, moved = await until(`(${sign}) * (new window.__THREE.Vector3(0, 0, -1).applyQuaternion(window.__pj.quaternion).y - (${y0})) > 0.05`, 15000);
+  await p.keyboard.up(key); return moved; };
+check('↑ pushes the nose down', await pitchKey('ArrowUp'));
+check('↓ pulls the nose up', await pitchKey('ArrowDown'));
 
 // The cannon.
 await p.keyboard.down('Space');

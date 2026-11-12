@@ -83,9 +83,20 @@ Where the gameplay lives, for anyone changing how the game plays:
   kill 200. Every kill adds 2 missiles, up to 12.
 - **Flight and weapons** (`updatePlayer`). Roll, pitch and yaw are rates driven
   by the keys; "Roll response is sluggish" has the measured figures. ↓ pulls the
-  nose up and ↑ pushes it down, as in a flight sim. Throttle sets the target
+  nose up and ↑ pushes it down, as in a flight sim, and the start and pause
+  screens say so. Throttle sets the target
   speed directly, 40–450 m/s. A missile locks after F is held for 1.5 s with a
-  target within about 32° of the nose and 1,500 m.
+  target within about 32° of the nose and 1,500 m (`LOCK_CONE`, `LOCK_RANGE`),
+  and leaves only on a lock: with nothing in the seeker no lock builds, and a
+  lock lost before it completes starts again. (Holding F with nothing locked
+  used to fire unguided every half second; a quarter of a person's missiles went
+  that way.) The flight-data panel, bottom left, shows the rack (`MSL 7/12`) and
+  under it the seeker's state (`seekerState`): searching, out of range, locking,
+  locked, or a prompt to hold F. An empty rack reads NO MISSILES, blinking, and
+  sounds `snd.rackEmpty()`, when the last missile leaves and whenever F is
+  pressed with none left. The two corner panels scale with the window (1.375x at
+  720p, 1.65x at 1080p, 2.2x at 1440p, less in a window too narrow or short for
+  that, so they never reach the radar); at their old size the text was 9-12 px.
 - **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame. The
   gunsight is computed, not drawn at a fixed place (`gunSight`): the gun cross is
   the gun line projected through the camera at the range the rounds will meet
@@ -140,6 +151,13 @@ diff. What worked during the rendering overhaul:
   game-minutes take about a minute.
 - For anything a player touches, `.github/tools/ui-test.mjs`, which plays
   through the real overlays and keys in real time.
+- For anything that changes how the game plays, the person-like pilot in
+  "Difficulty is unmeasured": eight tagged 15-minute runs of
+  `soak.mjs --pilot person` on the old copy (`--page`) and eight on the new,
+  then `.github/tools/figures.mjs` on the two tags. That task says why eight.
+- For how the enemies fly, `.github/tools/enemy-flight.mjs`: turn rate, roll
+  rate, speed changes and terrain hops of every live enemy, every frame, at 60
+  and at 30 fps.
 - For audio, `.github/tools/audio-check.mjs`: it renders the SoundEngine
   offline, each bus soloed, measured A-weighted, and checks the mix and the
   regressions listed in it. Ears and headphones differ; its numbers do not.
@@ -151,53 +169,6 @@ See CLAUDE.md for how to run them.
 
 ## Tasks
 
-### 1. Missile count, resupply and dumb-fire are invisible — P1
-
-The rack holds 12 (`MAX_MISSILE_AMMO`). The HUD shows them as `MSL:` followed
-by one bar per missile, in 11 px type at the foot of the flight-data panel: no
-number, no maximum, and nothing happens when it reaches zero. Holding F with an
-empty rack does nothing at all, with no tone and no message.
-
-Resupply exists, but nothing tells the player about it. Each kill adds 2, up
-to 12 (`killEnemy`), and clearing a wave refills the rack along with 25 hull,
-which only the wave-cleared banner mentions. The start and pause screens say
-"F (hold) — Lock & Fire Missile" and nothing more.
-
-Worse, holding F with no enemy in the seeker cone (within about 32° of the nose
-and 1,500 m: `LOCK_CONE`, 0.85) fires an unguided missile every half second, and
-nothing on the HUD says so. That is the "dumb-fire" branch of the lock-on code
-in `updatePlayer`. Measured headless: holding F with nothing locked, 11 of the
-12 missiles were gone in 6 seconds. A player holding F while manoeuvring for a
-shot empties the rack, which is probably where a new player's missiles go.
-
-What to do:
-
-- Show the count as a number against the maximum (`MSL 7/12`), somewhere the
-  eye goes in a fight (beside the reticle or the lock diamond), not only in
-  the corner panel.
-- Announce an empty rack with a HUD flag and a short tone, and do the same when
-  F is pressed with none left.
-- Add "+2 MSL" to each kill notification (`addKillNotification`).
-- Put one line on the start and pause screens: 12 missiles, 2 more per kill,
-  full reload when a wave is cleared.
-- Stop a held key from dumb-firing. Either fire only on a lock, or make an
-  unguided shot a deliberate fresh press with nothing locked. While F is held,
-  show the seeker's state: searching, locking, locked, or target out of range.
-
-**Done when:** a player who has not read the source can say how many missiles
-they have, how many they started with and how to get more, and never fires one
-they did not mean to.
-
-### 2. The controls screen has pitch backwards — P1
-
-The start and pause screens say "↑ / ↓ — Pitch Up / Down", but ↑ pushes the
-nose down and ↓ pulls it up, as in a flight sim (`updatePlayer`: "up arrow =
-nose dips down"). A player who presses ↑ to climb dives instead. Fix the label,
-for example "↑ / ↓ — Nose down / up", and offer the other convention as an
-option in "Settings screen".
-
-**Done when:** both screens describe the keys as they work, and the inverted
-option is listed in "Settings screen".
 
 ### 4. Roll response is sluggish — P1
 
@@ -225,33 +196,89 @@ finds the roll sluggish.
 
 ### 5. Difficulty is unmeasured — P2
 
-The only player in the tools is the soak bot, and it plays far better than a
-person can. It leads its target using the target's exact velocity, aims along
-the true gun line (so it never met the offset the old fixed reticle had), and
-fires once the lead point is within
-about 14° of the nose and 1,200 m. In eight 15-minute soaks it killed 42–61
-enemies and reached waves 3–5, and nearly all its deaths were crashes it was
-told to make. None of that says how hard the game is for a person, so the
-playability tasks have nothing to measure against.
+The soak bot plays far better than a person can: it leads its target using the
+target's exact velocity, aims along the true gun line, and reacts within a
+frame. So `soak.mjs --pilot person` flies a pilot built to play like one
+(`.github/tools/person.mjs`; its header has the details):
 
-What to do: give the soak, or a new tool, a pilot that flies like a person.
+- It steers by what the HUD draws, read off the screen: it puts the mark it is
+  steering for on the aim point and turns the screen-space error into a
+  direction through the camera. Today that is the target box on the centre of
+  the reticle. When the page defines `gunSight()`, it reads the sight from there
+  instead (see below).
+- It sees 150–250 ms late (drawn per life) and aims with 1.5° of correlated
+  noise per axis (about 2° in all); whether the mark is in the ring it judges
+  from the symbols as drawn. An enemy off the screen it knows to about 8°.
+- It presses keys like a person, with an 80 ms minimum hold, tapping each axis
+  for a turn rate proportional to the error, with lead and, near the mark, an
+  integral term; more than 10° off it rolls the mark above the canopy and
+  pulls. It learns the jet's turn rates by watching it turn.
+- It fires the gun while the HUD's shoot cue is lit and the mark is inside the
+  ring, under 1,000 m on the range readout. It holds F when the target box (the
+  aircraft itself, not a lead marker) is near the aim point under 1,500 m, keeps
+  holding while the lock diamond shows, and lets go when it sees none or sees
+  the launch.
 
-- Aim with a couple of degrees of noise and a reaction delay of 150–250 ms.
-- Steer by what the HUD shows (the gun cross and lead marker, `gunSight()`),
-  not by exact positions.
-- Use missiles the way a player does: hold F when it sees the lock diamond.
+`.github/tools/track.mjs` calibrates it against one target flying a straight
+line, its AI skipped altogether (`straightTargets` in `lib.mjs`; moving a
+target from outside and undoing its AI afterwards is not the same, because
+rounds are tested against wherever the AI put it that frame): it holds the box
+a median 2.3–2.9° from the reticle, and 1.0–1.3° with the aim noise turned off.
 
-Report for each run:
+For either pilot the soak now reports time to the first kill, kills per minute
+split into gun and missile kills, hits per round fired, missiles fired without a
+lock and deaths per wave other than forced crashes, and `--tag` writes them to
+`.github/tools/out/soak-<tag>.json`. `.github/tools/figures.mjs` pools several
+tagged runs and sets groups side by side, with the mean of the runs and its
+standard error.
 
-- time to the first kill
-- kills per minute, split into gun and missile kills
-- hits per round fired
-- missiles fired without a lock
-- deaths per wave, other than forced crashes
+**Runs vary a lot, and four a side is not enough.** Kills per minute ranged
+0.40–1.28 over eight runs of the same game, and the standard error of an
+eight-run mean is about 0.1. Two eight-run groups less than about 0.3 kills per
+minute apart have not been told apart. The first comparisons made with this
+pilot used four runs a side and read noise as results (two four-run pools of
+one game gave 0.75 and 0.95). Use eight 15-minute runs a side at least, sixteen
+for anything rare such as gun kills, and say what the standard error is. A
+15-minute run takes about 70 s, and four run side by side on four cores.
 
-**Done when:** the soak reports those figures for the person-like pilot, a
-baseline from the current game is written into this task, and each playability
-task quotes its before/after figures against that baseline.
+**Baseline**, `main` at 56841cd: eight 15-minute runs of the person-like pilot
+and four of the soak bot.
+
+| | person | bot |
+|---|---|---|
+| game-minutes alive | 118.8 | 59.2 |
+| time to first kill, median over lives | 68.8 s (5 of 29 lives made none) | 7.9 s |
+| kills per minute | 0.67 (runs 0.40–1.28; mean 0.67 ± 0.09) | 3.61 (3.62 ± 0.11) |
+| — gun | 0.03 (three gun kills) | 2.43 |
+| — missile | 0.65 | 1.18 |
+| hits per round fired | 1.06% (169 of 15,891) | 2.65% |
+| missiles fired, without a lock | 481, 123 (26%) | 867, 417 (48%) |
+| deaths on wave 1, 2, 3 (of lives that reached it) | 10/29, 9/15, 2/2 | none in 20 lives |
+
+What it says:
+
+- **The gun does not work for a person.** Three gun kills in two hours. With
+  the noise off, `track.mjs` holds the box 1.0–1.3° from the reticle's centre
+  on a target crossing at 60–100 m/s and lands 0–12 hits in 1,500–1,860 rounds:
+  the rounds go where the nose points, not where the reticle is, and nothing
+  shows the lead. That is "The gunsight is off the gun line and shows no lead",
+  measured.
+- **Missiles make nearly every kill, and a quarter leave without a lock** —
+  the lock is lost or the target dies late in the lock, F is still held, and
+  the rack fires anyway ("Missile count, resupply and dumb-fire are invisible").
+- **A person rarely gets past wave 2**: 15 of 29 lives reached it and two
+  reached wave 3; the bot reached wave 4 in 9 of its 20 lives.
+
+What remains: each playability task quotes its before/after figures against
+this baseline. The sight convention: when "The gunsight is off the gun line and
+shows no lead" lands, define `gunSight()` in the page, returning
+`{ cross, box, lead, target, cue, ring }` (points in HUD pixels, `ring` the
+radius inside which the mark counts as on the cross), draw the HUD from it, and
+the pilot, `track.mjs` and "Aim assist for the gun" all read the same thing.
+
+**Done when:** the P1 playability tasks have quoted before/after figures
+against the baseline; then move the pilot's description to "Reference" and
+drop this task.
 
 ### 6. Aim assist for the gun — P2
 
@@ -524,10 +551,17 @@ the pitch axis.
 ### 18. Settings screen — P4
 
 There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
-(`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Other tasks
-add settings of their own: inverted pitch ("The controls screen has pitch
-backwards"), aim assist strength (`GUN_ASSIST`; see "Aim assist for the gun"), the aircraft ("More
-aircraft: sixth-generation designs") and the time of day ("Time of day").
+(`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Settings
+other work wants:
+
+- **Pitch keys.** ↑ pushes the nose down and ↓ pulls it up, as a stick does
+  (`updatePlayer`, the `pI` line), and the start and pause screens say so. Offer
+  the other convention, ↑ for nose up, as an option, and have both screens
+  describe whichever is chosen. `ui-test.mjs` checks that the keys do what the
+  screens say ("↑ pushes the nose down"); it will need to follow the option.
+- Aim assist strength (`GUN_ASSIST`; see "Aim assist for the gun").
+- The aircraft ("More aircraft: sixth-generation designs").
+- The time of day ("Time of day").
 
 **Done when:** a settings screen, reachable from the start and pause screens,
 sets volume, mute, the graphics options and whichever of those other settings
@@ -578,7 +612,7 @@ worth preserving.
 **Measure levels before changing them.** Every level in the class was set
 against A-weighted loudness measured offline. At 70% throttle the engine bus is
 about -38 dBA. The seek tone is 2 dB below it; the growl 5–10 dB above, rising
-with lock quality; the track tone 11 dB above; a sustained gun burst about
+with lock quality; the track tone 11 dB above; the empty-rack cue 8 dB above; a sustained gun burst about
 12 dB above; a missile launch about 11 dB above. An enemy blowing up 300 m away
 is about 5 dB above in its first half second, the player's crash 15 dB above,
 peaking into the limiter. Judging by ear on one pair of headphones is how the

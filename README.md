@@ -18,11 +18,11 @@ Open `index.html` in any WebGL2 browser. Click to start.
 | Input | Action |
 |---|---|
 | `W` / `S` | Throttle up / down |
-| `↑` / `↓` | Pitch |
+| `↑` / `↓` | Nose down / up, as a stick: push forward to dive |
 | `←` / `→` | Roll |
 | `A` / `D` | Yaw |
 | `Space` | Cannon |
-| `F` (hold) | Acquire lock, then launch missile |
+| `F` (hold) | Acquire lock; the missile launches on lock |
 | `−` / `+` | Volume |
 | `M` | Mute |
 | `Esc` | Pause |
@@ -30,9 +30,10 @@ Open `index.html` in any WebGL2 browser. Click to start.
 Survive waves of hostiles. Each wave is larger and flown better than the last —
 count rises to ten, and enemy aggression, skill, speed and durability all scale
 with the wave number. Clearing one restores 25 hull and refills the missile
-rails; each kill returns two missiles. Missile lock takes 1.5 s inside a
-forward cone; the seeker growls as it acquires and settles into a steady tone
-on lock.
+rails; each kill returns two missiles, up to the rack's twelve. Missile lock
+takes 1.5 s inside a forward cone and 1,500 m; the seeker growls as it acquires
+and settles into a steady tone on lock, and a missile leaves only on a lock.
+The count and the seeker's state are in the flight-data panel, bottom left.
 
 ---
 

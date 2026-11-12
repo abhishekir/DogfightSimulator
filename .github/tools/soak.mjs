@@ -5,11 +5,19 @@
  * pool leaks, voices that are never released, audio that falls out of step with the
  * game, and exceptions on rare paths (deaths, restarts, pauses mid-burst).
  *
- *   node .github/tools/soak.mjs [--minutes 10] [--screens] [--page file.html]
+ *   node .github/tools/soak.mjs [--minutes 10] [--pilot bot|person] [--tag name] [--screens] [--page file.html]
  *
  * The bot pursues the nearest enemy with lead, fires guns and missiles, sometimes flies
  * erratically, sometimes dives into the ground on purpose, and pauses and resumes at
  * random. --screens saves one frame per game-minute to .github/tools/out/.
+ *
+ * --pilot person swaps the bot for a pilot that flies like a person (person.mjs): it
+ * steers by what the HUD draws, with a reaction delay and aim noise, never crashes on
+ * purpose and never flies erratically, at a 1280x720 window. That is the pilot to measure
+ * difficulty with. For either pilot the soak reports, per life and in total: the time to
+ * the first kill, kills per minute split into gun and missile kills, hits per round fired,
+ * missiles fired without a lock, and deaths per wave other than forced crashes. --tag
+ * writes those figures to .github/tools/out/soak-<tag>.json as well.
  *
  * Exits 1 on any watchdog anomaly or page error, and on any particle refused to an emitter
  * that is not a trail: explosions, impacts and hit sparks above all, which can only go
@@ -18,14 +26,19 @@
  * See "Reference: the particle pool" in TODO.md.
  */
 import { join } from 'node:path';
-import { openGame, stepper, arg, flag, outDir } from './lib.mjs';
+import { writeFile } from 'node:fs/promises';
+import { openGame, stepper, gameStats, arg, flag, outDir } from './lib.mjs';
+import { installPerson, PERSON } from './person.mjs';
 
-const MINUTES = Number(arg('minutes', 10)), SCREENS = flag('screens');
-const game = await openGame({ transform: stepper, args: ['--js-flags=--expose-gc', '--enable-precise-memory-info'] });
+const MINUTES = Number(arg('minutes', 10)), SCREENS = flag('screens'), PILOT = arg('pilot', 'bot'), TAG = arg('tag', null);
+if (!['bot', 'person'].includes(PILOT)) throw new Error(`--pilot is bot or person, not ${PILOT}`);
+const game = await openGame({ transform: h => gameStats(stepper(h)), args: ['--js-flags=--expose-gc', '--enable-precise-memory-info'],
+  viewport: PILOT === 'person' ? { width: 1280, height: 720 } : undefined });
 const p = game.page;
 await p.waitForFunction(() => window.__g, null, { timeout: 90000 });
 await p.mouse.click(5, 5);                     // a user gesture, so the AudioContext may start
 await p.evaluate(() => window.__g.start());
+if (PILOT === 'person') await p.evaluate(installPerson, PERSON);
 
 // The bot and the watchdog live in the page.
 await p.evaluate(() => {
@@ -39,7 +52,19 @@ await p.evaluate(() => {
   const _to = new T.Vector3(), _loc = new T.Vector3(), _q = new T.Quaternion();
   // Count calls through the sound API, to prove those paths ran.
   const snd = G.snd, count = (name, key) => { const f = snd[name].bind(snd); snd[name] = (...a) => { S[key]++; return f(...a); }; };
-  count('missileLaunch', 'launches'); count('impact', 'impacts');
+  count('impact', 'impacts');
+  // The figures that say how hard the game is, kept per life.
+  const person = window.__person || null;
+  let life = null, lastRound = 0;
+  const newLife = () => { life = { alive: 0, firstKill: null, gun: 0, missile: 0, rounds: 0, hits: 0, launches: 0, unguided: 0, wave: 1, died: null };
+    S.lifeLog.push(life); lastRound = 0; if (person) person.reset(); };
+  S.lifeLog = []; newLife();
+  window.__stats = { hit() { life.hits++; },
+    kill(e, sv) { if (sv > 100) life.missile++; else life.gun++; if (life.firstKill === null) life.firstKill = +life.alive.toFixed(2); } };
+  const launch = snd.missileLaunch.bind(snd);
+  snd.missileLaunch = m => { S.launches++;
+    if (!m.userData.isEnemy) { life.launches++; if (!m.userData.target) life.unguided++; if (person) person.launches++; }
+    return launch(m); };
   // The game counts requests and drops per particle emitter (a page from before it did has no
   // counters, and gets the old by-type breakdown). Whenever a non-trail request is refused,
   // note what was holding the pool, and group refusals less than half a second apart.
@@ -58,6 +83,7 @@ await p.evaluate(() => {
   }
 
   function bot(dt) {
+    if (person) return person.step(dt);
     for (const k of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD', 'KeyW', 'KeyS', 'Space', 'KeyF']) K[k] = false;
     if (G.gameOver || !G.gameStarted || G.paused) return;
     const jet = G.jet, pl = G.player;
@@ -140,13 +166,16 @@ await p.evaluate(() => {
       try { G.frame(dt, renderLast && i === n - 1); }
       catch (e) { A('exception in frame: ' + e.message, (e.stack || '').split('\n').slice(0, 3).join(' | ')); }
       S.t += dt; S.steps++; S.lifeT += dt;
+      if (!G.gameOver) { life.alive += dt; life.wave = Math.max(life.wave, G.wave);
+        const r = G.player.gunRound; life.rounds += r >= lastRound ? r - lastRound : r; lastRound = r; }
       if (E) drops();
       if (!G.gameOver && !G.paused) watch();
       const gun = !!G.snd._gun; if (gun !== wasGun) { S.gunToggles++; wasGun = gun; }
       S.maxWave = Math.max(S.maxWave, G.wave);
-      if (G.gameOver && !wasOver) { S.deaths++; S.totalKills += G.kills; S.events.push(`t=${S.t.toFixed(0)}s died (${S.mode}) on wave ${G.wave} with ${G.kills} kills`); }
+      if (G.gameOver && !wasOver) { S.deaths++; S.totalKills += G.kills; S.events.push(`t=${S.t.toFixed(0)}s died (${S.mode}) on wave ${G.wave} with ${G.kills} kills`);
+        life.died = { wave: G.wave, cause: G.player.onGround ? 'ground' : 'shot', forced: S.mode === 'crash' }; }
       wasOver = G.gameOver;
-      if (G.gameOver && G.deathCamTimer <= 0) { G.restart(); S.lives++; S.lifeT = 0; S.mode = 'hunt'; S.modeT = 5; }
+      if (G.gameOver && G.deathCamTimer <= 0) { G.restart(); S.lives++; S.lifeT = 0; S.mode = 'hunt'; S.modeT = 5; newLife(); }
       // Pause and resume now and then, sometimes with the trigger held.
       if (!G.gameOver && Math.random() < dt / 40) { G.togglePause(); S.pauses++; for (let k = 0; k < 30; k++) G.frame(dt, false); G.togglePause(); }
     }
@@ -209,6 +238,34 @@ if (S.emitters) {
   console.log(`non-trail requests refused on ${S.starvedSteps} steps in ${S.episodes.length} episodes`);
   for (const ep of S.episodes.slice(0, 12)) console.log('  ' + JSON.stringify({ ...ep, end: +ep.end.toFixed(1) }));
 }
+
+// How hard the game is, for this pilot.
+const L = S.lifeLog.filter(l => l.alive > 1), sum = k => L.reduce((n, l) => n + l[k], 0);
+const minutes = sum('alive') / 60, kills = sum('gun') + sum('missile'), rounds = sum('rounds'), hits = sum('hits');
+const firsts = L.map(l => l.firstKill).filter(t => t !== null).sort((a, b) => a - b);
+const median = a => a.length ? (a.length % 2 ? a[(a.length - 1) / 2] : (a[a.length / 2 - 1] + a[a.length / 2]) / 2) : null;
+const maxWave = Math.max(...L.map(l => l.wave)), perWave = [];
+for (let w = 1; w <= maxWave; w++) perWave.push({ wave: w, reached: L.filter(l => l.wave >= w).length,
+  died: L.filter(l => l.died && !l.died.forced && l.died.wave === w).length,
+  ground: L.filter(l => l.died && !l.died.forced && l.died.wave === w && l.died.cause === 'ground').length });
+const figures = { pilot: PILOT, page: arg('page', 'index.html'), gameMinutes: +minutes.toFixed(1), lives: L.length,
+  firstKillMedianS: firsts.length ? +median(firsts).toFixed(1) : null, firstKillS: firsts, livesWithoutAKill: L.length - firsts.length,
+  killsPerMin: +(kills / minutes).toFixed(2), gunKillsPerMin: +(sum('gun') / minutes).toFixed(2), missileKillsPerMin: +(sum('missile') / minutes).toFixed(2),
+  rounds, hits, hitsPerRound: +(hits / Math.max(rounds, 1)).toFixed(4),
+  missiles: sum('launches'), missilesWithoutLock: sum('unguided'),
+  forcedCrashes: L.filter(l => l.died && l.died.forced).length, deathsPerWave: perWave,
+  lifeDetail: L.map(l => ({ min: +(l.alive / 60).toFixed(1), wave: l.wave, gun: l.gun, missile: l.missile, firstKill: l.firstKill,
+    hitsPerRound: +(l.hits / Math.max(l.rounds, 1)).toFixed(3), missiles: l.launches, unguided: l.unguided, died: l.died })) };
+console.log(`
+difficulty (${PILOT} pilot): ${figures.lives} lives, ${figures.gameMinutes} game-minutes alive
+  time to first kill: median ${figures.firstKillMedianS ?? '-'} s, per life ${JSON.stringify(firsts)}, ${figures.livesWithoutAKill} lives without one
+  kills per minute ${figures.killsPerMin} (gun ${figures.gunKillsPerMin}, missile ${figures.missileKillsPerMin}), ${kills} kills
+  hits per round fired ${(100 * figures.hitsPerRound).toFixed(2)}% (${hits} of ${rounds})
+  missiles fired ${figures.missiles}, without a lock ${figures.missilesWithoutLock}
+  deaths per wave, not counting ${figures.forcedCrashes} forced crashes: ${perWave.map(w => `w${w.wave} ${w.died}/${w.reached}${w.ground ? ` (${w.ground} ground)` : ''}`).join(', ')}`);
+for (const l of figures.lifeDetail) console.log('  life ' + JSON.stringify(l));
+if (TAG) { const f = join(await outDir(), `soak-${TAG}.json`); await writeFile(f, JSON.stringify(figures, null, 1)); console.log(`figures written to ${f}`); }
+
 if (anomalies.length || errors.length) {
   console.error('\nFAIL');
   for (const [k, v] of anomalies) console.error(`  anomaly: ${k} x${v.n}, first at ${v.firstAt}s ${v.detail !== undefined ? JSON.stringify(v.detail) : ''}`);

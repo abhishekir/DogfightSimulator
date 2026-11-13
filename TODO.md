@@ -94,8 +94,8 @@ Where the gameplay lives, for anyone changing how the game plays:
   target within about 32° of the nose and 1,500 m (`LOCK_CONE`, `LOCK_RANGE`),
   and leaves only on a lock: with nothing in the seeker no lock builds, and a
   lock lost before it completes starts again. (Holding F with nothing locked
-  used to fire unguided every half second; a quarter of a person's missiles went
-  that way.) The flight-data panel, bottom left, shows the rack (`MSL 7/12`) and
+  used to fire unguided every half second; a quarter of the person-like pilot's
+  missiles went that way, 123 of 481 on `main`.) The flight-data panel, bottom left, shows the rack (`MSL 7/12`) and
   under it the seeker's state (`seekerState`): searching, out of range, locking,
   locked, or a prompt to hold F. An empty rack reads NO MISSILES, blinking, and
   sounds `snd.rackEmpty()`, when the last missile leaves and whenever F is
@@ -641,8 +641,8 @@ other work wants:
   describe whichever is chosen. `ui-test.mjs` checks that the keys do what the
   screens say ("↑ pushes the nose down"); it will need to follow the option.
 - **Roll sensitivity**, a slider, reachable from the pause menu. The first
-  playtest found the 210°/s roll a bit too twitchy, and the person-like pilot
-  agrees ("The flight model allows 30+ G"). The slider scales `ROLL_RATE`; its
+  playtest found the 210°/s roll a bit too twitchy, and the person-like pilot's
+  results point the same way ("The flight model allows 30+ G"). The slider scales `ROLL_RATE`; its
   default should come from playtesting it.
 - **Aim assist strength.** The first playtest wanted a strong assist. Offer
   levels from off, through the round assist (`GUN_ASSIST`), to the stronger
@@ -742,35 +742,54 @@ one game gave 0.75 and 0.95). Use eight 15-minute runs a side at least, sixteen
 for anything rare such as gun kills, and say what the standard error is. A
 15-minute run takes about 70 s, and four run side by side on four cores.
 
-**What each playability change measured.** One campaign, the person-like pilot
-as corrected after review, 15-minute runs; kills per minute is the mean of the
-runs with its standard error. "All" is the game as it now stands.
+**It is a synthetic benchmark, not a person.** Nothing here has been checked
+against people playing. It says how one fixed, HUD-following pilot does, which
+is enough to compare two versions of the game and not enough to say how hard
+either is for a player. Its trigger rule also follows whatever ring the HUD
+draws, so hits per round reflects how choosy the sight makes it as well as how
+well it aims.
+
+**What each playability change measured.** The pilot as corrected after
+review, 15-minute runs; kills per minute is the mean of the runs with its
+standard error. "All" is the game as it now stands. The first figure is the
+author's campaign; where a reviewer re-ran a variant independently, theirs
+follows after a slash.
 
 | game | runs | kills per minute | gun kills | hits per round | missiles without a lock | first kill, median |
 |---|---|---|---|---|---|---|
-| before any of it (56841cd) | 8 | 0.67 ± 0.09 | 3 in 2 h | 1.06% | 26% | 68.8 s |
+| before any of it (56841cd) | 8 | 0.67 ± 0.09 / 0.50 ± 0.12 | 3 in 2 h | 1.06% | 26% | 68.8 s |
 | lock-only missiles alone | 8 | 0.57 ± 0.09 | 4 in 2 h | 0.59% | 0 | 41.1 s |
 | 210°/s roll alone | 8 | 0.75 ± 0.08 | 3 in 2 h | 0.79% | 28% | 36.6 s |
 | gunsight alone | 16 | 0.99 ± 0.10 | 5 in 4 h | 6.96% | 8% | 8.1 s |
 | gunsight and round assist | 16 | 1.26 ± 0.12 | 13 in 4 h | 5.83% | 8% | 14.3 s |
-| all | 16 | 0.93 ± 0.09 | 10 in 4 h | 5.62% | 0 | 20.4 s |
-| all, with the old 82°/s roll | 16 | 1.19 ± 0.09 | 15 in 4 h | 5.59% | 0 | 15.7 s |
-| all, with unguided fire put back | 16 | 0.92 ± 0.08 | 10 in 4 h | 4.92% | 9% | 27.1 s |
+| all | 16 | 0.93 ± 0.09 / 0.83 ± 0.13 | 10 in 4 h | 5.62% | 0 | 20.4 s |
+| all, with the old 82°/s roll | 16 | 1.19 ± 0.09 / 1.06 ± 0.10 | 15 in 4 h | 5.59% | 0 | 15.7 s |
+| all, at 120°/s | 16 | 1.09 ± 0.09 | 9 in 4 h | 5.08% | 0 | 8.4 s |
+| all, at 150°/s | 16 | 1.14 ± 0.07 / 1.05 ± 0.09 | 11 in 4 h | 4.21% | 0 | 14.9 s |
+| all, with unguided fire put back | 16 | 0.92 ± 0.08 / 1.10 ± 0.08 | 10 in 4 h | 4.92% | 9% | 27.1 s |
 
-What it says:
+The two campaigns agree in direction more often than in size, and the same
+game differs between them by up to 0.2 kills a minute. Read accordingly:
 
 - **The gunsight put the rounds where the sight says.** Hits per round went
   from 1% to 6–7%, the first kill of a life from over a minute to seconds, and
-  kills from 0.67 to 0.99 a minute (2.4 standard errors).
+  kills from 0.67 to 0.99 a minute (2.4 standard errors). An earlier eight-run
+  comparison by the reviewer found the same direction (0.56 to 0.95).
 - **The gun still rarely kills**: 1.5 to 4 gun kills an hour in every row.
   Missiles make nearly every kill. Whether the round assist helps is not
   settled ("Aim assist for the gun").
-- **Lock-only missiles cost nothing**: 0.93 against 0.92 with unguided fire put
-  back, and a quarter of the old game's missiles were fired without a lock.
-- **The 210°/s roll costs about 0.3 kills a minute once the gunsight is in**
-  (0.93 against 1.19, and the playtest found it a bit twitchy): "The flight
-  model allows 30+ G".
-- **A person rarely gets past wave 3.** In the game as it stands, 32 of 50
+- **Lock-only missiles: no effect on the kill rate was resolved.** The author's
+  campaign found none (0.93 against 0.92 with unguided fire put back). The
+  reviewer's favoured unguided fire (0.83 against 1.10; difference −0.27, 95%
+  interval −0.58 to +0.04) and was inconclusive. What is certain is the
+  behaviour: a quarter of the old game's missiles left without a lock, and none
+  do now.
+- **The 210°/s roll: the pilot's results suggest a cost once the gunsight is
+  in; its size is uncertain.** Both campaigns put it lowest, about 0.25 kills a
+  minute under the old roll, and no difference was detected at 150°/s. The
+  playtest found 210°/s a bit twitchy. "The flight model allows 30+ G" has the
+  detail.
+- **This pilot rarely gets past wave 3.** In the game as it stands, 32 of 50
   lives reached wave 2, 11 reached wave 3 and 2 reached wave 4. The soak bot,
   on the game before any of this, reached wave 4 in 9 of 20 lives and killed
   3.6 enemies a minute, 2.4 of them with the gun.

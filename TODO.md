@@ -106,7 +106,10 @@ Where the gameplay lives, for anyone changing how the game plays:
   marker and box turning red) is not read off the screen: `gunSolution` works
   out in world space how close a round fired now will pass the target, and
   `gunOnTarget` lights the cue when rounds from both muzzles will pass inside
-  the hit radius within their life. The chase camera sits above and behind the jet and lags
+  the hit radius within their life, if the target holds its velocity. That is
+  cautious by the 2.5 m muzzle offset: a shot with the cue unlit can still hit,
+  and the marker being inside the ring on screen is not the rule. The chase
+  camera sits above and behind the jet and lags
   it, so the guns never pointed at the middle of the screen: the old fixed
   reticle was 3–5° off the gun line, and a target held in it was missed beyond
   about 250 m. `GUN_MUZZLE_SPEED`, `GUN_ROUND_LIFE`, `GUN_HIT_RADIUS` and

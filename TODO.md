@@ -82,7 +82,12 @@ Where the gameplay lives, for anyone changing how the game plays:
 - **Scoring and resupply** (`killEnemy`). A gun kill scores 100 and a missile
   kill 200. Every kill adds 2 missiles, up to 12.
 - **Flight and weapons** (`updatePlayer`). Roll, pitch and yaw are rates driven
-  by the keys; "Roll response is sluggish" has the measured figures. ↓ pulls the
+  by the keys, and `.github/tools/handling.mjs` measures them in the game loop.
+  Roll approaches `ROLL_RATE` (210°/s) at `ROLL_RESPONSE` (15/s), integrated
+  exactly over each step: 90° from wings level in 0.5 s at any frame rate.
+  Pitch peaks at 60°/s and yaw at 33°/s, still on the old per-frame update (a
+  push each frame and an 8% decay), so they run a few percent slower at 30 fps;
+  see "The flight model allows 30+ G". ↓ pulls the
   nose up and ↑ pushes it down, as in a flight sim, and the start and pause
   screens say so. Throttle sets the target
   speed directly, 40–450 m/s. A missile locks after F is held for 1.5 s with a
@@ -173,30 +178,6 @@ See CLAUDE.md for how to run them.
 
 ## Tasks
 
-
-### 4. Roll response is sluggish — P1
-
-Roll is a rate. A held key adds 6.5 rad/s² to it while it decays by 7% a frame
-(`updatePlayer`). Porting that update to a script gives a steady roll rate of
-82°/s, reaching 63% of it after 0.23 s, and 1.3 s from wings level to 90° of
-bank. Pitch peaks at 60°/s and yaw at 33°/s the same way. Tracking a crossing
-target with the guns means rolling to put it above the canopy and then pulling,
-so a slow roll makes every gun solution late.
-
-The update is also frame-rate dependent: the steady rate is 82°/s at 60 fps and
-about 80°/s at 30 fps.
-
-What to do: raise the roll rate and shorten its onset. Tune by measurement first
-(port the update to a script, as above), then by play; 180–270°/s, reached
-within about 0.2 s, is a reasonable place to start. Write the rate as an
-approach to a target rate using `smoothT`, so it no longer depends on frame
-rate. Consider scaling it with airspeed, so the jet rolls more slowly when slow.
-"The flight model allows 30+ G" is the same knob on the pitch axis; decide the
-two together.
-
-**Done when:** a 90° bank takes about half a second from wings level at combat
-speed, the response is the same at 30 and 60 fps, and a playtest no longer
-finds the roll sluggish.
 
 ### 5. Difficulty is unmeasured — P2
 
@@ -544,13 +525,50 @@ pass with each.
 ### 17. The flight model allows 30+ G — P4 (decision)
 
 The HUD's G readout regularly shows 30–37 G in hard turns. Steady pitch rate
-reaches about 1.05 rad/s (60°/s, measured as in "Roll response is sluggish"),
+reaches about 1.05 rad/s (60°/s, `.github/tools/handling.mjs`),
 which at 300 m/s is about 32 G. That is the arcade
 handling working as built, not a bug, but it sits oddly next to realistic
 airspeed, cannon and missile cues. Decide whether to cap turn rate by speed (a
 real fighter manages about 9 G) or to leave it and stop showing the number.
-Decide it together with "Roll response is sluggish": it is the same knob, on
-the pitch axis.
+It is the same knob as roll, on the pitch axis. Roll has been rewritten as a
+frame-rate-independent approach to a target rate (`ROLL_RATE`, `ROLL_RESPONSE`,
+90° in 0.5 s); pitch and yaw still use the old frame-rate-dependent update, so
+whatever is decided here should move them to the same form. Also open with it:
+whether roll should slow with airspeed.
+
+**The roll rate itself is not settled.** 210°/s meets "90° in half a second",
+but two things suggest it is too quick:
+
+- The first playtest found it a bit too twitchy.
+- The person-like pilot's results suggest it costs kills once the gunsight is
+  in; how much is uncertain. The same game (gunsight, round assist, lock-only
+  missiles) at four roll rates, sixteen 15-minute runs each, kills per minute
+  as the mean of the runs ± standard error, in two independent campaigns:
+
+  | roll rate | 90° from wings level | author's campaign | reviewer's campaign |
+  |---|---|---|---|
+  | 82°/s (the old code) | 1.32 s | 1.19 ± 0.09 | 1.06 ± 0.10 |
+  | 120°/s | 0.82 s | 1.09 ± 0.09 | not run |
+  | 150°/s | 0.67 s | 1.14 ± 0.07 | 1.05 ± 0.09 |
+  | 210°/s | 0.50 s | 0.93 ± 0.09 | 0.83 ± 0.13 |
+
+  210°/s is lowest in both, by about 0.25 kills per minute against the old
+  roll: about two standard errors in the first campaign, and a 95% interval of
+  −0.57 to +0.09 in the second, which does not exclude no effect. No difference
+  was detected between 150°/s and the old roll in either (−0.01, interval −0.29
+  to +0.26, in the second), which is not the same as showing there is none.
+  Several rates were compared, so read all of this as exploratory. Without the
+  gunsight the pilot showed no difference at 210°/s (0.67 ± 0.09 against
+  0.75 ± 0.08, eight runs a side).
+- For scale: a tap of the roll key cannot be shorter than about 80 ms, and at
+  210°/s an 80 ms tap from rest turns the jet about 17° in all (7° while the
+  key is down and 10° after it is let go). Whether that is why the pilot does
+  worse has not been isolated.
+
+So choose `ROLL_RATE` and `ROLL_RESPONSE` by play, with a roll sensitivity
+setting ("Settings screen"). The measurements support trying a lower rate such
+as 150°/s; they do not say what a person will prefer.
+`.github/tools/handling.mjs` says what any pair of values gives.
 
 ### 18. Settings screen — P4
 

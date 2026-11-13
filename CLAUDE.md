@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Six more tools in `.github/tools/` go further. They run locally, not in CI,
+Seven more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -90,6 +90,9 @@ before/after comparison is done.
   cone and against a target flying at the jet; and checks every round fired
   through a hard turn passes through the gun cross's point. Run it after
   touching the gunsight, the camera or the guns.
+- `handling.mjs` — holds each control key from rest in the game loop at 60 and
+  30 fps and reports the steady rate, the time to 63% of it and to 90°, and the
+  overrun after release; fails if the roll is not 90° in about 0.5 s at both.
 - `enemy-flight.mjs [--minutes 5] [--fps 60] [--check]` — samples every live
   enemy every frame while the person-like pilot fights, and reports how fast
   their noses turn, how fast they roll, how hard their commanded speed changes

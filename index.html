@@ -3593,8 +3593,11 @@ function drawHUD(){
   hud.beginPath();hud.moveTo(cx+28,cy);hud.lineTo(cx+10,cy);hud.lineTo(cx+8,cy+5);hud.stroke();
 
   // The gunsight (see gunSight): the gun cross where the rounds will be at the target's
-  // range, its ring the hit radius there, and the lead marker where the target will be. The
-  // cross turns red when the marker is inside the ring: that is when to shoot.
+  // range, its ring the hit radius there or the round assist's cone, whichever is wider, and
+  // the lead marker where the target will be. The cross turns red on gunSight's cue, which
+  // is worked out in world space, not from the marker being inside the ring on screen: red
+  // means rounds fired now will hit, or be aimed by the assist, if the target holds its
+  // velocity. The cue is cautious, so a shot with it unlit can still hit.
   const gs=gunSight(),nearest=findNearestEnemy(),overE=gs.cue&&gs.target===nearest;
   if(gs.box&&gs.lead){const lc=gs.cue?'#ff3333':gs.inRange?'#ffcc00':'rgba(255,204,0,.35)';
     hud.strokeStyle=lc;hud.lineWidth=1;hud.setLineDash([3,4]);hud.beginPath();hud.moveTo(gs.box.x,gs.box.y);hud.lineTo(gs.lead.x,gs.lead.y);hud.stroke();hud.setLineDash([]);

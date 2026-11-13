@@ -84,12 +84,12 @@ before/after comparison is done.
   regressions the audio has actually had. `--render` writes WAVs to listen to.
 - `gunsight.mjs [--dt 0.0333]` — holds the gun cross on the HUD's lead marker
   against targets flying straight lines at 200–1,000 m and checks the rounds
-  hit; follows every round to check the cue was lit exactly when its path
-  passes inside the hit radius, at the cue's edge, at the edge of the round
-  assist's cone and against a target flying at the jet; and checks every round
-  fired through a hard turn passes through
-  the gun cross's point. Run it after touching the gunsight, the camera or the
-  guns.
+  hit; follows every round to check that no round which left with the cue lit
+  passes outside the hit radius (the cue is cautious: an unlit shot near the
+  edge can still hit), at the cue's edge, at the edge of the round assist's
+  cone and against a target flying at the jet; and checks every round fired
+  through a hard turn passes through the gun cross's point. Run it after
+  touching the gunsight, the camera or the guns.
 - `enemy-flight.mjs [--minutes 5] [--fps 60] [--check]` — samples every live
   enemy every frame while the person-like pilot fights, and reports how fast
   their noses turn, how fast they roll, how hard their commanded speed changes

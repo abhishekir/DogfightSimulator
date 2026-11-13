@@ -107,11 +107,15 @@ Where the gameplay lives, for anyone changing how the game plays:
   the gun line projected through the camera at the range the rounds will meet
   the target, the lead marker is where the locked or nearest target will be when
   they get there (time of flight solved against its velocity, `e.velocity`), and
-  the ring round the cross is the 14 m hit radius at that range. The cue (cross,
+  the ring round the cross is the 14 m hit radius at that range, or the round
+  assist's cone where that is wider (below). The cue (cross,
   marker and box turning red) is not read off the screen: `gunSolution` works
   out in world space how close a round fired now will pass the target, and
   `gunOnTarget` lights the cue when rounds from both muzzles will pass inside
-  the hit radius within their life. The chase camera sits above and behind the jet and lags
+  the hit radius within their life, if the target holds its velocity. That is
+  cautious by the 2.5 m muzzle offset: a shot with the cue unlit can still hit,
+  and the marker being inside the ring on screen is not the rule. The chase
+  camera sits above and behind the jet and lags
   it, so the guns never pointed at the middle of the screen: the old fixed
   reticle was 3–5° off the gun line, and a target held in it was missed beyond
   about 250 m. `GUN_MUZZLE_SPEED`, `GUN_ROUND_LIFE`, `GUN_HIT_RADIUS` and
@@ -592,22 +596,37 @@ whatever is decided here should move them to the same form. Also open with it:
 whether roll should slow with airspeed.
 
 **The roll rate itself is not settled.** 210°/s meets "90° in half a second",
-but two things say it is too quick:
+but two things suggest it is too quick:
 
 - The first playtest found it a bit too twitchy.
-- The person-like pilot kills more slowly with it once the gunsight is in.
-  Sixteen 15-minute runs a side, everything else the same (gunsight, round
-  assist, lock-only missiles): 1.19 ± 0.09 kills per minute with the old 82°/s
-  roll, 0.93 ± 0.09 with 210°/s. A second pair that differs only in the roll
-  and the missile rule gave 1.26 ± 0.12 and 0.92 ± 0.08. Pooled, that is about
-  0.3 kills per minute, three standard errors. A tap of the roll key cannot be
-  shorter than about 80 ms, which at 210°/s is 17° plus a 14° overrun, so fine
-  bank corrections overshoot. (Without the gunsight the pilot showed no
-  difference: 0.67 ± 0.09 against 0.75 ± 0.08 over eight runs a side.)
+- The person-like pilot's results suggest it costs kills once the gunsight is
+  in; how much is uncertain. The same game (gunsight, round assist, lock-only
+  missiles) at four roll rates, sixteen 15-minute runs each, kills per minute
+  as the mean of the runs ± standard error, in two independent campaigns:
+
+  | roll rate | 90° from wings level | author's campaign | reviewer's campaign |
+  |---|---|---|---|
+  | 82°/s (the old code) | 1.32 s | 1.19 ± 0.09 | 1.06 ± 0.10 |
+  | 120°/s | 0.82 s | 1.09 ± 0.09 | not run |
+  | 150°/s | 0.67 s | 1.14 ± 0.07 | 1.05 ± 0.09 |
+  | 210°/s | 0.50 s | 0.93 ± 0.09 | 0.83 ± 0.13 |
+
+  210°/s is lowest in both, by about 0.25 kills per minute against the old
+  roll: about two standard errors in the first campaign, and a 95% interval of
+  −0.57 to +0.09 in the second, which does not exclude no effect. No difference
+  was detected between 150°/s and the old roll in either (−0.01, interval −0.29
+  to +0.26, in the second), which is not the same as showing there is none.
+  Several rates were compared, so read all of this as exploratory. Without the
+  gunsight the pilot showed no difference at 210°/s (0.67 ± 0.09 against
+  0.75 ± 0.08, eight runs a side).
+- For scale: a tap of the roll key cannot be shorter than about 80 ms, and at
+  210°/s an 80 ms tap from rest turns the jet about 17° in all (7° while the
+  key is down and 10° after it is let go). Whether that is why the pilot does
+  worse has not been isolated.
 
 So choose `ROLL_RATE` and `ROLL_RESPONSE` by play, with a roll sensitivity
-setting ("Settings screen"), and measure candidates the same way: something
-between 82 and 210°/s may keep the quick bank without the overshoot.
+setting ("Settings screen"). The measurements support trying a lower rate such
+as 150°/s; they do not say what a person will prefer.
 `.github/tools/handling.mjs` says what any pair of values gives.
 
 ### 15. Settings screen — P4

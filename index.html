@@ -3072,6 +3072,7 @@ function updateCamera(dt){
 const _qP=new THREE.Quaternion(),_qR=new THREE.Quaternion(),_qY=new THREE.Quaternion();
 const _axisX=new THREE.Vector3(1,0,0),_axisY=new THREE.Vector3(0,1,0),_axisZ=new THREE.Vector3(0,0,1);
 const _tmpV1=new THREE.Vector3(),_tmpQ=new THREE.Quaternion(),_gunPos=new THREE.Vector3();
+const _gunAimAt=new THREE.Vector3(),_gunDir=new THREE.Vector3();
 const _hudEuler=new THREE.Euler();
 
 // Throttle sets the speed the jet is flying toward, and the guns fire at it plus the muzzle speed.
@@ -3087,16 +3088,22 @@ function findNearestEnemy(){let n=null,md=Infinity;for(const e of enemies){if(!e
 //  - the lead marker is where the target will be when they get there: the time of flight is
 //    solved against its current velocity, |T + V t - M| = s t for target T, muzzle M and
 //    round speed s, which is a quadratic with one positive root since s > |V|;
-//  - the ring is GUN_HIT_RADIUS at that range, drawn in pixels;
+//  - the ring is how far off the marker the cross can be and still hit, drawn in pixels:
+//    the larger of GUN_HIT_RADIUS at that range and the round assist's cone, GUN_ASSIST;
 //  - the cue is not read off the screen. gunSolution works out in world space how close a
 //    round fired now, along the nose, will pass the target as both fly on, and the cue is
-//    lit when rounds from both muzzles will pass inside GUN_HIT_RADIUS within their life:
-//    lit means shoot, and unlit near the edge may still land some. The camera sits 46 m
+//    lit when rounds from both muzzles will pass inside GUN_HIT_RADIUS within their life,
+//    or when the round assist will aim them (gunAssisted, the cannon's own rule): lit
+//    means shoot, and unlit near the edge may still land some. The camera sits 46 m
 //    behind the muzzles and off the gun line, so pixels between the cross and the marker
 //    are not that distance; near the edge of the ring the two can disagree.
 // Put the cross on the marker and the rounds arrive where the target will be. The HUD draws
 // from this, and the test tools read it, so they cannot disagree about where the guns point.
 const GUN_SIGHT_RANGE=600;
+// Round assist ("Aim assist for the gun"): a round fired while the lead point is within this
+// angle of the nose leaves aimed at the lead point instead of straight along the nose. The
+// controls are untouched, so it never fights the player; 0 turns it off.
+const GUN_ASSIST=1.5*Math.PI/180;
 const _gsF=new THREE.Vector3(),_gsD=new THREE.Vector3(),_gsR=new THREE.Vector3(),_gsL=new THREE.Vector3(),_gsP=new THREE.Vector3();
 // The gun's solution on `target`, in world space: for a round leaving GUN_ORIGIN now along
 // the nose at the gun's round speed, and the target holding its velocity,
@@ -3130,6 +3137,9 @@ function gunSolution(target){
 // Whether rounds fired now will hit, from either muzzle: the one rule the HUD's cue and
 // the tests go by. `miss` is from the gun line, and the muzzles are either side of it.
 function gunOnTarget(sol){return sol.solved&&sol.tca>0&&sol.tca<=GUN_ROUND_LIFE&&sol.miss<GUN_HIT_RADIUS-GUN_MUZZLE_OFFSET}
+// Whether the round assist aims rounds fired now at the lead point: the one rule the cannon
+// fires by and the cue shows.
+function gunAssisted(sol){return GUN_ASSIST>0&&sol.solved&&sol.reach&&sol.off<=GUN_ASSIST}
 function hudPoint(v,w,h){const p=_gsP.copy(v).project(camera);return p.z<1?{x:(p.x*.5+.5)*w,y:(-p.y*.5+.5)*h}:null}
 function gunSight(){
   const w=hudCanvas.width,h=hudCanvas.height;
@@ -3139,12 +3149,12 @@ function gunSight(){
   let sol=null;
   if(target){sol=gunSolution(target);
     out.box=hudPoint(target.mesh.position,w,h);
-    if(sol.solved){out.tof=sol.tof;out.range=sol.range;out.inRange=sol.reach;out.lead=hudPoint(sol.lead,w,h);out.cue=gunOnTarget(sol)}
+    if(sol.solved){out.tof=sol.tof;out.range=sol.range;out.inRange=sol.reach;out.lead=hudPoint(sol.lead,w,h);out.cue=gunOnTarget(sol)||gunAssisted(sol)}
   }
   _gsF.set(0,0,-1).applyQuaternion(playerJet.quaternion);
   _gsL.copy(GUN_ORIGIN).applyQuaternion(playerJet.quaternion).add(playerJet.position).addScaledVector(_gsF,out.range);
   out.cross=hudPoint(_gsL,w,h)||{x:w/2,y:h/2};
-  out.ring=(h/2)/Math.tan(camera.fov*Math.PI/360)*GUN_HIT_RADIUS/out.range;
+  out.ring=(h/2)/Math.tan(camera.fov*Math.PI/360)*Math.max(GUN_HIT_RADIUS/out.range,Math.tan(GUN_ASSIST));
   return out;
 }
 
@@ -3206,9 +3216,14 @@ function updatePlayer(dt){
   player.gunSpin=trigger?Math.min(player.gunSpin+dt/GUN_SPINUP,1):Math.max(player.gunSpin-dt/GUN_SPINDOWN,0);
   if(trigger){const rate=GUN_RATE*player.gunSpin;player.gunPhase+=rate*dt;
     if(player.gunPhase>=1){
+      // Round assist: when the sight's solution on its target says so (gunAssisted, the rule
+      // the cue shows), each round leaves its own muzzle aimed at the lead point.
+      const tgt=lockTarget&&lockTarget.alive?lockTarget:findNearestEnemy(),sol=tgt?gunSolution(tgt):null,assist=!!sol&&gunAssisted(sol);
+      if(assist)_gunAimAt.copy(sol.lead);
       while(player.gunPhase>=1){player.gunPhase-=1;
         _gunPos.set(player.gunRound&1?GUN_MUZZLE_OFFSET:-GUN_MUZZLE_OFFSET,0,0).add(GUN_ORIGIN).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-        const b=spawnBullet(_gunPos,_fwd,speed+GUN_MUZZLE_SPEED,false,player.gunRound%GUN_TRACER_EVERY===0);
+        if(assist)_gunDir.subVectors(_gunAimAt,_gunPos).normalize();
+        const b=spawnBullet(_gunPos,assist?_gunDir:_fwd,speed+GUN_MUZZLE_SPEED,false,player.gunRound%GUN_TRACER_EVERY===0);
         if(b)b.position.addScaledVector(b.userData.vel,player.gunPhase/rate);
         player.gunRound++}
       // A flash on roughly the old gun's cadence; one every frame would flood the particle pool.
@@ -3578,10 +3593,11 @@ function drawHUD(){
   hud.beginPath();hud.moveTo(cx+28,cy);hud.lineTo(cx+10,cy);hud.lineTo(cx+8,cy+5);hud.stroke();
 
   // The gunsight (see gunSight): the gun cross where the rounds will be at the target's
-  // range, its ring the hit radius there, and the lead marker where the target will be. The
-  // cross turns red on gunSight's cue, which is worked out in world space, not from the
-  // marker being inside the ring on screen: red means rounds fired now will hit if the
-  // target holds its velocity. The cue is cautious, so a shot with it unlit can still hit.
+  // range, its ring the hit radius there or the round assist's cone, whichever is wider, and
+  // the lead marker where the target will be. The cross turns red on gunSight's cue, which
+  // is worked out in world space, not from the marker being inside the ring on screen: red
+  // means rounds fired now will hit, or be aimed by the assist, if the target holds its
+  // velocity. The cue is cautious, so a shot with it unlit can still hit.
   const gs=gunSight(),nearest=findNearestEnemy(),overE=gs.cue&&gs.target===nearest;
   if(gs.box&&gs.lead){const lc=gs.cue?'#ff3333':gs.inRange?'#ffcc00':'rgba(255,204,0,.35)';
     hud.strokeStyle=lc;hud.lineWidth=1;hud.setLineDash([3,4]);hud.beginPath();hud.moveTo(gs.box.x,gs.box.y);hud.lineTo(gs.lead.x,gs.lead.y);hud.stroke();hud.setLineDash([]);

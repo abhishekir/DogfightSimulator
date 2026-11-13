@@ -18,7 +18,7 @@ Open `index.html` in any WebGL2 browser. Click to start.
 | Input | Action |
 |---|---|
 | `W` / `S` | Throttle up / down |
-| `↑` / `↓` | Pitch |
+| `↑` / `↓` | Nose down / up, as a stick: push forward to dive |
 | `←` / `→` | Roll |
 | `A` / `D` | Yaw |
 | `Space` | Cannon |

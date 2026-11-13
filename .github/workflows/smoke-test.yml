@@ -13,7 +13,11 @@ on:
 # is for.
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, where Playwright 1.56.1 will not
+    # install Chromium ("Playwright does not support chromium on
+    # ubuntu26.04-x64"), so the job failed before the game was loaded. Move both
+    # together when Playwright supports the newer image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

@@ -6,10 +6,10 @@
  *
  *   node .github/tools/handling.mjs [--page file.html]
  *
- * Checks the roll against "Roll response is sluggish": 90 degrees from wings level in
- * 0.45-0.55 s, and the same at 30 and 60 fps (within 20 ms). Pitch and yaw are reported, not
- * checked: they are the knob in "The flight model allows 30+ G". Exits 1 on a failed check or
- * a page error.
+ * Checks the roll against what it was rewritten for (TODO.md, "The game loop"): 90 degrees
+ * from wings level in 0.45-0.55 s, and the same at 30 and 60 fps (within 20 ms). Pitch and
+ * yaw are reported, not checked: they are the knob in "The flight model allows 30+ G".
+ * Exits 1 on a failed check or a page error.
  */
 import { openGame, stepper, arg } from './lib.mjs';
 

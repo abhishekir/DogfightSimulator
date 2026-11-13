@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Five more tools in `.github/tools/` go further. They run locally, not in CI,
+Six more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -82,6 +82,13 @@ before/after comparison is done.
 - `audio-check.mjs [--render]` — renders the SoundEngine offline and checks the
   mix against the engine, positional audio, Doppler, the limiter, volume, and
   regressions the audio has actually had. `--render` writes WAVs to listen to.
+- `gunsight.mjs [--dt 0.0333]` — holds the gun cross on the HUD's lead marker
+  against targets flying straight lines at 200–1,000 m and checks the rounds
+  hit; follows every round to check that no round which left with the cue lit
+  passes outside the hit radius (the cue is cautious: an unlit shot near the
+  edge can still hit), at the cue's edge and against a target flying at the
+  jet; and checks every round fired through a hard turn passes through the gun
+  cross's point. Run it after touching the gunsight, the camera or the guns.
 - `enemy-flight.mjs [--minutes 5] [--fps 60] [--check]` — samples every live
   enemy every frame while the person-like pilot fights, and reports how fast
   their noses turn, how fast they roll, how hard their commanded speed changes

@@ -97,7 +97,23 @@ Where the gameplay lives, for anyone changing how the game plays:
   pressed with none left. The two corner panels scale with the window (1.375x at
   720p, 1.65x at 1080p, 2.2x at 1440p, less in a window too narrow or short for
   that, so they never reach the radar); at their old size the text was 9-12 px.
-- **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame.
+- **HUD** (`drawHUD`). A 2D canvas over the 3D view, redrawn every frame. The
+  gunsight is computed, not drawn at a fixed place (`gunSight`): the gun cross is
+  the gun line projected through the camera at the range the rounds will meet
+  the target, the lead marker is where the locked or nearest target will be when
+  they get there (time of flight solved against its velocity, `e.velocity`), and
+  the ring round the cross is the 14 m hit radius at that range. The cue (cross,
+  marker and box turning red) is not read off the screen: `gunSolution` works
+  out in world space how close a round fired now will pass the target, and
+  `gunOnTarget` lights the cue when rounds from both muzzles will pass inside
+  the hit radius within their life, if the target holds its velocity. That is
+  cautious by the 2.5 m muzzle offset: a shot with the cue unlit can still hit,
+  and the marker being inside the ring on screen is not the rule. The chase
+  camera sits above and behind the jet and lags
+  it, so the guns never pointed at the middle of the screen: the old fixed
+  reticle was 3–5° off the gun line, and a target held in it was missed beyond
+  about 250 m. `GUN_MUZZLE_SPEED`, `GUN_ROUND_LIFE`, `GUN_HIT_RADIUS` and
+  `GUN_ORIGIN` are the ballistics the sight and the cannon share.
 
 ### Verifying a change
 
@@ -151,48 +167,6 @@ See CLAUDE.md for how to run them.
 
 ## Tasks
 
-
-### 3. The gunsight is off the gun line and shows no lead — P1
-
-The reticle is a fixed circle at the centre of the screen, but the guns do not
-point there. In steady flight the chase camera trails about 12 m above and 78 m
-behind the jet, looking slightly down. Measured headless at 960×540 in level
-flight, the gun line passes 22 px above the centre of the screen at 200 m, 30 px
-at 500 m and 35 px at 1,200 m (3.3° to 5.3°). A round hits if it passes within
-14 m of the enemy's centre, so an enemy held in the middle of the reticle is
-missed beyond about 250 m; at 500 m the rounds pass 40 m above it. The offset
-also changes with speed and turn rate, because the camera lags the jet.
-
-The reticle turns red whenever the nearest enemy is within 18° of the nose
-(`isEnemyInCrosshair`, a dot product above 0.95), at any range and however it
-is moving, so red does not mean "shoot". Nothing shows lead either. Rounds
-leave along the nose at the aircraft's speed plus 650 m/s and fly straight for
-2.5 s, so a crossing target has to be led by its velocity times the time of
-flight, and the player has to guess by how much. The enemies already compute a
-lead when they shoot at the player (`updateEnemies`).
-
-What to do:
-
-- Draw the gun cross by projecting a point on the gun line through the camera,
-  at the target's range (or a fixed range when there is no target), instead of
-  drawing it at the centre of the screen.
-- Add a lead marker: solve the time of flight to the nearest or locked target
-  at its current velocity, and project where the target will be when the rounds
-  arrive. The player puts the gun cross on the marker, not on the aircraft: at
-  500 m a target crossing at 100 m/s needs about 60 m of lead, far outside the
-  14 m hit radius.
-- Replace the 18° red cue with one that lights when the gun cross is on the
-  lead marker, within the hit radius at that range.
-
-A sight drawn the other way would also work: a compensated pipper, displaced
-by the lead, that the player lays on the aircraft itself. Whichever is chosen,
-the cue, the test below, "Aim assist for the gun" and the person-like pilot in
-"Difficulty is unmeasured" must all use the same convention.
-
-**Done when:** holding the gun cross on the lead marker of a target flying
-straight at constant speed hits it at every range from 200 to 1,000 m, checked
-by a script that does exactly that, and the gun cross stays on the gun line
-through turns.
 
 ### 4. Roll response is sluggish — P1
 
@@ -306,8 +280,9 @@ drop this task.
 
 ### 6. Aim assist for the gun — P2
 
-Do this after "The gunsight is off the gun line and shows no lead": the assist
-needs the same lead solution the lead marker shows. Even with a correct marker,
+The lead solution the assist needs is the one the lead marker shows: `gunSight()`
+returns the target, the time of flight, the lead marker and the cue, and both the
+HUD and `.github/tools/gunsight.mjs` read it. Even with a correct marker,
 holding the gun cross on it while the target manoeuvres is hard with keyboard
 controls. The options, in order of how much control they take from the player:
 
@@ -578,6 +553,17 @@ covers them.
   harness the build queue reaches several hundred chunks because the aircraft
   outruns it; at normal frame rates it drains. If you make the aircraft faster,
   re-check that.
+- **Rounds can pass through a target between frames.** `updateBullets` tests a
+  round against each enemy once a frame, at the round's position that frame, so
+  a round that crosses the 28 m hit sphere between two frames is not counted.
+  Chasing a target at 60 fps a round moves about 11 m a frame relative to it and
+  none are lost. Head-on at 600 m/s of closure it moves 21 m a frame at 60 fps
+  (still none lost, measured) and 42 m at 30 fps, where
+  `.github/tools/gunsight.mjs --dt 0.0333` counts 66% of rounds whose paths pass
+  inside the radius. It predates the gunsight, which only makes it visible: the
+  cue is right and the hit test drops the round. Fix it with a swept test, as
+  missiles already have (`movingSphereHitTime`); it will raise the hit rate of
+  head-on passes at low frame rates, so measure with the person-like pilot.
 - **Missile motors never burn out** (`motor` ramps to 1 and stays), so the
   motor sound runs for the missile's whole life. If burnout is modelled, cut
   the roar to a tail there.

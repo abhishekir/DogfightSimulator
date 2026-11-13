@@ -2738,11 +2738,16 @@ const enemyJetTemplate=createEnemyJet();
 // Every third round is a tracer; the rest fly and hit unseen. Damage per round is set so
 // damage per second on target matches the old, slower gun.
 const GUN_RATE=100,GUN_SPINUP=.3,GUN_SPINDOWN=.5,GUN_DAMAGE=2.5,GUN_TRACER_EVERY=3;
+// Ballistics, which the gunsight has to agree with: a round leaves its muzzle along the nose
+// at the commanded airspeed plus GUN_MUZZLE_SPEED, flies straight for GUN_ROUND_LIFE seconds,
+// and hits an enemy it passes within GUN_HIT_RADIUS of. The muzzles sit GUN_MUZZLE_OFFSET
+// either side of GUN_ORIGIN, the point the sight treats as the gun line's start.
+const GUN_MUZZLE_SPEED=650,GUN_ROUND_LIFE=2.5,GUN_HIT_RADIUS=14,GUN_MUZZLE_OFFSET=2.5,GUN_ORIGIN=new THREE.Vector3(0,-.6,-14);
 const MAX_BULLETS=400,bulletPool=[];
 const tracerGeo=new THREE.CylinderGeometry(.15,.15,4,4);tracerGeo.rotateX(Math.PI/2);
 const pBMat=new THREE.MeshBasicMaterial({color:0xffee44}),eBulletMat=new THREE.MeshBasicMaterial({color:0xff4422});
 for(let i=0;i<MAX_BULLETS;i++){const m=new THREE.Mesh(tracerGeo,pBMat);m.visible=false;m.userData={active:false,vel:new THREE.Vector3(),life:0,isEnemy:false};scene.add(m);bulletPool.push(m)}
-function spawnBullet(pos,dir,speed,isEnemy=false,tracer=true){for(const b of bulletPool)if(!b.userData.active){b.position.copy(pos);b.userData.vel.copy(dir).multiplyScalar(speed);b.userData.life=2.5;b.userData.active=true;b.userData.isEnemy=isEnemy;b.material=isEnemy?eBulletMat:pBMat;b.scale.set(isEnemy?1.5:1,isEnemy?1.5:1,isEnemy?1.5:1);b.visible=tracer;return b}}
+function spawnBullet(pos,dir,speed,isEnemy=false,tracer=true){for(const b of bulletPool)if(!b.userData.active){b.position.copy(pos);b.userData.vel.copy(dir).multiplyScalar(speed);b.userData.life=GUN_ROUND_LIFE;b.userData.active=true;b.userData.isEnemy=isEnemy;b.material=isEnemy?eBulletMat:pBMat;b.scale.set(isEnemy?1.5:1,isEnemy?1.5:1,isEnemy?1.5:1);b.visible=tracer;return b}}
 
 const MAX_MISSILES=20,missilePool=[],missileEjectVelocity=new THREE.Vector3();
 const missileBodyGeo=new THREE.CylinderGeometry(.22,.28,3,10);missileBodyGeo.rotateX(Math.PI/2);
@@ -2969,7 +2974,7 @@ function spawnEnemy(wc){if(enemies.length>=MAX_ENEMIES)return;const m=enemyJetTe
   const aggression=aggrMin+Math.random()*(1-aggrMin),skill=skillMin+Math.random()*(1-skillMin);
   const baseSpeed=100+Math.random()*80+(wc.speedBonus||0);
   const hp=40+(wc.hpBonus||0);
-  const e={mesh:m,prevPosition:m.position.clone(),hp,alive:true,
+  const e={mesh:m,prevPosition:m.position.clone(),velocity:new THREE.Vector3(),hp,alive:true,
     aggression,skill,baseSpeed,currentSpeed:baseSpeed,
     state:'inbound',stateTimer:0,stateDuration:0,
     extendDir:new THREE.Vector3(),attackPoint:new THREE.Vector3(),attackAligned:false,
@@ -3069,14 +3074,85 @@ const _axisX=new THREE.Vector3(1,0,0),_axisY=new THREE.Vector3(0,1,0),_axisZ=new
 const _tmpV1=new THREE.Vector3(),_tmpQ=new THREE.Quaternion(),_gunPos=new THREE.Vector3();
 const _hudEuler=new THREE.Euler();
 
+// Throttle sets the speed the jet is flying toward, and the guns fire at it plus the muzzle speed.
+function commandedSpeed(){return player.minSpeed+(player.maxSpeed-player.minSpeed)*player.throttle}
 function findNearestEnemy(){let n=null,md=Infinity;for(const e of enemies){if(!e.alive)continue;const d=e.mesh.position.distanceTo(playerJet.position);if(d<md&&d<1500){md=d;n=e}}return n}
-function isEnemyInCrosshair(e){if(!e)return false;const d=new THREE.Vector3().subVectors(e.mesh.position,playerJet.position).normalize();const f=new THREE.Vector3(0,0,-1).applyQuaternion(playerJet.quaternion);return d.dot(f)>.95}
+
+/* ═══════════════════ GUNSIGHT ═══════════════════ */
+// The chase camera sits about 12 m above and 46 m behind the jet and lags it through turns,
+// so the guns do not point at the middle of the screen: a fixed reticle there put the rounds
+// 3-5 degrees above it, 40 m high at 500 m. So the sight is computed rather than drawn:
+//  - the gun cross is a point on the gun line (GUN_ORIGIN along the nose) projected through
+//    the camera, at the range the rounds will meet the target (GUN_SIGHT_RANGE with none);
+//  - the lead marker is where the target will be when they get there: the time of flight is
+//    solved against its current velocity, |T + V t - M| = s t for target T, muzzle M and
+//    round speed s, which is a quadratic with one positive root since s > |V|;
+//  - the ring is GUN_HIT_RADIUS at that range, drawn in pixels;
+//  - the cue is not read off the screen. gunSolution works out in world space how close a
+//    round fired now, along the nose, will pass the target as both fly on, and the cue is
+//    lit when rounds from both muzzles will pass inside GUN_HIT_RADIUS within their life:
+//    lit means shoot, and unlit near the edge may still land some. The camera sits 46 m
+//    behind the muzzles and off the gun line, so pixels between the cross and the marker
+//    are not that distance; near the edge of the ring the two can disagree.
+// Put the cross on the marker and the rounds arrive where the target will be. The HUD draws
+// from this, and the test tools read it, so they cannot disagree about where the guns point.
+const GUN_SIGHT_RANGE=600;
+const _gsF=new THREE.Vector3(),_gsD=new THREE.Vector3(),_gsR=new THREE.Vector3(),_gsL=new THREE.Vector3(),_gsP=new THREE.Vector3();
+// The gun's solution on `target`, in world space: for a round leaving GUN_ORIGIN now along
+// the nose at the gun's round speed, and the target holding its velocity,
+//   solved  whether there is a firing solution at all (false if the target outruns a round);
+//   tof     the time of flight to the lead point, |T + V t - M| = s t (the positive root);
+//   lead    where the target will be then, and `range` to it from the muzzle;
+//   off     the angle between the nose and the line to the lead point;
+//   miss    how close the round will pass the target, and `tca` when;
+//   reach   whether a round aimed at the lead point gets there within its life.
+// One object is reused: read it before the next call.
+const _gunSol={solved:false,tof:0,range:0,off:Math.PI,miss:Infinity,tca:0,reach:false,lead:new THREE.Vector3(),muzzle:new THREE.Vector3()};
+function gunSolution(target){
+  const o=_gunSol,s=commandedSpeed()+GUN_MUZZLE_SPEED,V=target.velocity;
+  _gsF.set(0,0,-1).applyQuaternion(playerJet.quaternion);
+  o.muzzle.copy(GUN_ORIGIN).applyQuaternion(playerJet.quaternion).add(playerJet.position);
+  _gsD.subVectors(target.mesh.position,o.muzzle);
+  const a=V.lengthSq()-s*s,b=2*_gsD.dot(V),c=_gsD.lengthSq(),disc=b*b-4*a*c;
+  o.solved=a<0&&disc>=0;
+  if(!o.solved){o.tof=Infinity;o.range=Math.sqrt(c);o.off=Math.PI;o.miss=Infinity;o.tca=0;o.reach=false;o.lead.copy(target.mesh.position);return o}
+  o.tof=(-b-Math.sqrt(disc))/(2*a);
+  o.lead.copy(target.mesh.position).addScaledVector(V,o.tof);
+  _gsL.subVectors(o.lead,o.muzzle);o.range=_gsL.length();
+  o.off=Math.acos(THREE.MathUtils.clamp(_gsL.dot(_gsF)/Math.max(o.range,1e-6),-1,1));
+  // Closest approach of the round to the target, in the target's frame.
+  _gsR.copy(_gsF).multiplyScalar(s).sub(V);
+  o.tca=_gsD.dot(_gsR)/_gsR.lengthSq();
+  o.miss=o.tca>0?_gsL.copy(_gsD).addScaledVector(_gsR,-o.tca).length():Math.sqrt(c);
+  o.reach=o.tof<=GUN_ROUND_LIFE;
+  return o;
+}
+// Whether rounds fired now will hit, from either muzzle: the one rule the HUD's cue and
+// the tests go by. `miss` is from the gun line, and the muzzles are either side of it.
+function gunOnTarget(sol){return sol.solved&&sol.tca>0&&sol.tca<=GUN_ROUND_LIFE&&sol.miss<GUN_HIT_RADIUS-GUN_MUZZLE_OFFSET}
+function hudPoint(v,w,h){const p=_gsP.copy(v).project(camera);return p.z<1?{x:(p.x*.5+.5)*w,y:(-p.y*.5+.5)*h}:null}
+function gunSight(){
+  const w=hudCanvas.width,h=hudCanvas.height;
+  camera.updateMatrixWorld();
+  const target=lockTarget&&lockTarget.alive?lockTarget:findNearestEnemy();
+  const out={cross:null,ring:0,target,range:GUN_SIGHT_RANGE,tof:GUN_SIGHT_RANGE/(commandedSpeed()+GUN_MUZZLE_SPEED),inRange:false,box:null,lead:null,cue:false};
+  let sol=null;
+  if(target){sol=gunSolution(target);
+    out.box=hudPoint(target.mesh.position,w,h);
+    if(sol.solved){out.tof=sol.tof;out.range=sol.range;out.inRange=sol.reach;out.lead=hudPoint(sol.lead,w,h);out.cue=gunOnTarget(sol)}
+  }
+  _gsF.set(0,0,-1).applyQuaternion(playerJet.quaternion);
+  _gsL.copy(GUN_ORIGIN).applyQuaternion(playerJet.quaternion).add(playerJet.position).addScaledVector(_gsF,out.range);
+  out.cross=hudPoint(_gsL,w,h)||{x:w/2,y:h/2};
+  out.ring=(h/2)/Math.tan(camera.fov*Math.PI/360)*GUN_HIT_RADIUS/out.range;
+  return out;
+}
 
 function updatePlayer(dt){
   player.prevPosition.copy(playerJet.position);player.prevVelocity.copy(player.velocity);
   if(keys['KeyW'])player.throttle=Math.min(player.throttle+dt*.5,1);
   if(keys['KeyS'])player.throttle=Math.max(player.throttle-dt*.5,0);
-  const speed=player.minSpeed+(player.maxSpeed-player.minSpeed)*player.throttle;
+  const speed=commandedSpeed();
 
   // Pitch (up arrow = nose dips down, down arrow = nose pulls up)
   const pI=(keys['ArrowDown']?1:0)-(keys['ArrowUp']?1:0);
@@ -3131,8 +3207,8 @@ function updatePlayer(dt){
   if(trigger){const rate=GUN_RATE*player.gunSpin;player.gunPhase+=rate*dt;
     if(player.gunPhase>=1){
       while(player.gunPhase>=1){player.gunPhase-=1;
-        _gunPos.set(player.gunRound&1?2.5:-2.5,-.6,-14).applyQuaternion(playerJet.quaternion).add(playerJet.position);
-        const b=spawnBullet(_gunPos,_fwd,speed+650,false,player.gunRound%GUN_TRACER_EVERY===0);
+        _gunPos.set(player.gunRound&1?GUN_MUZZLE_OFFSET:-GUN_MUZZLE_OFFSET,0,0).add(GUN_ORIGIN).applyQuaternion(playerJet.quaternion).add(playerJet.position);
+        const b=spawnBullet(_gunPos,_fwd,speed+GUN_MUZZLE_SPEED,false,player.gunRound%GUN_TRACER_EVERY===0);
         if(b)b.position.addScaledVector(b.userData.vel,player.gunPhase/rate);
         player.gunRound++}
       // A flash on roughly the old gun's cadence; one every frame would flood the particle pool.
@@ -3379,6 +3455,8 @@ function updateEnemies(dt){
     if(Math.random()<.3){const ep=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(16));
       spawnP(emitters.enemyExhaust,ep,_eFwd.clone().multiplyScalar(-15),.2+Math.random()*.3,0xff6600,.3+Math.random()*.6)}
     if(dist>2800&&e.state!=='inbound')transitionEnemy(e,'inbound')}
+  // How fast each one is moving this frame, which the gunsight leads by.
+  if(dt>0)for(const e of enemies)if(e.alive)e.velocity.subVectors(e.mesh.position,e.prevPosition).divideScalar(dt);
 }
 
 function killEnemy(e,sv){e.alive=false;spawnExplosion(e.mesh.position,sv>100?55:40,emitters.explosion);
@@ -3398,7 +3476,7 @@ function updateBullets(dt){for(const b of bulletPool){if(!b.userData.active)cont
   if(b.userData.isEnemy){if(b.position.distanceTo(playerJet.position)<10){player.hp-=5;b.userData.active=false;b.visible=false;
     for(let k=0;k<3;k++)spawnP(emitters.spark,b.position,new THREE.Vector3((Math.random()-.5)*60,(Math.random()-.5)*60,(Math.random()-.5)*60),.08,0xffaa44,1);
     screenShake=.5;hitFlash=.15}}
-  else{for(const e of enemies){if(!e.alive)continue;if(b.position.distanceTo(e.mesh.position)<14){
+  else{for(const e of enemies){if(!e.alive)continue;if(b.position.distanceTo(e.mesh.position)<GUN_HIT_RADIUS){
     e.hp-=GUN_DAMAGE;e.wasHit=true;if(b.visible)spawnExplosion(b.position,4,emitters.spark);b.userData.active=false;b.visible=false;snd.hitMarker();
     if(e.hp<=0)killEnemy(e,100);break}}}
   if(b.position.y<getGroundHeight(b.position.x,b.position.z)){b.userData.active=false;b.visible=false}}}
@@ -3494,23 +3572,35 @@ function drawHUD(){
   hud.strokeStyle='rgba(0,255,200,.3)';hud.lineWidth=1;hud.font='9px Courier New';hud.fillStyle='rgba(0,255,200,.4)';
   for(let d=-40;d<=40;d+=10){if(!d)continue;const y=pPx-d*(ahS/45),lw=Math.abs(d)<=10?15:25;hud.beginPath();hud.moveTo(-lw,y);hud.lineTo(lw,y);hud.stroke();hud.fillText(`${d}`,lw+3,y+3)}
   hud.restore();
-  hud.strokeStyle='#0f8';hud.lineWidth=2.5;
+  // The attitude indicator's own centre mark, dim: it is not where the guns point.
+  hud.strokeStyle='rgba(0,255,136,.35)';hud.lineWidth=2;
   hud.beginPath();hud.moveTo(cx-28,cy);hud.lineTo(cx-10,cy);hud.lineTo(cx-8,cy+5);hud.stroke();
   hud.beginPath();hud.moveTo(cx+28,cy);hud.lineTo(cx+10,cy);hud.lineTo(cx+8,cy+5);hud.stroke();
-  hud.beginPath();hud.moveTo(cx-2,cy);hud.lineTo(cx+2,cy);hud.stroke();
 
-  const nearest=findNearestEnemy(),overE=isEnemyInCrosshair(nearest);
-  const cC=overE?'#ff3333':'#00ffcc';hud.strokeStyle=cC;hud.lineWidth=1.5;hud.shadowColor=cC;hud.shadowBlur=6;
-  hud.beginPath();hud.arc(cx,cy,35,0,Math.PI*2);hud.stroke();
-  for(const a of [0,Math.PI,Math.PI/2,-Math.PI/2]){hud.beginPath();hud.arc(cx,cy,38,a-.15,a+.15);hud.stroke()}
-  hud.shadowBlur=0;
+  // The gunsight (see gunSight): the gun cross where the rounds will be at the target's
+  // range, its ring the hit radius there, and the lead marker where the target will be. The
+  // cross turns red on gunSight's cue, which is worked out in world space, not from the
+  // marker being inside the ring on screen: red means rounds fired now will hit if the
+  // target holds its velocity. The cue is cautious, so a shot with it unlit can still hit.
+  const gs=gunSight(),nearest=findNearestEnemy(),overE=gs.cue&&gs.target===nearest;
+  if(gs.box&&gs.lead){const lc=gs.cue?'#ff3333':gs.inRange?'#ffcc00':'rgba(255,204,0,.35)';
+    hud.strokeStyle=lc;hud.lineWidth=1;hud.setLineDash([3,4]);hud.beginPath();hud.moveTo(gs.box.x,gs.box.y);hud.lineTo(gs.lead.x,gs.lead.y);hud.stroke();hud.setLineDash([]);
+    hud.lineWidth=2;hud.shadowColor=lc;hud.shadowBlur=gs.inRange?6:0;hud.beginPath();hud.arc(gs.lead.x,gs.lead.y,6,0,Math.PI*2);hud.stroke();
+    hud.fillStyle=lc;hud.beginPath();hud.arc(gs.lead.x,gs.lead.y,1.5,0,Math.PI*2);hud.fill();hud.shadowBlur=0}
+  { const gx=gs.cross.x,gy=gs.cross.y,r=Math.max(gs.ring,3),cC=gs.cue?'#ff3333':'#00ffcc';
+    hud.strokeStyle=cC;hud.lineWidth=gs.cue?2.5:1.5;hud.shadowColor=cC;hud.shadowBlur=gs.cue?10:6;
+    hud.beginPath();hud.arc(gx,gy,r,0,Math.PI*2);hud.stroke();
+    hud.beginPath();for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){hud.moveTo(gx+dx*(r+4),gy+dy*(r+4));hud.lineTo(gx+dx*(r+16),gy+dy*(r+16))}hud.stroke();
+    hud.shadowBlur=0 }
 
   if(nearest&&nearest.alive){const sp=nearest.mesh.position.clone().project(camera);
     if(sp.z<1){const sx=(sp.x*.5+.5)*w,sy=(-sp.y*.5+.5)*h;hud.strokeStyle=overE?'#ff0000':'#ff8800';hud.lineWidth=1.5;hud.shadowColor=hud.strokeStyle;hud.shadowBlur=8;const s=overE?20:26;
       hud.beginPath();hud.moveTo(sx-s,sy-s);hud.lineTo(sx-s+10,sy-s);hud.moveTo(sx+s,sy-s);hud.lineTo(sx+s-10,sy-s);hud.moveTo(sx+s,sy+s);hud.lineTo(sx+s-10,sy+s);hud.moveTo(sx-s,sy+s);hud.lineTo(sx-s+10,sy+s);
       hud.moveTo(sx-s,sy-s);hud.lineTo(sx-s,sy-s+10);hud.moveTo(sx+s,sy-s);hud.lineTo(sx+s,sy-s+10);hud.moveTo(sx+s,sy+s);hud.lineTo(sx+s,sy+s-10);hud.moveTo(sx-s,sy+s);hud.lineTo(sx-s,sy+s-10);hud.stroke();
       hud.font='10px Courier New';hud.fillStyle=hud.strokeStyle;const dd=Math.round(nearest.mesh.position.distanceTo(playerJet.position));
-      hud.fillText(`TGT ${dd}m`,sx+s+5,sy-5);hud.fillText(`HP ${nearest.hp}`,sx+s+5,sy+8);hud.shadowBlur=0}}
+      // The labels go on the side away from the lead marker, so they never cover it.
+      const left=gs.target===nearest&&gs.lead&&gs.lead.x>sx,lx=left?sx-s-5:sx+s+5;hud.textAlign=left?'right':'left';
+      hud.fillText(`TGT ${dd}m`,lx,sy-5);hud.fillText(`HP ${nearest.hp}`,lx,sy+8);hud.textAlign='left';hud.shadowBlur=0}}
 
   if(lockTarget&&lockTarget.alive){const sp=lockTarget.mesh.position.clone().project(camera);
     if(sp.z<1){const sx=(sp.x*.5+.5)*w,sy=(-sp.y*.5+.5)*h;const sz=45*(1-lockProgress*.6);

@@ -10,11 +10,14 @@
  * Per enemy, per frame:
  *  - turn rate: the angle between this frame's nose direction and the last, over dt;
  *  - roll rate: the twist about the nose in the rotation from last frame to this, over dt;
- *  - speed change: the change in `currentSpeed`, the speed its state tells it to fly, over
- *    dt, in g, and the largest change in a single frame in m/s (a step has no meaningful
- *    acceleration: its g figure is the step over one frame time);
- *  - lifted: vertical movement its own flying does not account for (the terrain clamp and
- *    the low-altitude climb), counted when it exceeds 60 m/s.
+ *  - speed change: the change in `currentSpeed` over dt, in g, and the largest change in a
+ *    single frame in m/s (a step has no meaningful acceleration: its g figure is the step
+ *    over one frame time). Before flyEnemy, `currentSpeed` was what the AI state set each
+ *    frame, so a state change was a step; since, it is the speed flown, which follows the
+ *    state's `speedCmd` at a bounded acceleration;
+ *  - lifted: vertical movement its own flying does not account for, counted when it exceeds
+ *    60 m/s: before flyEnemy, the terrain clamp and the low-altitude climb; since, only its
+ *    last-resort floor, which the pull-up for the ground ahead should never leave to it.
  * Each is reported as the median, the 95th and 99th percentiles and the peak over all
  * enemy-frames, with the turn rate again by AI state. The percentiles repeat from run to
  * run; a peak is one frame of one enemy and does not, so compare peaks over several runs.
@@ -72,8 +75,8 @@ if (!r.frames) { console.error('FAIL: no enemy was ever alive'); process.exit(1)
 const row = (name, s, unit) => console.log(`  ${name.padEnd(24)} ${String(s.p50).padStart(8)} ${String(s.p95).padStart(8)} ${String(s.p99).padStart(8)} ${String(s.max).padStart(9)}  ${unit}`);
 console.log(`${MINUTES} game-minutes at ${FPS} fps, person-like pilot (${r.lives} lives): ${r.frames} enemy-frames`);
 console.log(`  ${''.padEnd(24)} ${'median'.padStart(8)} ${'95th'.padStart(8)} ${'99th'.padStart(8)} ${'peak'.padStart(9)}`);
-row('turn rate of the nose', r.turnDegS, 'deg/s'); row('roll rate', r.rollDegS, 'deg/s'); row('change of commanded speed', r.speedChangeG, 'g');
-console.log(`  largest change of commanded speed in one frame: ${r.speedJump} m/s`);
+row('turn rate of the nose', r.turnDegS, 'deg/s'); row('roll rate', r.rollDegS, 'deg/s'); row('change of speed', r.speedChangeG, 'g');
+console.log(`  largest change of speed in one frame: ${r.speedJump} m/s`);
 console.log(`  lifted by the ground rules: ${r.lifted} enemy-frames (${(100 * r.lifted / r.frames).toFixed(2)}%)`);
 console.log('  turn rate by state:');
 for (const [k, s] of Object.entries(r.turnByState)) row(`    ${k} (${(100 * s.n / r.frames).toFixed(0)}% of frames)`, s, 'deg/s');
@@ -85,7 +88,7 @@ if (CHECK) {
   console.log('');
   check(`nose turn rate never above ${LIMITS.turnDegS} deg/s`, r.turnDegS.max <= LIMITS.turnDegS, r.turnDegS.max);
   check(`roll rate never above ${LIMITS.rollDegS} deg/s`, r.rollDegS.max <= LIMITS.rollDegS, r.rollDegS.max);
-  check(`commanded speed never changes faster than ${LIMITS.speedChangeG} g`, r.speedChangeG.max <= LIMITS.speedChangeG, r.speedChangeG.max);
+  check(`speed never changes faster than ${LIMITS.speedChangeG} g`, r.speedChangeG.max <= LIMITS.speedChangeG, r.speedChangeG.max);
   check('nothing lifted by the ground rules', r.lifted === 0, r.lifted);
 }
 for (const [k, n] of errors) console.error(`  ${k} x${n}`);

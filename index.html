@@ -2974,8 +2974,11 @@ function spawnEnemy(wc){if(enemies.length>=MAX_ENEMIES)return;const m=enemyJetTe
   const aggression=aggrMin+Math.random()*(1-aggrMin),skill=skillMin+Math.random()*(1-skillMin);
   const baseSpeed=100+Math.random()*80+(wc.speedBonus||0);
   const hp=40+(wc.hpBonus||0);
+  // Spawn pointing at the player, wings level, so the first thing it does is not a turn.
+  _eLook.lookAt(m.position,playerJet.position,_axisY);m.quaternion.setFromRotationMatrix(_eLook);
   const e={mesh:m,prevPosition:m.position.clone(),velocity:new THREE.Vector3(),hp,alive:true,
-    aggression,skill,baseSpeed,currentSpeed:baseSpeed,
+    aggression,skill,baseSpeed,currentSpeed:baseSpeed,speedCmd:baseSpeed,rollRate:0,
+    turnMax:ENEMY_TURN_MAX*(.7+.25*skill),rollMax:ENEMY_ROLL_MAX*(.6+.35*skill),
     state:'inbound',stateTimer:0,stateDuration:0,
     extendDir:new THREE.Vector3(),attackPoint:new THREE.Vector3(),attackAligned:false,
     fireCooldown:1+Math.random()*2,burstCount:0,missileCooldown:8+Math.random()*12,
@@ -3297,13 +3300,61 @@ function updatePlayer(dt){
   snd.update(player.throttle,speed,trigger,lockProgress,incomingThreat,dt,seekSignal,player.gunSpin);
 }
 
-const _eFwd=new THREE.Vector3(),_eTarget=new THREE.Vector3(),_eTargetOffset=new THREE.Vector3(),_eDesired=new THREE.Quaternion(),_eLook=new THREE.Matrix4();
+const _eFwd=new THREE.Vector3(),_eTarget=new THREE.Vector3(),_eTargetOffset=new THREE.Vector3(),_eLook=new THREE.Matrix4();
 const ENEMY_BREAK_DISTANCE=400,ENEMY_ATTACK_BREAK_DISTANCE=180,ENEMY_REENGAGE_DISTANCE=700;
 const ENEMY_INBOUND_TARGET_DISTANCE=600,ENEMY_REPOSITION_TARGET_DISTANCE=800;
-function smoothLookAt(mesh, target, dt, turnSpeed) {
-  _eLook.lookAt(mesh.position, target, _axisY);
-  _eDesired.setFromRotationMatrix(_eLook);
-  mesh.quaternion.slerp(_eDesired, smoothT(turnSpeed, dt));
+// How an enemy flies (TODO.md, "Enemies fly twitchily"). The state machine chooses a point to
+// fly at, how keenly to turn for it, and a speed; flyEnemy gets there the way an aircraft does.
+// It rolls until its lift points where the turn needs it (tan(bank) = speed x turn rate / g in
+// a level turn), and pulls only with the lift it has, so a turn starts with a roll, as the
+// player's do. The nose turns at most turnMax (under 60 deg/s, the player's pitch rate), the
+// roll rate stays under rollMax (under 270 deg/s), and speed changes by at most ENEMY_ACCEL /
+// ENEMY_DECEL (under 2 g). Every rate is per second, so it flies the same at any frame rate.
+const ENEMY_TURN_MAX=60*Math.PI/180,ENEMY_ROLL_MAX=240*Math.PI/180,ENEMY_ACCEL=15,ENEMY_DECEL=18,ENEMY_G=9.81;
+const ENEMY_ROLL_GAIN=6,ENEMY_ROLL_RESPONSE=12,ENEMY_SPEED_RESPONSE=1.5;
+const ENEMY_CLEARANCE=150,ENEMY_LOOKAHEAD=4,ENEMY_FLOOR=15;
+const _eUp=new THREE.Vector3(),_eDir=new THREE.Vector3(),_eLift=new THREE.Vector3(),_eGrav=new THREE.Vector3(),
+  _eAcc=new THREE.Vector3(),_eAxis=new THREE.Vector3(),_eAhead=new THREE.Vector3(),_eQ=new THREE.Quaternion();
+// The least height above the ground or sea along the next ENEMY_LOOKAHEAD seconds of its path.
+function enemyClearanceAhead(e){const p=e.mesh.position;let c=p.y-getGroundHeight(p.x,p.z);
+  for(let i=1;i<=4;i++){_eAhead.copy(p).addScaledVector(_eFwd,e.currentSpeed*ENEMY_LOOKAHEAD*i/4);
+    c=Math.min(c,_eAhead.y-getGroundHeight(_eAhead.x,_eAhead.z))}return c}
+function flyEnemy(e,target,dt,gain){
+  const q=e.mesh.quaternion;
+  _eFwd.set(0,0,-1).applyQuaternion(q);_eUp.set(0,1,0).applyQuaternion(q);
+  // Terrain: pull up early, for the ground ahead, instead of being lifted off it.
+  const clear=enemyClearanceAhead(e);
+  if(clear<ENEMY_CLEARANCE){const k=THREE.MathUtils.clamp(2*(ENEMY_CLEARANCE-clear)/ENEMY_CLEARANCE,.3,2);
+    _eAhead.set(_eFwd.x,0,_eFwd.z);if(_eAhead.lengthSq()<1e-6)_eAhead.set(0,0,-1);
+    target=_eDir.copy(_eAhead.normalize()).addScaledVector(_axisY,k).multiplyScalar(600).add(e.mesh.position);gain=Math.max(gain,2)}
+  // The turn it wants: toward the target, at a rate that grows with the angle left, up to turnMax.
+  _eDir.subVectors(target,e.mesh.position).normalize();
+  const cosA=THREE.MathUtils.clamp(_eFwd.dot(_eDir),-1,1),w=Math.min(e.turnMax,gain*Math.acos(cosA));
+  _eLift.copy(_eDir).addScaledVector(_eFwd,-cosA);                 // toward the target, across the nose
+  if(_eLift.lengthSq()<1e-8)_eLift.copy(_eUp);else _eLift.normalize(); // dead astern: pull the way it is banked
+  // The lift that would fly that turn: the turn's acceleration plus what holds it up.
+  _eGrav.copy(_axisY).addScaledVector(_eFwd,-_eFwd.y).multiplyScalar(ENEMY_G);
+  _eLift.multiplyScalar(e.currentSpeed*w).add(_eGrav);
+  // Roll toward it, at a bounded rate that builds and dies away smoothly.
+  let bankErr=0;
+  if(_eLift.lengthSq()>1e-6){_eAxis.crossVectors(_eUp,_eLift);bankErr=Math.atan2(_eAxis.dot(_eFwd),_eUp.dot(_eLift))}
+  const pCmd=THREE.MathUtils.clamp(bankErr*ENEMY_ROLL_GAIN,-e.rollMax,e.rollMax);
+  e.rollRate=THREE.MathUtils.clamp(e.rollRate+(pCmd-e.rollRate)*smoothT(ENEMY_ROLL_RESPONSE,dt),-e.rollMax,e.rollMax);
+  _eQ.setFromAxisAngle(_axisZ,-e.rollRate*dt);q.multiply(_eQ);      // about the nose (-z)
+  // Pull with the lift it has: only the part along its own lift line, never negative.
+  _eUp.set(0,1,0).applyQuaternion(q);
+  _eAcc.copy(_eUp).multiplyScalar(Math.max(0,_eLift.dot(_eUp))).sub(_eGrav);
+  const a=_eAcc.length(),turn=Math.min(a/Math.max(e.currentSpeed,1),e.turnMax);
+  if(turn>1e-6){_eAxis.crossVectors(_eFwd,_eAcc).normalize();_eQ.setFromAxisAngle(_eAxis,turn*dt);q.premultiply(_eQ)}
+  q.normalize();
+  // Speed: toward what the state asks for, at a bounded acceleration.
+  const dv=(e.speedCmd-e.currentSpeed)*(1-Math.exp(-ENEMY_SPEED_RESPONSE*dt));
+  e.currentSpeed+=THREE.MathUtils.clamp(dv,-ENEMY_DECEL*dt,ENEMY_ACCEL*dt);
+  _eFwd.set(0,0,-1).applyQuaternion(q);
+  e.mesh.position.addScaledVector(_eFwd,e.currentSpeed*dt);
+  // A last resort that the pull-up above should never leave to it; enemy-flight.mjs counts it.
+  const h=getGroundHeight(e.mesh.position.x,e.mesh.position.z);
+  if(e.mesh.position.y<h+ENEMY_FLOOR)e.mesh.position.y=h+ENEMY_FLOOR;
 }
 function ensureEnemyHorizontalTargetDistance(target,right,side,minDistance){
   _eTargetOffset.subVectors(target,playerJet.position);
@@ -3407,14 +3458,14 @@ function updateEnemies(dt){
       _eTarget.y=Math.max(_eTarget.y,getGroundHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
       const catchupWeight=THREE.MathUtils.smoothstep(playerFwd.dot(toPN),-.2,.8);
-      e.currentSpeed=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1+e.skill*.35;
+      e.speedCmd=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1+e.skill*.35;
       const presentationReady=playerBearing<-.55&&dist>500;
       if(presentationReady&&dist<1050+e.aggression*200)beginEnemyAttack(e);
       else if(dist<ENEMY_INBOUND_TARGET_DISTANCE)beginEnemyReposition(e);
     }else if(e.state==='attack'){
       // Hold a fixed aim point so every attack becomes a committed fly-by instead of a pursuit turn.
       _eTarget.copy(e.attackPoint);
-      e.currentSpeed=enemyAttackSpeed(e);turnRate=.95+e.skill*.55;
+      e.speedCmd=enemyAttackSpeed(e);turnRate=.95+e.skill*.55;
       if(facingPlayer>.45)e.attackAligned=true;
       if(dist<500&&facingPlayer>.85&&e.fireCooldown<=0){
         e.fireCooldown=.12+.08*(1-e.skill);e.burstCount++;
@@ -3438,7 +3489,7 @@ function updateEnemies(dt){
     }else if(e.state==='extend'){
       // Hold a straight escape vector until there is enough room for a genuinely separate pass.
       _eTarget.copy(e.mesh.position).addScaledVector(e.extendDir,1000);
-      e.currentSpeed=Math.min(Math.max(e.baseSpeed*(1.35+e.aggression*.1),player.velocity.length()+140),650);turnRate=.35;
+      e.speedCmd=Math.min(Math.max(e.baseSpeed*(1.35+e.aggression*.1),player.velocity.length()+140),650);turnRate=.35;
       if(e.stateTimer>e.stateDuration&&dist>ENEMY_REENGAGE_DISTANCE)beginEnemyReposition(e);
     }else if(e.state==='reposition'){
       // Stay inside the forward view corridor while setting up the next pass.
@@ -3451,29 +3502,16 @@ function updateEnemies(dt){
       ensureEnemyHorizontalTargetDistance(_eTarget,playerRight,e.passSide,ENEMY_REPOSITION_TARGET_DISTANCE);
       _eTarget.y=Math.max(_eTarget.y,getGroundHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
-      e.currentSpeed=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=.75+e.skill*.35;
+      e.speedCmd=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=.75+e.skill*.35;
       const enemyAhead=playerBearing<-.65;
       if(e.stateTimer>2&&enemyAhead&&dist>ENEMY_REENGAGE_DISTANCE&&dist<1300)beginEnemyAttack(e);
     }else if(e.state==='evade'){
       _eTarget.copy(e.mesh.position).addScaledVector(e.evadeDir,600);
-      e.currentSpeed=e.baseSpeed*1.3;turnRate=2.4+e.skill*.8;
+      e.speedCmd=e.baseSpeed*1.3;turnRate=2.4+e.skill*.8;
       if(e.stateTimer>e.stateDuration)beginEnemyExtend(e);
     }
 
-    // Smooth turning toward target
-    smoothLookAt(e.mesh,_eTarget,dt,turnRate);
-    _eFwd.set(0,0,-1).applyQuaternion(e.mesh.quaternion);
-    e.mesh.position.add(_eFwd.clone().multiplyScalar(e.currentSpeed*dt));
-    // Bank into turns
-    const toTarget=new THREE.Vector3().subVectors(_eTarget,e.mesh.position).normalize();
-    const rightVec=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
-    const bankAmount=toTarget.dot(rightVec);
-    _tmpQ.setFromAxisAngle(_axisZ,-bankAmount*.6);
-    e.mesh.quaternion.multiply(_tmpQ).normalize();
-    // Terrain avoidance
-    const h=getGroundHeight(e.mesh.position.x,e.mesh.position.z);
-    if(e.mesh.position.y<h+60)e.mesh.position.y=h+60;
-    if(e.mesh.position.y<80)e.mesh.position.y+=80*dt;
+    flyEnemy(e,_eTarget,dt,turnRate);
     // Exhaust trail
     if(Math.random()<.3){const ep=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(16));
       spawnP(emitters.enemyExhaust,ep,_eFwd.clone().multiplyScalar(-15),.2+Math.random()*.3,0xff6600,.3+Math.random()*.6)}

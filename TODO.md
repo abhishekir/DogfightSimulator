@@ -75,6 +75,15 @@ Where the gameplay lives, for anyone changing how the game plays:
   sets up the next pass in the player's forward view.
   A hit, a player round passing within 60 m or a missile within 250 m triggers
   *evade* (a roll, a split-S or a climb), with a 2.5 s cooldown.
+  Each state only chooses a point to fly at, how keenly to turn for it and a
+  speed (`speedCmd`); `flyEnemy` flies there. It rolls until its lift points
+  where the turn needs it, then pulls with that lift, so turns start with a
+  roll; the nose turns at most 47–57°/s and the roll at most 169–228°/s (both
+  rising with skill, under the player's 60°/s pitch and 270°/s), and the speed
+  flown (`currentSpeed`) follows the command at up to 15 m/s² faster and
+  18 m/s² slower. It pulls up for the ground 4 s ahead, keeping 150 m clear.
+  Enemies spawn pointing at the player. The extend state's speed is therefore a
+  command it seldom reaches in 3–4 s.
 - **Damage.** The player has 100 HP. An enemy round costs 5, an enemy missile
   30, and touching the terrain is fatal in under half a second. A player round
   does 2.5 (`GUN_DAMAGE`), so a wave-1 enemy takes 16 hits; a missile does 50,
@@ -184,76 +193,79 @@ See CLAUDE.md for how to run them.
 
 The first playtest found enemy movement unnatural and twitchy.
 `.github/tools/enemy-flight.mjs` measures it: the person-like pilot fights for
-five game-minutes while every live enemy is sampled every frame. Three runs at
-each frame rate on `main`, as ranges over the runs:
+five game-minutes while every live enemy is sampled every frame.
+
+**Done: they fly on a flight model with limits** (`flyEnemy`; "The game loop"
+above says how). Before, each frame slerped the nose toward the target point by
+`smoothT(turnRate, dt)` of the angle left, with no limit (evade's `turnRate`
+reached 3.2, so a point behind swung the nose at hundreds of degrees a second);
+multiplied in a bank of 0.6 rad × (direction to the point · right wing) once a
+frame, with no `dt`; set the speed outright each frame; and lifted the enemy
+off the ground with a clamp, and by 80 m/s below 80 m. Three runs at each frame
+rate, as ranges over the runs, before (`main` before `flyEnemy`) and after:
 
 | | fps | median | 95th percentile | 99th | peak |
 |---|---|---|---|---|---|
-| turn rate of the nose, °/s | 60 | 16 | 106–110 | 151–156 | 469–520 |
-| | 30 | 13–18 | 98–114 | 144–159 | 352–529 |
-| roll rate, °/s | 60 | 16–17 | 161–169 | 542–635 | 2,094–2,293 |
-| | 30 | 14–16 | 143–161 | 461–566 | 1,162–1,195 |
-| change of commanded speed, g | 60 | 2.6–3.3 | 10–14 | 35–39 | a step |
-| | 30 | 3.0–3.6 | 10–14 | 37–53 | a step |
+| turn rate of the nose, °/s, before | 60 | 16 | 106–110 | 151–156 | 469–520 |
+| after | 60 | 12–13 | 53–55 | 56 | 56 |
+| before | 30 | 13–18 | 98–114 | 144–159 | 352–529 |
+| after | 30 | 10–11 | 53–54 | 56–57 | 56–57 |
+| roll rate, °/s, before | 60 | 16–17 | 161–169 | 542–635 | 2,094–2,293 |
+| after | 60 | 17–23 | 190–194 | 211–217 | 223–227 |
+| before | 30 | 14–16 | 143–161 | 461–566 | 1,162–1,195 |
+| after | 30 | 17–23 | 189–197 | 211–218 | 224–226 |
+| change of speed, g, before | 60 / 30 | 2.6–3.6 | 10–14 | 35–53 | a step of up to 452 m/s |
+| after | 60 / 30 | 1.5 | 1.8 | 1.8 | 1.8 |
 
-The player's jet pitches at 60°/s at most. What the two frame rates show:
+Moved by the ground rules: 1.7–4.5% of enemy-frames before, none after. The
+figures now agree between 60 and 30 fps. `enemy-flight.mjs --check` passes at
+both.
 
-- **Turn rate does not depend on the frame rate.** The medians and percentiles
-  agree, and the peaks overlap from run to run (a peak is one frame of one
-  enemy).
-- **Roll does.** The roll peak halves at 30 fps, because the bank is added once
-  a frame, not per second (below). So enemies roll differently at different
-  frame rates, which is a bug in its own right.
-- **Speed changes are steps.** The commanded speed jumps by up to 394–452 m/s
-  in a single frame at either frame rate, so its "g" is only the step divided
-  by one frame time.
-- **1.7–4.5% of enemy-frames are moved by the ground rules**, not by flying:
-  the terrain clamp, and the 80 m/s climb below 80 m.
+The roll's median rose a little, because a turn now starts with a roll where
+before the wings followed the target point. The speed figures are at the
+limits most of the time: the states' speed commands still move faster than an
+aircraft can follow (extend asks for the player's speed plus 140 m/s), so the
+enemies are nearly always accelerating or braking. Smoothing the commands
+themselves would leave the speed changing less often.
 
-Where it comes from (`updateEnemies`, `smoothLookAt`):
+**It made the game much easier**, by the person-like pilot (eight 15-minute
+runs a side, mean of runs ± standard error):
 
-- **Steering.** Each frame the nose slerps toward a target point by
-  `smoothT(turnRate, dt)` of the angle left, so the turn rate is proportional to
-  the error, with no limit: a point 180° away swings the nose at
-  `turnRate × π` rad/s to begin with, and evade's `turnRate` reaches 3.2. Every
-  state change picks a new point at once (an aim point, a fixed extend vector, a
-  random evade direction), so the nose flicks at each one; evade peaks highest.
-- **Bank.** The look rotation is wings-level, and a roll of 0.6 rad × (direction
-  to the target point · right wing) is multiplied in after it every frame, with
-  no `dt`: up to 34° a frame, which is about 2,060°/s at 60 fps and 1,030°/s at
-  30. The wings follow where the target point is, not the turn being flown, and
-  flip when the point swings across.
-- **Speed.** Each state assigns `currentSpeed` outright every frame
-  (`enemyPositioningSpeed` follows the range and the player's speed), so speed
-  has no inertia and jumps at a state change: extend demands at least the
-  player's speed plus 140 m/s.
-- **Terrain.** Below 60 m above the ground the position is clamped up, a visible
-  hop, and below 80 m altitude it climbs 80 m/s whatever its attitude.
+| | before | after |
+|---|---|---|
+| kills per minute | 0.91 ± 0.11 | 2.10 ± 0.23 |
+| deaths in 2 hours of play | 14 | 5 |
+| player missiles that killed | 103 of 526 (20%) | 247 of 628 (39%) |
+| time to first kill, median | 26.6 s | 21.8 s |
+| furthest wave reached | 4 | 7 |
 
-What to do: fly the enemies on a flight model with limits, keeping the state
-machine (inbound, attack, extend, reposition, evade) as the thing that chooses
-where to go.
+What did it, from runs that change one thing:
 
-- A bounded turn rate, no higher than the player's at the same speed (or a
-  g limit), instead of an exponential approach to the target direction.
-- Roll to the bank the turn needs (tan(bank) = speed × turn rate / g) at a
-  bounded roll rate, per second, then pull, so turns start with a roll the way
-  the player's do.
-- Speed changing at a bounded acceleration toward what the state asks for.
-- Terrain avoidance that pulls up early, from the ground ahead, not a clamp.
-- Smooth with `smoothT`, never `lerp(a, b, k * dt)`.
+- **The turn limit doubled the kill rate, through missiles.** The missile
+  loses lock when its target is more than 69° (1.2 rad) off its nose. Before,
+  about two-thirds of player missiles lost lock, nearly all against an enemy in
+  *evade*, which could snap its nose round in a few frames. Now about a quarter
+  do. Warning enemies of a missile at 1,000 m instead of 250 m did not help
+  (2.23 ± 0.16 kills per minute): at 57°/s a turn does not out-angle a missile
+  that steers like this one.
+- **The speed limit cut the deaths.** With the speed set instantly again, and
+  the turn limits kept, kills stayed at 2.17 ± 0.11 per minute but deaths went
+  back to 15 in two hours: enemies that cannot jump to catch-up speed set up
+  fewer attacks.
 
-It will change how hard the game is (smoother targets are easier to track;
-slower turns make passes longer), so measure with the person-like pilot before
-and after, eight 15-minute runs a side.
+**Still open:**
 
-**Done when:**
+- **Difficulty.** Whether to win any of it back is a decision, and how: the
+  old missile defence was unphysical, so it cannot simply be restored. Ways
+  that keep the limits: countermeasures (flares an evading enemy drops, with a
+  chance to break the lock, visible to the player), a missile that can be
+  out-turned (a g or turn-rate limit on its guidance), enemies that survive one
+  missile, or more or faster-ramping waves. Measure whatever is chosen against
+  the "after" figures above.
+- **A playtest** that no longer finds the enemies twitchy.
 
-- `enemy-flight.mjs --check` passes at 60 and at 30 fps: the nose never turns
-  faster than 60°/s, roll stays under 270°/s, commanded speed changes by no
-  more than 2 g, and nothing is moved by the ground rules.
-- The person-like pilot's figures are quoted before and after.
-- A playtest no longer finds the enemies twitchy.
+**Done when:** the playtest agrees, and the difficulty has been decided and
+measured.
 
 ### 2. Aim assist for the gun — P2
 

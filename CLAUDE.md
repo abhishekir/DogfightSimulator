@@ -95,14 +95,15 @@ before/after comparison is done.
   overrun after release; fails if the roll is not 90° in about 0.5 s at both.
 - `enemy-flight.mjs [--minutes 5] [--fps 60] [--check]` — samples every live
   enemy every frame while the person-like pilot fights, and reports how fast
-  their noses turn, how fast they roll, how hard their commanded speed changes
+  their noses turn, how fast they roll, how hard their speed changes
   and how often the ground rules move them. `--check` fails outside the limits
   in TODO.md's "Enemies fly twitchily". Run it at 30 as well as 60 fps.
 - `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
   frames on every run: level flight, then a kill with the particle pool under
   heavy-fight pressure. Run it on two copies of the game with different tags
   and compare the frames in `.github/tools/out/`; they match until the copies
-  behave differently.
+  behave differently. No enemy flies in it, so it shows nothing of how they
+  fly: render a real fight for that.
 
 Everything below is still on you.
 

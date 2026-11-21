@@ -150,8 +150,12 @@ Where the gameplay lives, for anyone changing how the game plays:
   Round assist: a round fired while the lead point is within `GUN_ASSIST` (1.5°)
   of the nose leaves aimed at the lead point. The cannon and the cue go by one
   rule, `gunAssisted(gunSolution(target))`, and the sight's ring is the larger
-  of the hit radius and that cone. The controls are never touched. Whether it
-  helps a person is not yet shown: see "Aim assist for the gun".
+  of the hit radius and that cone. The controls are never touched.
+  Aim pull: while the trigger is held and the lead point is within
+  `GUN_PULL_CONE` (5°) of the nose, the nose is turned onto it, closing the
+  angle at `GUN_PULL_GAIN` (6) per second and at most `GUN_PULL_MAX` (15°/s).
+  It does nothing with the trigger up or the marker further off. See "Aim
+  assist for the gun" for what each does.
 
 ### Verifying a change
 
@@ -307,47 +311,43 @@ control they take from the player:
   the trigger is held and the gun cross is close to it. It is the strongest
   option and the one most likely to feel like losing control.
 
-**Done so far:** the round assist, at `GUN_ASSIST` = 1.5° (0 turns it off). The
-mechanism works, and `.github/tools/gunsight.mjs` checks it: with the cross
-held 0.9 of the cone off the marker at 1,000 m every round hits; held 1.1 off,
-none does; and a wave-1 enemy dies 1.6 s into a hold that wanders inside the
-cone. Against a target flying a straight line, `track.mjs` has the person-like
-pilot landing 31–69% of its rounds with the assist, firing 19–39% of the time,
-where without it it fires 4–9% of the time.
+**Done so far:**
 
-**Not shown: that a person gets more gun kills in the game.** Gun kills are
-rare with or without it, about one every 20 to 50 minutes of play, so they take
-a great deal of play to compare:
+- **Round assist**, at `GUN_ASSIST` = 1.5° (0 turns it off). Against a target
+  flying a straight line, `track.mjs` has the person-like pilot landing 31–69%
+  of its rounds with it, firing 19–39% of the time, where without it it fires
+  4–9% of the time. Gun kills in play did not move measurably: 5 without
+  against 13 with in sixteen runs a side, 10 against 8 in a reviewer's eight.
+- **Aim pull** (`GUN_PULL_CONE` 5°, `GUN_PULL_GAIN` 6/s, `GUN_PULL_MAX`
+  15°/s), after the first playtests found it hard to keep the cross on the
+  marker. `gunsight.mjs` checks it: from 3° off, the lead point is inside the
+  round assist's cone in 0.13 s at 60 and 30 fps and stays there, and with the
+  trigger up or the marker outside the cone the nose does not move. In
+  `track.mjs` (with flares and the enemy flight model in the game), the pilot's
+  median error from the marker fell from 1.6–2.5° to 0.7–1.1° in four of five
+  cases and its hits rose from 20–256 to 833–1,439 in 20 s; a target crossing
+  at 200 m/s at 600 m leaves the cone and gains nothing. In play, sixteen
+  15-minute runs a side: gun kills 0.05 ± 0.02 a minute without it and
+  0.13 ± 0.03 with (12 against 32 kills; about two standard errors), hits per
+  round fired 6.5% against 9.0%, and all kills 1.37 ± 0.12 against
+  1.63 ± 0.10 (not told apart).
 
-- The first comparison, four 15-minute runs a side: one gun kill without the
-  assist against five. It was reported as an improvement and should not have
-  been: four runs cannot tell those apart.
-- A reviewer's re-run, eight runs a side: 10 gun kills without, 8 with.
-- A third, sixteen runs a side (four hours of play each) after the pilot and
-  the cue were corrected: 5 without, 13 with (0.02 ± 0.01 against
-  0.06 ± 0.01 per minute as the mean of the runs). Total kills per minute went
-  from 0.99 ± 0.10 to 1.26 ± 0.12, which is under two standard errors.
+Gun kills are still a small share: the person-like pilot fires only with the
+cue lit and the marker in the ring, under 1,000 m, and most of its kills are
+missiles. A person holding the trigger earlier gets more from the pull than
+this pilot does.
 
-Taken together that is no established effect, and the default strength of 1.5°
-is a guess from the middle of "a degree or two". The first playtest asked for a
-stronger assist.
+What is left:
 
-What to do next:
+- **The strength, by play.** The values are a first choice. Make the pull's
+  rate and cone, and the round assist's cone, a setting ("Settings screen"),
+  from off to strong, and keep what a person can feel without the gun aiming
+  itself.
+- **Hit tolerance** growing with range, the third option above, is not done.
 
-- Decide the strength by play, not by this pilot alone: make it a setting
-  ("Settings screen"), try 1.5°, 3° and the two stronger options above, and keep
-  what a person can feel without the gun aiming itself.
-- For a measurement that can show an effect, raise how often the gun gets used
-  first. The person-like pilot fires only while the cue is lit and the marker is
-  in the ring, under 1,000 m, and enemies spend little time there; most kills
-  are missile kills either way. Counting hits per trigger-second, or runs with
-  the missiles taken away, would say more per hour than gun kills do.
-
-**Done when:** a player who keeps the gun cross roughly on a wave-1 enemy's
-lead marker gets a gun kill (checked by `gunsight.mjs`), the strength has been
-chosen by playtest, and a comparison of at least sixteen runs a side shows the
-person-like pilot killing measurably faster with the assist than without it, or
-the task records that it does not.
+**Done when:** the strength has been chosen by playtest. (The measured part is
+done: the aim pull made the person-like pilot's gun kills measurably more
+frequent, sixteen runs a side.)
 
 ### 3. GPU cost is unmeasured — P2 (needs real hardware)
 
@@ -788,7 +788,9 @@ well it aims.
 
 **What each playability change measured.** The pilot as corrected after
 review, 15-minute runs; kills per minute is the mean of the runs with its
-standard error. "All" is the game as it now stands. The first figure is the
+standard error. "All" is the game after the first five playability changes;
+the last four rows follow the changes after it, each on top of the one
+before ("Enemies fly twitchily", "Aim assist for the gun"). The first figure is the
 author's campaign; where a reviewer re-ran a variant independently, theirs
 follows after a slash.
 
@@ -804,6 +806,10 @@ follows after a slash.
 | all, at 120°/s | 16 | 1.09 ± 0.09 | 9 in 4 h | 5.08% | 0 | 8.4 s |
 | all, at 150°/s | 16 | 1.14 ± 0.07 / 1.05 ± 0.09 | 11 in 4 h | 4.21% | 0 | 14.9 s |
 | all, with unguided fire put back | 16 | 0.92 ± 0.08 / 1.10 ± 0.08 | 10 in 4 h | 4.92% | 9% | 27.1 s |
+| `main` after all of it (170dbe1), re-run | 8 | 0.91 ± 0.11 | 5 in 2 h | 3.27% | 0 | 26.6 s |
+| then enemies on a flight model with limits | 8 | 2.10 ± 0.23 | 4 in 2 h | 7.72% | 0 | 21.8 s |
+| then flares, both ways | 16 | 1.37 ± 0.12 | 12 in 4 h | 6.47% | 0 | 9.3 s |
+| then the aim pull | 16 | 1.63 ± 0.10 | 32 in 4 h | 9.04% | 0 | 8.4 s |
 
 The two campaigns agree in direction more often than in size, and the same
 game differs between them by up to 0.2 kills a minute. Read accordingly:
@@ -812,9 +818,13 @@ game differs between them by up to 0.2 kills a minute. Read accordingly:
   from 1% to 6–7%, the first kill of a life from over a minute to seconds, and
   kills from 0.67 to 0.99 a minute (2.4 standard errors). An earlier eight-run
   comparison by the reviewer found the same direction (0.56 to 0.95).
-- **The gun still rarely kills**: 1.5 to 4 gun kills an hour in every row.
-  Missiles make nearly every kill. Whether the round assist helps is not
-  settled ("Aim assist for the gun").
+- **The gun rarely kills**: 1.5 to 4 gun kills an hour in every row before the
+  aim pull, and 8 an hour with it. Missiles make nearly every kill. The round
+  assist alone did not measurably help; the aim pull did ("Aim assist for the
+  gun").
+- **The enemy flight model made the game much easier, and flares won back
+  about three-fifths of it**: 0.91 to 2.10 to 1.37 kills a minute. Why, and the
+  runs that isolate it, are in "Enemies fly twitchily".
 - **Lock-only missiles: no effect on the kill rate was resolved.** The author's
   campaign found none (0.93 against 0.92 with unguided fire put back). The
   reviewer's favoured unguided fire (0.83 against 1.10; difference −0.27, 95%

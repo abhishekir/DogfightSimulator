@@ -87,9 +87,11 @@ before/after comparison is done.
   hit; follows every round to check that no round which left with the cue lit
   passes outside the hit radius (the cue is cautious: an unlit shot near the
   edge can still hit), at the cue's edge, at the edge of the round assist's
-  cone and against a target flying at the jet; and checks every round fired
-  through a hard turn passes through the gun cross's point. Run it after
-  touching the gunsight, the camera or the guns.
+  cone and against a target flying at the jet; checks every round fired
+  through a hard turn passes through the gun cross's point; and checks the aim
+  pull brings the cross onto the marker while firing and does nothing with the
+  trigger up or the marker outside its cone. Run it after touching the
+  gunsight, the camera or the guns.
 - `handling.mjs` — holds each control key from rest in the game loop at 60 and
   30 fps and reports the steady rate, the time to 63% of it and to 90°, and the
   overrun after release; fails if the roll is not 90° in about 0.5 s at both.

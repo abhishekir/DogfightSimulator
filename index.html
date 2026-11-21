@@ -3181,6 +3181,12 @@ const GUN_SIGHT_RANGE=600;
 // angle of the nose leaves aimed at the lead point instead of straight along the nose. The
 // controls are untouched, so it never fights the player; 0 turns it off.
 const GUN_ASSIST=1.5*Math.PI/180;
+// Aim pull ("Aim assist for the gun"): while the trigger is held and the lead point is within
+// GUN_PULL_CONE of the nose, the nose is turned onto it, closing the angle at GUN_PULL_GAIN per
+// second and never faster than GUN_PULL_MAX. It acts only while firing and only near the
+// marker, so it holds a cross the player has put there rather than finding targets; with
+// GUN_PULL_MAX 0 it is off.
+const GUN_PULL_CONE=5*Math.PI/180,GUN_PULL_GAIN=6,GUN_PULL_MAX=15*Math.PI/180,_pullAxis=new THREE.Vector3();
 const _gsF=new THREE.Vector3(),_gsD=new THREE.Vector3(),_gsR=new THREE.Vector3(),_gsL=new THREE.Vector3(),_gsP=new THREE.Vector3();
 // The gun's solution on `target`, in world space: for a round leaving GUN_ORIGIN now along
 // the nose at the gun's round speed, and the target holding its velocity,
@@ -3264,6 +3270,15 @@ function updatePlayer(dt){
   _qP.setFromAxisAngle(_axisX,player.pitchRate*dt);
   _qY.setFromAxisAngle(_axisY,player.yawRate*dt);
   playerJet.quaternion.multiply(_qY).multiply(_qP).multiply(_qR).normalize();
+  // Aim pull, before the guns fire this frame (see GUN_PULL_CONE). Exponential in the angle,
+  // so the same at any frame rate.
+  if(keys['Space']&&GUN_PULL_MAX>0){const tgt=lockTarget&&lockTarget.alive?lockTarget:findNearestEnemy();
+    if(tgt){const sol=gunSolution(tgt);
+      if(sol.solved&&sol.reach&&sol.off>1e-5&&sol.off<=GUN_PULL_CONE){
+        _fwd.set(0,0,-1).applyQuaternion(playerJet.quaternion);
+        _pullAxis.subVectors(sol.lead,sol.muzzle).normalize();_pullAxis.crossVectors(_fwd,_pullAxis).normalize();
+        _tmpQ.setFromAxisAngle(_pullAxis,Math.min(sol.off*(1-Math.exp(-GUN_PULL_GAIN*dt)),GUN_PULL_MAX*dt));
+        playerJet.quaternion.premultiply(_tmpQ).normalize()}}}
   _fwd.set(0,0,-1).applyQuaternion(playerJet.quaternion);
   _tmpV1.copy(_fwd).multiplyScalar(speed);player.velocity.lerp(_tmpV1,smoothT(2,dt));
   if(playerJet.position.y>5)player.velocity.y-=18*dt;

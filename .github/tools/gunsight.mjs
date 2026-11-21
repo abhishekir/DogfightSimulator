@@ -46,6 +46,14 @@
  *    the muzzles' 2.5 m offset either side, and the round must fly at the sight's speed.
  *    Reports how far the cross moved from the middle of the screen while it did.
  *
+ * 6. Aim pull, when the page has one (GUN_PULL_CONE): with the trigger held and the lead
+ *    point inside the pull's cone, the nose is turned onto it. The cross is put 3 degrees
+ *    off the marker of a target crossing at 60 m/s at 600 m, and then left alone with the
+ *    trigger held: the lead point must come inside the round assist's cone within 0.6 s and
+ *    stay there, and the target must take hits. With the trigger up, or with the marker
+ *    outside the pull's cone, the nose must not move. (Sections 1-5 run with it held off:
+ *    they put the cross exactly where they mean it to be.)
+ *
  * --dt runs the simulation at another frame time (1/30 for 30 fps). Exits 1 on a failed
  * check or a page error.
  */
@@ -58,13 +66,18 @@ const transform = html => {
   html = splice(html, "for(let i=enemies.length-1;i>=0;i--){const e=enemies[i];if(!e.alive)continue;e.prevPosition.copy(e.mesh.position);",
     "for(let i=enemies.length-1;i>=0;i--){const e=enemies[i];if(!e.alive)continue;e.prevPosition.copy(e.mesh.position);if(e.straight){e.mesh.position.addScaledVector(e.straight,dt);continue}");
   html = splice(html, 'e.hp-=GUN_DAMAGE;e.wasHit=true;', 'e.hp-=GUN_DAMAGE;e.wasHit=true;window.__hits=(window.__hits||0)+1;');
+  // The aim pull, when the page has one, is held off (window.__noPull) except in section 6:
+  // the other sections put the cross exactly where they mean it to be.
+  const PULL = "if(keys['Space']&&GUN_PULL_MAX>0){";
+  if (html.includes(PULL)) html = splice(html, PULL, "if(keys['Space']&&GUN_PULL_MAX>0&&!window.__noPull){");
   return splice(html, 'window.__g = {', `window.__x = { gunSight, GUN_ORIGIN, commandedSpeed, GUN_MUZZLE_SPEED, GUN_HIT_RADIUS, GUN_MUZZLE_OFFSET,
-  assist: typeof GUN_ASSIST === 'number' ? GUN_ASSIST : 0 };\nwindow.__g = {`);
+  assist: typeof GUN_ASSIST === 'number' ? GUN_ASSIST : 0, gunSolution: typeof gunSolution === 'function' ? gunSolution : null,
+  pull: typeof GUN_PULL_CONE === 'number' && GUN_PULL_MAX > 0 ? { cone: GUN_PULL_CONE, gain: GUN_PULL_GAIN, max: GUN_PULL_MAX } : null };\nwindow.__g = {`);
 };
 const game = await openGame({ transform, viewport: { width: 1280, height: 720 } });
 const p = game.page;
 await p.waitForFunction(() => window.__g, null, { timeout: 90000 });
-await p.evaluate(() => { window.__g.snd.init = () => {}; window.__g.start(); });
+await p.evaluate(() => { window.__noPull = true; window.__g.snd.init = () => {}; window.__g.start(); });
 
 const results = [];
 const check = (name, ok, detail) => { results.push(ok); console.log(`${ok ? 'pass' : 'FAIL'}  ${name}${detail !== undefined ? '  ' + JSON.stringify(detail) : ''}`); };
@@ -258,6 +271,34 @@ const turn = await p.evaluate(dt => {
 console.log(`\nthrough a full-rate pull and roll: ${turn.checked} rounds; the cross moved up to ${turn.crossFromCentrePx} px from the middle of the screen`);
 check('every round passes the gun cross\'s point within the muzzle offset (2.5 m)', turn.checked > 50 && turn.worstMiss <= 2.6, turn);
 check('every round flies at the sight\'s round speed', turn.speedErr < 0.01, turn.speedErr);
+
+// 6. Aim pull, when the page has one.
+const PULL = await p.evaluate(() => window.__x.pull);
+if (PULL) {
+  const pull = await p.evaluate(([dt, A]) => {
+    const G = window.__g, T = G.THREE, t = window.__t, X = window.__x, deg = 180 / Math.PI, F0 = new T.Vector3(), F = new T.Vector3();
+    window.__noPull = false;
+    // Start `off` radians off the marker, then fly hands off for `secs` with the trigger as given.
+    const run = (off, trigger, secs) => {
+      const e = t.target(600, [60, 0, 0]); G.frame(dt, false); t.hold(off, 0);
+      F0.set(0, 0, -1).applyQuaternion(G.jet.quaternion); window.__hits = 0;
+      const offs = [];
+      for (let i = 0; i < Math.round(secs / dt); i++) { G.keys.Space = trigger; G.frame(dt, false); offs.push(X.gunSolution(e).off); }
+      G.keys.Space = false;
+      const settle = offs.findIndex((o, i) => offs.slice(i).every(x => x <= A));
+      return { settledAfterS: settle < 0 ? null : +((settle + 1) * dt).toFixed(3), hits: window.__hits,
+        turnedDeg: +(Math.acos(Math.min(1, F.set(0, 0, -1).applyQuaternion(G.jet.quaternion).dot(F0))) * deg).toFixed(3),
+        endOffDeg: +(offs[offs.length - 1] * deg).toFixed(2) };
+    };
+    const out = { firing: run(3 / deg, true, 1.5), triggerUp: run(3 / deg, false, 0.5), outsideCone: run(X.pull.cone * 1.6, true, 0.5) };
+    window.__noPull = true; return out;
+  }, [DT, ASSIST]);
+  console.log(`\naim pull: cone ${(PULL.cone * 180 / Math.PI).toFixed(1)} deg, ${PULL.gain}/s, at most ${(PULL.max * 180 / Math.PI).toFixed(0)} deg/s; started 3 deg off the marker at 600 m, target crossing at 60 m/s`);
+  check('firing, the lead point is inside the round assist\'s cone within 0.6 s and stays there, and the target is hit',
+    pull.firing.settledAfterS !== null && pull.firing.settledAfterS <= 0.6 && pull.firing.hits > 20, pull.firing);
+  check('with the trigger up the pull does nothing', pull.triggerUp.turnedDeg < 0.01, pull.triggerUp);
+  check('with the marker outside the pull\'s cone it does nothing', pull.outsideCone.turnedDeg < 0.01, pull.outsideCone);
+} else console.log('\nno aim pull in this page (GUN_PULL_CONE): its checks skipped');
 
 await game.close();
 const failed = results.filter(ok => !ok).length, errors = [...game.errors];

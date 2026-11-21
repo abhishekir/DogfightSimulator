@@ -15,7 +15,10 @@ import { join } from 'node:path';
 import { openGame, exposeSound, splice, outDir } from './lib.mjs';
 
 const game = await openGame({ transform: h => splice(exposeSound(h), 'function checkGameOver(){',
-  'window.__pj=playerJet;window.__pl=player;window.__st=()=>({gameOver,paused,gameStarted,score});function checkGameOver(){') });
+  'window.__pj=playerJet;window.__pl=player;window.__st=()=>({gameOver,paused,gameStarted,score});' +
+  'window.__mt=()=>missileThreat;window.__aimMissile=d=>{const f=new THREE.Vector3(0,0,-1).applyQuaternion(playerJet.quaternion),' +
+  'p=playerJet.position.clone().addScaledVector(f,d);return !!spawnMissile(p,f.clone().negate(),new THREE.Vector3(),{mesh:playerJet,alive:true},true)};' +
+  'function checkGameOver(){') });
 const p = game.page, out = await outDir();
 const results = [];
 const check = (name, ok, detail) => { results.push(ok); console.log(`${ok ? 'pass' : 'FAIL'}  ${name}${detail !== undefined ? '  ' + JSON.stringify(detail) : ''}`); };
@@ -34,6 +37,9 @@ check('start and pause screens say ↑ / ↓ is nose down / up', screens.every(t
 // The title screen says how the missile rack works.
 const title = await ev(() => document.getElementById('blocker').innerText);
 check('start screen explains the missile rack', /12 in the rack/.test(title) && /\+2 per kill/.test(title) && /wave is cleared/.test(title));
+
+// Both screens list the flares key.
+check('start and pause screens list C for flares', screens.every(t => /C\s*— Flares/.test(t)));
 
 // Volume keys on the title screen, before the audio context exists.
 for (let i = 0; i < 3; i++) await p.keyboard.press('Minus');
@@ -106,6 +112,18 @@ check('F with an empty rack sounds the empty cue', await until(() => window.__sn
 await p.keyboard.up('KeyF');
 check('an empty rack stays empty', await ev(() => window.__pl.missileAmmo) === 0 && before < 0);
 await ev(() => { window.__pl.missileAmmo = 12; });
+
+// Flares: C drops a salvo, with its sound, and one press is one salvo.
+const flares0 = await ev(() => window.__pl.flares);
+await p.keyboard.down('KeyC');
+check('C drops a salvo of flares', await until(() => window.__pl.flares < 8, 10000), [flares0, await ev(() => window.__pl.flares)]);
+await p.keyboard.up('KeyC');
+check('the flares sound', await ev(() => window.__snd._lastFlares > 0), await ev(() => window.__snd._lastFlares));
+
+// A missile tracking the player raises the warning, and its tone beeps.
+await ev(() => window.__aimMissile(1500));
+check('a missile tracking the player raises the warning', await until(() => window.__mt() > 0, 15000), await ev(() => window.__mt()));
+check('the missile warning tone beeps', await until(() => window.__snd.mslGain.gain.value > 0, 15000), await ev(() => window.__snd.mslGain.gain.value));
 
 // Crash into the ground while firing.
 await p.keyboard.down('Space');

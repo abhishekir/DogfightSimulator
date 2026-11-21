@@ -25,7 +25,8 @@
  *
  * --render writes gun.wav, lock.wav and rack.wav to .github/tools/out/ for listening: a
  * 1.5 s burst with spin-up and release, the seeker going from seek tone through growl to
- * lock, and the empty-rack cue over the engine.
+ * lock, and the empty-rack cue over the engine; flares.wav three flare salvos, and warning.wav
+ * the missile warning as a missile closes from the edge of its range.
  * Exits 1 if any assertion fails or the page reports an error.
  */
 import { writeFile } from 'node:fs/promises';
@@ -139,6 +140,20 @@ const m = await p.evaluate(async (render) => {
     L['rack empty'] = measure(once, 0.1, 0.33);
     r.rackEmptyTwice = +(measure(twice, 0, 1).dBA - measure(once, 0, 1).dBA).toFixed(2);
   }
+  { // Flares leaving the dispenser, and the two warnings: rounds close by, and a missile tracking
+    // the player at the edge of the warning range and close in. The missile warning's beep rate
+    // is counted from the rising edges of its envelope.
+    L['flares'] = measure((await run('cockpit', 1, (s, t) => { idle(s); if (Math.abs(t - 0.1) < FR / 2) s.flares(); })).buf, 0.1, 0.4);
+    L['round warning'] = measure((await run('cockpit', 3, s => s.update(0.7, 300, false, 0, true, FR, -1, 0))).buf, 1, 3);
+    const beeps = buf => { const d = buf.getChannelData(0), n = Math.floor(SR / 1000); let edges = 0, was = false;
+      for (let i = SR; i + n < 3 * SR; i += n) { let e = 0; for (let j = 0; j < n; j++) e += d[i + j] * d[i + j]; const on = e / n > 1e-6; if (on && !was) edges++; was = on; }
+      return edges / 2; };
+    for (const [name, close] of [['missile warning, far', 0.05], ['missile warning, close', 1]]) {
+      const { buf } = await run('cockpit', 3, s => s.update(0.7, 300, false, 0, false, FR, -1, 0, close));
+      L[name] = measure(buf, 1, 3); r[`beeps/s ${name}`] = beeps(buf);
+    }
+    r.quietWithoutMissile = measure((await run('cockpit', 3, s => s.update(0.7, 300, false, 0, false, FR, -1, 0, 0))).buf, 1, 3).peak;
+  }
   L['ground impact, 60 m'] = measure((await run('world', 2, (s, t) => { idle(s); if (Math.abs(t - FR) < FR / 2) s.impact(new THREE.Vector3(0, 0, -60)); })).buf, 0.1, 0.8);
 
   // ---- positional ----
@@ -188,7 +203,9 @@ const m = await p.evaluate(async (render) => {
               lock: enc((await run('cockpit', 5, (s, t) => { let lp = 0, sig = -1;
                 if (t < 1) sig = 0; else if (t < 4) { lp = Math.min((t - 1) / 1.5, 1); sig = 0.35 + 0.45 * lp; }
                 s.update(0.7, 300, false, lp, false, FR, sig, 0); })).buf),
-              rack: enc((await run(null, 1.5, (s, t) => { idle(s); if (Math.abs(t - 0.5) < FR / 2) s.rackEmpty(); })).buf) };
+              rack: enc((await run(null, 1.5, (s, t) => { idle(s); if (Math.abs(t - 0.5) < FR / 2) s.rackEmpty(); })).buf),
+              flares: enc((await run(null, 3, (s, t) => { idle(s); for (const at of [0.5, 1.1, 1.7]) if (Math.abs(t - at) < FR / 2) s.flares(); })).buf),
+              warning: enc((await run(null, 5, (s, t) => s.update(0.7, 300, false, 0, false, FR, -1, 0, t < 0.5 ? 0 : Math.min((t - 0.5) / 4, 1)))).buf) };
   }
   return r;
 }, RENDER);
@@ -213,6 +230,12 @@ check('missile launch 6..16 dB above the engine', within(rel('missile launch'), 
 check('a missile pulling away fades by more than 12 dB', rel('missile launch') - rel('missile at 3-5 s') > 12, [rel('missile launch'), rel('missile at 3-5 s')]);
 check('rack-empty cue 4..14 dB above the engine', within(rel('rack empty'), 4, 14), rel('rack empty'));
 check('rack-empty cue pressed twice in 0.1 s plays once', Math.abs(m.rackEmptyTwice) < 0.2, m.rackEmptyTwice);
+check('flares 4..14 dB above the engine', within(rel('flares'), 4, 14), rel('flares'));
+check('missile warning 4..14 dB above the engine', within(rel('missile warning, far'), 4, 14), rel('missile warning, far'));
+check('missile warning above the round warning (it is the bigger threat)', rel('missile warning, far') > rel('round warning'), [rel('round warning'), rel('missile warning, far')]);
+check('missile warning beeps about 5/s far out and 12/s close in', within(m['beeps/s missile warning, far'], 4, 6.5) && within(m['beeps/s missile warning, close'], 10, 13),
+      [m['beeps/s missile warning, far'], m['beeps/s missile warning, close']]);
+check('no missile warning without a missile', m.quietWithoutMissile < -100, m.quietWithoutMissile);
 check('the engine gets louder with throttle', m.levels['engine 30%'].dBA < E && E < m.levels['engine 100%'].dBA);
 check('own crash is the loudest event', rel('own crash, 80 m') > Math.max(rel('explosion, 300 m'), rel('gun burst'), rel('lock tone')), rel('own crash, 80 m'));
 console.log('\npositional');
@@ -245,8 +268,8 @@ if (RENDER) {
     h.write('RIFF', 0); h.writeUInt32LE(36 + pcm.length, 4); h.write('WAVEfmt ', 8); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(2, 22);
     h.writeUInt32LE(48000, 24); h.writeUInt32LE(48000 * 4, 28); h.writeUInt16LE(4, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(pcm.length, 40);
     return Buffer.concat([h, pcm]); };
-  for (const k of ['gun', 'lock', 'rack']) await writeFile(join(out, `${k}.wav`), wav(m.wav[k]));
-  console.log(`\nwrote gun.wav, lock.wav and rack.wav to ${out} (each normalised to the same peak)`);
+  for (const k of ['gun', 'lock', 'rack', 'flares', 'warning']) await writeFile(join(out, `${k}.wav`), wav(m.wav[k]));
+  console.log(`\nwrote gun.wav, lock.wav, rack.wav, flares.wav and warning.wav to ${out} (each normalised to the same peak)`);
 }
 const failed = results.filter(ok => !ok).length, errors = [...game.errors.entries()];
 for (const [k, n] of errors) console.error(`  ${k} x${n}`);

@@ -38,6 +38,9 @@
  *   diamond, lets go when it sees none (or sees the launch), and watches a missile it has
  *   fired for 2.5 s before trying again. The box, not the mark: once the HUD has a lead
  *   marker the gun goes by the marker and the missile by the aircraft itself, on any HUD.
+ * - It drops flares the way the HUD asks: when it sees the missile warning it taps C, and
+ *   taps again every second while the warning lasts and it has flares (on a copy of the game
+ *   with no warning, never).
  *
  * track.mjs measures how well it tracks, against one target flying a straight line 500-800 m
  * ahead with its AI skipped, level or crossing at up to 100 m/s: it holds the target box a
@@ -55,6 +58,7 @@ export const PERSON = {
   learn: 1.2,                  // per second: how fast a learnt rate follows what it sees
   missileWindow: 0.2,          // of the screen height: how near the aim point a box has to be to try for a lock
   watchMissile: 2.5, retryLock: 0.5,
+  flareEvery: 1,               // seconds between flare salvos while the missile warning lasts
 };
 
 export function installPerson(C) {
@@ -62,11 +66,11 @@ export function installPerson(C) {
   const fwd = new T.Vector3(), v = new T.Vector3(), a = new T.Vector3(), m = new T.Vector3(), q = new T.Quaternion(), qi = new T.Quaternion();
   const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
   const P = window.__person = { t: 0, hist: [], delay: 0, nx: 0, ny: 0, cx: 0, cy: 0, ix: 0, iy: 0, axes: {}, taps: {},
-    rates: { ...C.rates }, launches: 0, seen: 0, noMissileUntil: 0 };
+    rates: { ...C.rates }, launches: 0, seen: 0, noMissileUntil: 0, nextFlare: 0 };
   const clamp = (x, a = 1) => Math.max(-a, Math.min(a, x)), wrap = x => Math.atan2(Math.sin(x), Math.cos(x));
-  const KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD', 'KeyW', 'KeyS', 'Space', 'KeyF'];
+  const KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD', 'KeyW', 'KeyS', 'Space', 'KeyF', 'KeyC'];
   P.reset = () => {
-    P.hist.length = 0; P.axes = {}; P.taps = {}; P.ix = P.iy = 0; P.nx = P.ny = P.cx = P.cy = 0; P.noMissileUntil = 0; P.seen = P.launches;
+    P.hist.length = 0; P.axes = {}; P.taps = {}; P.ix = P.iy = 0; P.nx = P.ny = P.cx = P.cy = 0; P.noMissileUntil = 0; P.nextFlare = 0; P.seen = P.launches;
     P.delay = C.delay[0] + Math.random() * (C.delay[1] - C.delay[0]);
     for (const k of KEYS) K[k] = false;
   };
@@ -88,6 +92,7 @@ export function installPerson(C) {
     P.nx += -P.nx * dt / C.noiseTau + fine * k * gauss(); P.ny += -P.ny * dt / C.noiseTau + fine * k * gauss();
     P.cx += -P.cx * dt / C.noiseTau + coarse * k * gauss(); P.cy += -P.cy * dt / C.noiseTau + coarse * k * gauss();
     const s = { t: P.t, fHeld: !!K.KeyF, launches: P.launches, ammo: pl.missileAmmo, throttle: pl.throttle,
+      missileWarn: G.missileThreat > 0, flares: pl.flares || 0,
       agl: jet.position.y - G.ground(jet.position.x, jet.position.z), vy: pl.velocity.y,
       safe: v.copy(fwd).setY(0).normalize().setY(1.2).normalize().applyQuaternion(qi).clone(),
       level: v.copy(fwd).setY(0.05).normalize().applyQuaternion(qi).clone() };
@@ -167,6 +172,11 @@ export function installPerson(C) {
       if (!wantF && P.t >= P.noMissileUntil) P.noMissileUntil = P.t + C.retryLock;
     } else wantF = P.t >= P.noMissileUntil && s.ammo > 0 && s.range < C.missileRange && s.boxSeen < innerHeight * C.missileWindow;
     axis('missile', null, 'KeyF', wantF ? 1 : 0);
+
+    // Flares: a tap of C on seeing the missile warning, and one a second while it lasts.
+    const wantC = s.missileWarn && s.flares > 0 && P.t >= P.nextFlare;
+    if (wantC) P.nextFlare = P.t + C.flareEvery;
+    axis('flare', null, 'KeyC', wantC ? 1 : 0);
 
     // The gun.
     axis('gun', null, 'Space', s.onScreen && s.cue && s.seen < s.ring && s.range < C.fireRange ? 1 : 0, C.minBurst);

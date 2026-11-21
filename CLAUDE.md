@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Seven more tools in `.github/tools/` go further. They run locally, not in CI,
+Eight more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -98,6 +98,12 @@ before/after comparison is done.
   their noses turn, how fast they roll, how hard their speed changes
   and how often the ground rules move them. `--check` fails outside the limits
   in TODO.md's "Enemies fly twitchily". Run it at 30 as well as 60 fps.
+- `flares.mjs [--trials 60] [--fps 60]` — fires missiles both ways, with
+  flares and without, and reports how often they hit: an enemy missile at the
+  player, who taps C inside 700 m, and the player's at an enemy held flying
+  away (evading off, so flares are its only defence). Fails unless flares cut
+  the hits and missiles without them mostly hit. Run it after touching flares
+  or missile guidance.
 - `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
   frames on every run: level flight, then a kill with the particle pool under
   heavy-fight pressure. Run it on two copies of the game with different tags

@@ -84,6 +84,24 @@ Where the gameplay lives, for anyone changing how the game plays:
   18 m/s² slower. It pulls up for the ground 4 s ahead, keeping 150 m clear.
   Enemies spawn pointing at the player. The extend state's speed is therefore a
   command it seldom reaches in 3–4 s.
+- **Flares** (`dropFlares`, `updateFlares`). A salvo is two decoys that shed
+  the aircraft's speed, fall and burn out in about 2.6 s. Every missile
+  tracking the aircraft that dropped it, within 2 km and with a flare inside
+  1 rad of its heading, is pulled onto a flare with a chance per salvo:
+  `FLARE_DECOY_ENEMY` (0.35) for an enemy's against the player's missile,
+  `FLARE_DECOY_PLAYER` (0.7) for the player's against an enemy's. A missile
+  whose flare burns out flies on unguided. An enemy carries 3 salvos and drops
+  one every 0.7 s once a player missile is tracking it inside 1,200 m, after a
+  reaction time of 0.25–0.85 s that shortens with skill. The player has 8 on C,
+  one every 0.6 s while it is held, reloaded when a wave is cleared; the
+  flight-data panel shows them (`FLR`).
+- **Missile warning** (`updateThreatDetection`, `missileThreat`). An enemy
+  missile tracking the player inside 3 km puts MISSILE and its range below the
+  centre, with "C — FLARES" and an arrow toward it, and a square-wave beep in
+  the headset, 5 a second at 3 km rising to 12 close in. It stops when the
+  missile is decoyed. (Before it, nothing warned of a missile: INCOMING is
+  enemy rounds within 120 m.) `.github/tools/flares.mjs` measures what flares
+  do, both ways.
 - **Damage.** The player has 100 HP. An enemy round costs 5, an enemy missile
   30, and touching the terrain is fatal in under half a second. A player round
   does 2.5 (`GUN_DAMAGE`), so a wave-1 enemy takes 16 hits; a missile does 50,
@@ -253,15 +271,22 @@ What did it, from runs that change one thing:
   back to 15 in two hours: enemies that cannot jump to catch-up speed set up
   fewer attacks.
 
+**Flares won some of it back** (see "The game loop"): the same eight-run
+comparison, with the person-like pilot dropping flares on the missile warning,
+gave 1.32 ± 0.16 kills per minute, and 154 kills from 479 missiles (32%). In
+`flares.mjs`'s duels (100 trials, two runs each at 60 and 30 fps), an enemy's
+salvos (1.6–1.7 of them a missile) cut a tail-chase missile's hits from 100%
+to 58–68%, and one of the player's cuts an enemy missile's from 100% to
+24–29%; the two frame rates agree. Deaths stayed few (3
+in two hours, from 5; too few to tell apart).
+
 **Still open:**
 
-- **Difficulty.** Whether to win any of it back is a decision, and how: the
-  old missile defence was unphysical, so it cannot simply be restored. Ways
-  that keep the limits: countermeasures (flares an evading enemy drops, with a
-  chance to break the lock, visible to the player), a missile that can be
-  out-turned (a g or turn-rate limit on its guidance), enemies that survive one
-  missile, or more or faster-ramping waves. Measure whatever is chosen against
-  the "after" figures above.
+- **Difficulty**, if 1.32 kills a minute against `main`'s 0.91 is still too
+  easy once the gun has been looked at ("Aim assist for the gun"): the enemy
+  flares' chance and salvo count are the knobs, and enemies that survive one
+  missile or harder waves are the other ways. Measure against the figures
+  above.
 - **A playtest** that no longer finds the enemies twitchy.
 
 **Done when:** the playtest agrees, and the difficulty has been decided and

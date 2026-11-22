@@ -349,7 +349,39 @@ What is left:
 done: the aim pull made the person-like pilot's gun kills measurably more
 frequent, sixteen runs a side.)
 
-### 3. GPU cost is unmeasured — P2 (needs real hardware)
+### 3. Enemy direction indicators around the gun sight — P2
+
+From the playtest after the enemy flight model, flares and aim pull. The radar
+(bottom centre, 3 km) is the only place that shows where every enemy is, and
+it means looking away from the sight. Put a pointer for each live enemy on a
+ring round the gun cross, at the enemy's bearing, so the player can see where
+they all are without leaving the sight.
+
+- **Far:** small and grey, a direction only.
+- **Closer:** larger, and grey to yellow to red as the enemy approaches. One
+  way to pick the steps is by weapon: red inside the gun's reach (the sight's
+  `inRange`, about 1,000 m), yellow inside missile lock range (`LOCK_RANGE`,
+  1,500 m), grey beyond, up to the radar's 3 km. Size can grow continuously
+  with closeness. Fix these by play.
+- **Bearing:** the direction from the jet to the enemy, projected into the
+  screen about the gun cross (behind the jet it must still point the right
+  way, not mirror). Whether an enemy already on screen (its target box shown)
+  keeps a pointer is a design call; dropping it inside the box keeps the sight
+  clear.
+- **Room on the ring:** the missile warning's arrow sits 78 px from the screen
+  centre and INCOMING's 55 px; give the indicators their own radius, outside
+  the gun ring at its widest, and a shape that cannot be mistaken for either
+  warning. With eight enemies, pointers in nearly the same direction should
+  not hide each other (offset or merge them).
+- `drawHUD` redraws every frame: no per-frame allocations, and nothing that
+  needs `Date.now()` beyond what the HUD's other blinks already use.
+
+**Done when:** a pointer is drawn for every live enemy at its bearing, sized and
+coloured by range, checked by a headless render at a few set geometries
+(ahead, beside, behind, near and far, one with eight enemies), `ui-test.mjs`
+still passes, and a playtest finds it useful rather than cluttered.
+
+### 4. GPU cost is unmeasured — P2 (needs real hardware)
 
 Every performance figure in the commit history comes from a software
 rasteriser, which does not predict GPU cost for an ALU-heavy raymarch. The
@@ -361,7 +393,7 @@ false` is the fallback. This cannot be done in a headless container.
 one integrated and one discrete GPU, and a default for `USE_VOLUMETRIC_CLOUDS`
 is chosen from it.
 
-### 4. Enemy aircraft make no sound — P2
+### 5. Enemy aircraft make no sound — P2
 
 Only the player's engine is audible, so a merge has no audio. Give each entry in
 `enemies` a cheap engine voice through `_voice(..., follow)` (see "Reference:
@@ -376,7 +408,7 @@ nothing but explosions).
 across the stereo field with a Doppler drop, and eight enemies cost less than
 the player's engine.
 
-### 5. Hits and enemy gunfire make no physical sound — P2
+### 6. Hits and enemy gunfire make no physical sound — P2
 
 `hitMarker()` is a UI confirmation tone (limited to one per 80 ms) and should
 stay one, but there is no *physical* impact sound. Rounds striking an airframe
@@ -395,7 +427,7 @@ bake or pool them, and rate-limit per target.
 100 m, and different again from hosing the sea; you hear an enemy firing at
 you.
 
-### 6. Enemy damage you can read at range — P2
+### 7. Enemy damage you can read at range — P2
 
 An enemy carries no visible damage state: you cannot tell one that is about to
 die from a fresh one. Smoke from a damaged enemy, thickening as HP falls, would
@@ -405,7 +437,7 @@ continuous emitter: see "Reference: the particle pool" for how to tag it.
 
 **Done when:** at 1 km you can tell a nearly dead enemy from a fresh one.
 
-### 7. Enemies leave no contrails — P2
+### 8. Enemies leave no contrails — P2
 
 `updateContrails` draws one contrail, the player's, from the fuselage origin.
 At altitude a contrail is how you spot a bandit before the radar does, so
@@ -415,7 +447,7 @@ persistence with altitude rather than the hard 300 m cut while doing it.
 **Done when:** an enemy above 3,000 m is visible by its contrail before it is
 visible as an aircraft.
 
-### 8. Cockpit view — P3
+### 9. Cockpit view — P3
 
 There is one chase camera (`camOff`, `camLookOff`) and nothing else. A cockpit
 or virtual-cockpit view would change how the game reads more than any other
@@ -435,7 +467,7 @@ already modelled. Before starting:
 **Done when:** a key toggles views, the canopy is transparent from inside
 without sorting artefacts, and the HUD sits on the combiner.
 
-### 9. The player's jet does not look like an F-22 — P3
+### 10. The player's jet does not look like an F-22 — P3
 
 The first playtest found the player's aircraft still does not look like an
 F-22, in its shape or in how its control surfaces move. What
@@ -501,7 +533,7 @@ What to do:
   (`scene.mjs` or a script like it).
 - The smoke test, the soak and the gunsight check pass.
 
-### 10. Battle damage on the airframe — P3
+### 11. Battle damage on the airframe — P3
 
 Beyond the smoke in "Enemy damage you can read at range", both the player and
 enemies go from pristine to
@@ -521,7 +553,7 @@ particle pool").
 heavy hits knock pieces off, a killed engine trails flame, no texture assets
 are added, and the soak still drops nothing outside the trails.
 
-### 11. Time of day — P3
+### 12. Time of day — P3
 
 The sun direction is a module-scope constant, and a good deal of tuning assumes
 it: `uCloudShadowOffset` is computed once from it at load, the terrain's
@@ -546,7 +578,7 @@ would be worth a lot and avoids most of the dynamic-shadowing problem.
 each, the sky, the water's specular, the cloud lighting and the terrain's
 shadowing all agree with where the sun is.
 
-### 12. Wingtip vortices and contrail polish — P3
+### 13. Wingtip vortices and contrail polish — P3
 
 **Wingtip vapour** exists in `updatePlayer` under `// Wing vapor`: above 3 G it
 spawns pale smoke particles at both wingtips. It is a puff emitter, not a
@@ -564,7 +596,7 @@ vortex. Remaining (enemy contrails are in "Enemies leave no contrails"):
 **Done when:** a roll visibly twists the pair of wingtip contrails, the vapour
 grows smoothly with G, and the wingtip positions come from the wing geometry.
 
-### 13. More aircraft: sixth-generation designs — P3
+### 14. More aircraft: sixth-generation designs — P3
 
 Do this last of the large features, once the gameplay and graphics tasks above
 are settled.
@@ -618,7 +650,7 @@ are assigned.
 its own silhouette and handling, and the soak, the UI test and the smoke test
 pass with each.
 
-### 14. The flight model allows 30+ G — P4 (decision)
+### 15. The flight model allows 30+ G — P4 (decision)
 
 The HUD's G readout regularly shows 30–37 G in hard turns. Steady pitch rate
 reaches about 1.05 rad/s (60°/s, `.github/tools/handling.mjs`),
@@ -666,7 +698,7 @@ setting ("Settings screen"). The measurements support trying a lower rate such
 as 150°/s; they do not say what a person will prefer.
 `.github/tools/handling.mjs` says what any pair of values gives.
 
-### 15. Settings screen — P4
+### 16. Settings screen — P4
 
 There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
 (`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Settings
@@ -693,7 +725,7 @@ sets volume, mute, the graphics options and whichever of those other settings
 exist; they persist across a reload as volume does now, and `ui-test.mjs`
 covers them.
 
-### 16. Cloud and water quality — P4
+### 17. Cloud and water quality — P4
 
 - The cloud march is half resolution (`CLOUD_SCALE = 0.5`) and resolved with a
   four-tap rotated-grid blur. Temporal reprojection would do better if anyone
@@ -702,7 +734,7 @@ covers them.
   mirrored camera can see; everything off-screen falls back to the analytic sky
   plus the analytic cloud tint. Look for the seam at grazing angles.
 
-### 17. Small things to keep in mind — P4
+### 18. Small things to keep in mind — P4
 
 - **Below 20 fps, game time runs slow but audio does not.** `dt` is clamped to
   0.05 s, so the simulation slows while the audio clock keeps real time; the

@@ -405,7 +405,9 @@ they all are without leaving the sight.
 
 **Done when:** a pointer is drawn for every live enemy at its bearing, sized and
 coloured by range, checked by a headless render at a few set geometries
-(ahead, beside, behind, near and far, one with eight enemies), `ui-test.mjs`
+(ahead, beside, behind, near and far, one with eight enemies, and one with
+both INCOMING and the missile warning up, at 800×600 and at 1366×625 as well as
+1280×720), `ui-test.mjs`
 still passes, and a playtest finds it useful rather than cluttered.
 
 ### 4. GPU cost is unmeasured — P2 (needs real hardware)

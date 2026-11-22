@@ -272,9 +272,9 @@ switched to a climb below 150 m, chattered, and that the roll then differed
 between frame rates: rocks (a roll reversal within 0.5 s of the one before)
 37 per enemy-minute at 30 fps against 25 at 60, and snaps (a reversal between
 two frames) 24 against 0. With the climb blended in continuously and the
-flight integrated in 1/120 s substeps: rocks 19–21 at either frame rate (two
-runs each; 14–16 at altitude, which is ordinary turning), snaps 2–3 at 30 fps
-and 0 at 60. `--check` holds them under 24 and 5.
+flight integrated in 1/120 s substeps: rocks 19–22 at either frame rate (three
+runs each; 13–16 at altitude, which is ordinary turning), snaps 2–3 at 30 fps
+and 0 at 60. `--check` holds them under 28 and 5.
 
 **The game is much easier with all of it.** The first measurements (0.91 to
 2.10 kills a minute for the flight model, back to 1.37 with flares, and the

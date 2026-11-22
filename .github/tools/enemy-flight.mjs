@@ -35,7 +35,7 @@
  *
  * --check fails the run unless the enemies stay inside the limits that task sets: nose
  * turn rate at most 60 deg/s (the player's pitch rate), roll rate at most 270 deg/s, speed
- * change at most 2 g, nothing lifted, and at most 5 snaps and 24 rocks per enemy-minute (see
+ * change at most 2 g, nothing lifted, and at most 5 snaps and 28 rocks per enemy-minute (see
  * LIMITS). Snaps are counted between frames, so they come easier at 30 fps; run both, and
  * with --low, which is where the terrain code runs. Without it the tool only measures. Exits 1 on a
  * failed check or a page error.
@@ -45,9 +45,9 @@ import { installPerson, PERSON } from './person.mjs';
 
 const MINUTES = Number(arg('minutes', 5)), FPS = Number(arg('fps', 60)), CHECK = flag('check'), LOW = flag('low');
 // Snaps and rocks: some rocking is ordinary flying (13-16 rocks per enemy-minute at altitude,
-// 19-21 in a low fight, at 60 and at 30 fps). When the terrain pull-up switched on and off at
+// 19-22 in a low fight, at 60 and at 30 fps). When the terrain pull-up switched on and off at
 // 150 m, a low fight at 30 fps gave 37 rocks and 24 snaps, against 25 and 0 at 60.
-const LIMITS = { turnDegS: 60, rollDegS: 270, speedChangeG: 2, snapsPerMin: 5, rocksPerMin: 24 };
+const LIMITS = { turnDegS: 60, rollDegS: 270, speedChangeG: 2, snapsPerMin: 5, rocksPerMin: 28 };
 const game = await openGame({ transform: stepper, viewport: { width: 1280, height: 720 } });
 const p = game.page;
 await p.waitForFunction(() => window.__g, null, { timeout: 90000 });

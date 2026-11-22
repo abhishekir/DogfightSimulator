@@ -293,10 +293,27 @@ standard error:
 | missiles that killed | 22% | 29% | 28% | 35% |
 | deaths (on the ground) | 31 (8) in 4 h | 5 (0) in 4 h | 1 in 4 h | 2 in 2 h |
 | lives reaching wave 4 | 1 of 47 | 17 of 21 | 15 of 17 | 7 of 10 |
+| *a review's campaign, 16 runs each:* | | | | |
+| fight altitude, median of runs | 1.2–5.3 km | 3.1–5.7 km | 3.0–4.7 km | |
+| kills per minute | 1.02 ± 0.10 | 1.22 ± 0.11 | 1.25 ± 0.06 | |
+| gun kills per minute | 0.02 ± 0.01 | 0.13 ± 0.02 | 0.06 ± 0.02 | |
+| deaths (on the ground) | 34 (8) | 2 (0) | 5 (1) | |
+| lives reaching wave 4 | 2 of 50 | 14 of 18 | 16 of 21 | |
 
-- All of it nearly doubles the kill rate (about 4.6 standard errors) and cuts
-  deaths sixfold. Enemy flares take back part of it (1.96 to 1.48, about two
-  standard errors); the aim pull adds to it (1.08 to 1.48, about three).
+- **The game is much easier**: deaths fall from 31–34 to 2–5 in four hours,
+  and most lives now reach wave 4 (31 of 39), where on `main` almost none
+  did (3 of 97).
+- **Kills rise by roughly 1.2–1.7×; the two campaigns disagree on the size.**
+  Ours put it at 0.85 to 1.48, the review's at 1.02 to 1.22 (not resolved on
+  its own); pooled it is about 1.4×. The same build differs between the two by
+  1.3–1.8 standard errors each time, always the way that widens our effects,
+  so the per-run standard error understates the noise: one sixteen-run
+  campaign should not be quoted at "4.6" or "about three" standard errors.
+- **The aim pull raises gun kills** (0.05 to 0.14 here, 0.06 to 0.13 in the
+  review's; replicated in three campaigns). Its effect on all kills is not
+  resolved (1.08 to 1.48 here, 1.25 against 1.22 in the review's).
+- Enemy flares take back part of the kill rate (1.96 to 1.48, eight runs
+  against sixteen, about two standard errors; not re-run by the review).
 - What cut the deaths is not separated at this altitude. At 10–60 km, the
   speed limit did (16 deaths against 3, with speed made instant again, in a
   review's runs); the player's flares and the missile warning are new since.
@@ -351,11 +368,12 @@ control they take from the player:
   cases and its hits rose from 20–256 to 833–1,439 in 20 s; a target crossing
   at 200 m/s at 600 m leaves the cone and gains nothing. In play, sixteen
   15-minute runs a side with the fight at a sane altitude: gun kills
-  0.05 ± 0.01 a minute without it and 0.14 ± 0.03 with (11 against 33 kills;
-  about three standard errors), hits per round fired 5.0% against 8.2%, and
-  all kills 1.08 ± 0.07 against 1.48 ± 0.11 (about three). A review's
-  independent campaign, with the fight at altitude, found the same: 0.06 ± 0.02
-  against 0.20 ± 0.04.
+  0.05 ± 0.01 a minute without it and 0.14 ± 0.03 with (11 against 33 kills),
+  and hits per round fired 5.0% against 8.2%. Two independent campaigns by a
+  review agree on the gun kills: 0.06 ± 0.02 against 0.20 ± 0.04 with the
+  fight at altitude, and 0.06 ± 0.02 against 0.13 ± 0.02 at a sane one. Its
+  effect on all kills is not resolved: 1.08 ± 0.07 against 1.48 ± 0.11 here,
+  1.25 ± 0.06 against 1.22 ± 0.11 in the review's.
 
 Gun kills are still a small share: the person-like pilot fires only with the
 cue lit and the marker in the ring, under 1,000 m, and most of its kills are
@@ -765,6 +783,11 @@ covers them.
 
 ### 18. Small things to keep in mind — P4
 
+- **The spawn faces a ridge.** The jet starts at 350 m, and with no input it
+  flies into a 322 m ridge about 400 m ahead and dies 3.0 s in, on `main` as
+  well; a new player who hesitates during the WAVE 1 banner crashes. Spawn
+  higher, or facing open ground. (`ui-test.mjs` now lifts the jet clear first,
+  after its own checks ran into the ridge on a slower machine.)
 - **Below 20 fps, game time runs slow but audio does not.** `dt` is clamped to
   0.05 s, so the simulation slows while the audio clock keeps real time; the
   cannon's sound reaches full rate in 0.3 s of real time while the barrels in
@@ -883,7 +906,9 @@ game differs between them by up to 0.2 kills a minute. Read accordingly:
   assist alone did not measurably help; the aim pull did ("Aim assist for the
   gun").
 - **The enemy flight model, flares and aim pull together made the game much
-  easier**: 0.85 to 1.48 kills a minute, and 31 deaths in four hours to 5.
+  easier**: deaths fell from 31–34 to 2–5 in four hours (two campaigns), and
+  kills rose by roughly 1.2–1.7× (0.85 to 1.48 in one, 1.02 to 1.22 in the
+  other).
   Which part does what is in "Enemies fly twitchily".
 - **Lock-only missiles: no effect on the kill rate was resolved.** The author's
   campaign found none (0.93 against 0.92 with unguided fire put back). The

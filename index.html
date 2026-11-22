@@ -3921,10 +3921,13 @@ function drawHUD(){
     hud.fillStyle='rgba(0,0,0,.5)';hud.fillRect(cx-65,yInc,130,28);
     hud.fillStyle=Math.sin(Date.now()*.02)>0?'#ff0000':'#ff4400';hud.font='bold 20px Courier New';
     hud.shadowColor='#ff0000';hud.shadowBlur=15;hud.textAlign='center';hud.fillText('INCOMING',cx,yInc+20);hud.textAlign='left';hud.shadowBlur=0;
-    const pR2=new THREE.Vector3(1,0,0).applyQuaternion(playerJet.quaternion),pU2=new THREE.Vector3(0,1,0).applyQuaternion(playerJet.quaternion);
-    const dR2=threatDir.dot(pR2),dU2=threatDir.dot(pU2),ang2=Math.atan2(dR2,-dU2);
+    // Its chevron, 43-55 px out, would cross its own text with the box moved up for MISSILE;
+    // the missile warning has its own arrow, so the chevron waits until that clears.
+    if(!(missileThreat>0)){
+    _hudR.set(1,0,0).applyQuaternion(playerJet.quaternion);_hudU.set(0,1,0).applyQuaternion(playerJet.quaternion);
+    const ang2=Math.atan2(threatDir.dot(_hudR),-threatDir.dot(_hudU));
     hud.save();hud.translate(cx,cy);hud.rotate(ang2);hud.strokeStyle='#ff3300';hud.lineWidth=3;
-    hud.beginPath();hud.moveTo(0,-55);hud.lineTo(-6,-43);hud.moveTo(0,-55);hud.lineTo(6,-43);hud.stroke();hud.restore()}
+    hud.beginPath();hud.moveTo(0,-55);hud.lineTo(-6,-43);hud.moveTo(0,-55);hud.lineTo(6,-43);hud.stroke();hud.restore()}}
 
   // Missile warning: an enemy missile tracking the player. The prompt says what to do about it,
   // and the arrow points where it is coming from.

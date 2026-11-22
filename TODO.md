@@ -266,47 +266,54 @@ aircraft can follow (extend asks for the player's speed plus 140 m/s), so the
 enemies are nearly always accelerating or braking. Smoothing the commands
 themselves would leave the speed changing less often.
 
-**It made the game much easier**, by the person-like pilot (eight 15-minute
-runs a side, mean of runs ± standard error):
+In a low fight (`enemy-flight.mjs --low`) the terrain code runs on about a
+quarter of enemy-frames. A review found that the first version of it, which
+switched to a climb below 150 m, chattered, and that the roll then differed
+between frame rates: rocks (a roll reversal within 0.5 s of the one before)
+37 per enemy-minute at 30 fps against 25 at 60, and snaps (a reversal between
+two frames) 24 against 0. With the climb blended in continuously and the
+flight integrated in 1/120 s substeps: rocks 19–21 at either frame rate (two
+runs each; 14–16 at altitude, which is ordinary turning), snaps 2–3 at 30 fps
+and 0 at 60. `--check` holds them under 24 and 5.
 
-| | before | after |
-|---|---|---|
-| kills per minute | 0.91 ± 0.11 | 2.10 ± 0.23 |
-| deaths in 2 hours of play | 14 | 5 |
-| player missiles that killed | 103 of 526 (20%) | 247 of 628 (39%) |
-| time to first kill, median | 26.6 s | 21.8 s |
-| furthest wave reached | 4 | 7 |
+**The game is much easier with all of it.** The first measurements (0.91 to
+2.10 kills a minute for the flight model, back to 1.37 with flares, and the
+runs isolating the turn and speed limits below) were taken with the fight
+drifted to 10–60 km, where nothing can hit the ground; a review replicated them
+there and found the drift ("Where the fight is", in "The game loop"). Re-taken
+with the fight held down, the person-like pilot, 15-minute runs, mean of runs ±
+standard error:
 
-What did it, from runs that change one thing:
+| | `main` | all of it | all, aim pull off | all, enemy flares off |
+|---|---|---|---|---|
+| runs | 16 | 16 | 16 | 8 |
+| fight altitude, median of runs | 1.4–5.9 km | 2.9–5.2 km | 3.1–12.2 km | 3.0–8.3 km |
+| kills per minute | 0.85 ± 0.08 | 1.48 ± 0.11 | 1.08 ± 0.07 | 1.96 ± 0.21 |
+| gun kills per minute | 0.03 ± 0.01 | 0.14 ± 0.03 | 0.05 ± 0.01 | 0.15 ± 0.04 |
+| missiles that killed | 22% | 29% | 28% | 35% |
+| deaths (on the ground) | 31 (8) in 4 h | 5 (0) in 4 h | 1 in 4 h | 2 in 2 h |
+| lives reaching wave 4 | 1 of 47 | 17 of 21 | 15 of 17 | 7 of 10 |
 
-- **The turn limit doubled the kill rate, through missiles.** The missile
-  loses lock when its target is more than 69° (1.2 rad) off its nose. Before,
-  about two-thirds of player missiles lost lock, nearly all against an enemy in
-  *evade*, which could snap its nose round in a few frames. Now about a quarter
-  do. Warning enemies of a missile at 1,000 m instead of 250 m did not help
-  (2.23 ± 0.16 kills per minute): at 57°/s a turn does not out-angle a missile
-  that steers like this one.
-- **The speed limit cut the deaths.** With the speed set instantly again, and
-  the turn limits kept, kills stayed at 2.17 ± 0.11 per minute but deaths went
-  back to 15 in two hours: enemies that cannot jump to catch-up speed set up
-  fewer attacks.
-
-**Flares won some of it back** (see "The game loop"): the same eight-run
-comparison, with the person-like pilot dropping flares on the missile warning,
-gave 1.32 ± 0.16 kills per minute, and 154 kills from 479 missiles (32%). In
-`flares.mjs`'s duels (100 trials, two runs each at 60 and 30 fps), an enemy's
-salvos (1.6–1.7 of them a missile) cut a tail-chase missile's hits from 100%
-to 58–68%, and one of the player's cuts an enemy missile's from 100% to
-24–29%; the two frame rates agree. Deaths stayed few (3
-in two hours, from 5; too few to tell apart).
+- All of it nearly doubles the kill rate (about 4.6 standard errors) and cuts
+  deaths sixfold. Enemy flares take back part of it (1.96 to 1.48, about two
+  standard errors); the aim pull adds to it (1.08 to 1.48, about three).
+- What cut the deaths is not separated at this altitude. At 10–60 km, the
+  speed limit did (16 deaths against 3, with speed made instant again, in a
+  review's runs); the player's flares and the missile warning are new since.
+- At altitude, the turn limit doubled missile kills: about two-thirds of the
+  player's missiles had lost lock against an enemy in *evade*, which could snap
+  its nose more than the missile's 69° lock limit off in a few frames, and a
+  quarter did after. Warning enemies of a missile at 1,000 m instead of 250 m
+  did not help. These were not re-taken low.
 
 **Still open:**
 
-- **Difficulty**, if 1.32 kills a minute against `main`'s 0.91 is still too
-  easy once the gun has been looked at ("Aim assist for the gun"): the enemy
-  flares' chance and salvo count are the knobs, and enemies that survive one
-  missile or harder waves are the other ways. Measure against the figures
-  above.
+- **Difficulty.** The first playtest of all of it found the game plays a lot
+  better; whether it is now too easy is for play to say. The enemy flares'
+  chance and salvo count are the knobs (note that decoyed missiles can still
+  hit, so the chance does less than it reads), and enemies that survive one
+  missile or harder waves are the other ways. Measure against the "all of it"
+  column above.
 - **A playtest** that no longer finds the enemies twitchy.
 
 **Done when:** the playtest agrees, and the difficulty has been decided and
@@ -343,15 +350,19 @@ control they take from the player:
   median error from the marker fell from 1.6–2.5° to 0.7–1.1° in four of five
   cases and its hits rose from 20–256 to 833–1,439 in 20 s; a target crossing
   at 200 m/s at 600 m leaves the cone and gains nothing. In play, sixteen
-  15-minute runs a side: gun kills 0.05 ± 0.02 a minute without it and
-  0.13 ± 0.03 with (12 against 32 kills; about two standard errors), hits per
-  round fired 6.5% against 9.0%, and all kills 1.37 ± 0.12 against
-  1.63 ± 0.10 (not told apart).
+  15-minute runs a side with the fight at a sane altitude: gun kills
+  0.05 ± 0.01 a minute without it and 0.14 ± 0.03 with (11 against 33 kills;
+  about three standard errors), hits per round fired 5.0% against 8.2%, and
+  all kills 1.08 ± 0.07 against 1.48 ± 0.11 (about three). A review's
+  independent campaign, with the fight at altitude, found the same: 0.06 ± 0.02
+  against 0.20 ± 0.04.
 
 Gun kills are still a small share: the person-like pilot fires only with the
 cue lit and the marker in the ring, under 1,000 m, and most of its kills are
 missiles. A person holding the trigger earlier gets more from the pull than
-this pilot does.
+this pilot does. With hits concentrated, the cannon's hit sparks could empty
+the particle pool; they are now left out while fewer than 200 particles are
+free (`HIT_SPARK_FLOOR`).
 
 What is left:
 
@@ -363,7 +374,7 @@ What is left:
 
 **Done when:** the strength has been chosen by playtest. (The measured part is
 done: the aim pull made the person-like pilot's gun kills measurably more
-frequent, sixteen runs a side.)
+frequent, sixteen runs a side, and a review's independent campaign agreed.)
 
 ### 3. Enemy direction indicators around the gun sight — P2
 
@@ -837,12 +848,13 @@ well it aims.
 **What each playability change measured.** The pilot as corrected after
 review, 15-minute runs; kills per minute is the mean of the runs with its
 standard error. "All" is the game after the first five playability changes;
-the last four rows follow the changes after it, each on top of the one
-before ("Enemies fly twitchily", "Aim assist for the gun"). The first figure is the
+the last two rows are `main` after them and the game after the next three
+("Enemies fly twitchily", "Aim assist for the gun", with the fight held at a
+sane altitude: see "Where the fight is"). The first figure is the
 author's campaign; where a reviewer re-ran a variant independently, theirs
 follows after a slash.
 
-| game | runs | kills per minute | gun kills | hits per round | missiles without a lock | first kill, median |
+| game | runs | kills per minute | gun kills | hits per round | missiles without a lock | first kill (median, or lives with one inside 10 s) |
 |---|---|---|---|---|---|---|
 | before any of it (56841cd) | 8 | 0.67 ± 0.09 / 0.50 ± 0.12 | 3 in 2 h | 1.06% | 26% | 68.8 s |
 | lock-only missiles alone | 8 | 0.57 ± 0.09 | 4 in 2 h | 0.59% | 0 | 41.1 s |
@@ -854,10 +866,8 @@ follows after a slash.
 | all, at 120°/s | 16 | 1.09 ± 0.09 | 9 in 4 h | 5.08% | 0 | 8.4 s |
 | all, at 150°/s | 16 | 1.14 ± 0.07 / 1.05 ± 0.09 | 11 in 4 h | 4.21% | 0 | 14.9 s |
 | all, with unguided fire put back | 16 | 0.92 ± 0.08 / 1.10 ± 0.08 | 10 in 4 h | 4.92% | 9% | 27.1 s |
-| `main` after all of it (170dbe1), re-run | 8 | 0.91 ± 0.11 | 5 in 2 h | 3.27% | 0 | 26.6 s |
-| then enemies on a flight model with limits | 8 | 2.10 ± 0.23 | 4 in 2 h | 7.72% | 0 | 21.8 s |
-| then flares, both ways | 16 | 1.37 ± 0.12 | 12 in 4 h | 6.47% | 0 | 9.3 s |
-| then the aim pull | 16 | 1.63 ± 0.10 | 32 in 4 h | 9.04% | 0 | 8.4 s |
+| `main` after all of it (170dbe1), re-run | 16 | 0.85 ± 0.08 | 7 in 4 h | 5.35% | 0 | 13 of 47 lives inside 10 s |
+| then the enemy flight model, flares and aim pull | 16 | 1.48 ± 0.11 | 33 in 4 h | 8.23% | 0 | 7 of 21 inside 10 s |
 
 The two campaigns agree in direction more often than in size, and the same
 game differs between them by up to 0.2 kills a minute. Read accordingly:
@@ -870,9 +880,9 @@ game differs between them by up to 0.2 kills a minute. Read accordingly:
   aim pull, and 8 an hour with it. Missiles make nearly every kill. The round
   assist alone did not measurably help; the aim pull did ("Aim assist for the
   gun").
-- **The enemy flight model made the game much easier, and flares won back
-  about three-fifths of it**: 0.91 to 2.10 to 1.37 kills a minute. Why, and the
-  runs that isolate it, are in "Enemies fly twitchily".
+- **The enemy flight model, flares and aim pull together made the game much
+  easier**: 0.85 to 1.48 kills a minute, and 31 deaths in four hours to 5.
+  Which part does what is in "Enemies fly twitchily".
 - **Lock-only missiles: no effect on the kill rate was resolved.** The author's
   campaign found none (0.93 against 0.92 with unguided fire put back). The
   reviewer's favoured unguided fire (0.83 against 1.10; difference −0.27, 95%
@@ -884,8 +894,9 @@ game differs between them by up to 0.2 kills a minute. Read accordingly:
   minute under the old roll, and no difference was detected at 150°/s. The
   playtest found 210°/s a bit twitchy. "The flight model allows 30+ G" has the
   detail.
-- **This pilot rarely gets past wave 3.** In the game as it stands, 32 of 50
-  lives reached wave 2, 11 reached wave 3 and 2 reached wave 4. The soak bot,
+- **On `main` this pilot rarely gets past wave 3**: 10 of 47 lives reached
+  wave 3 and 1 reached wave 4. With the enemy flight model, flares and aim
+  pull, 17 of 21 reached wave 4 and 2 reached wave 6. The soak bot,
   on the game before any of this, reached wave 4 in 9 of 20 lives and killed
   3.6 enemies a minute, 2.4 of them with the gun.
 

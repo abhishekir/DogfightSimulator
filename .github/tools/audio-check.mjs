@@ -232,6 +232,7 @@ check('rack-empty cue 4..14 dB above the engine', within(rel('rack empty'), 4, 1
 check('rack-empty cue pressed twice in 0.1 s plays once', Math.abs(m.rackEmptyTwice) < 0.2, m.rackEmptyTwice);
 check('flares 4..14 dB above the engine', within(rel('flares'), 4, 14), rel('flares'));
 check('missile warning 4..14 dB above the engine', within(rel('missile warning, far'), 4, 14), rel('missile warning, far'));
+check('the round warning sounds (so the next check compares two sounds)', m.levels['round warning'].dBA > -60, m.levels['round warning'].dBA);
 check('missile warning above the round warning (it is the bigger threat)', rel('missile warning, far') > rel('round warning'), [rel('round warning'), rel('missile warning, far')]);
 check('missile warning beeps about 5/s far out and 12/s close in', within(m['beeps/s missile warning, far'], 4, 6.5) && within(m['beeps/s missile warning, close'], 10, 13),
       [m['beeps/s missile warning, far'], m['beeps/s missile warning, close']]);

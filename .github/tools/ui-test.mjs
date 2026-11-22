@@ -16,7 +16,7 @@ import { openGame, exposeSound, splice, outDir } from './lib.mjs';
 
 const game = await openGame({ transform: h => splice(exposeSound(h), 'function checkGameOver(){',
   'window.__pj=playerJet;window.__pl=player;window.__st=()=>({gameOver,paused,gameStarted,score});' +
-  'window.__mt=()=>missileThreat;window.__aimMissile=d=>{const f=new THREE.Vector3(0,0,-1).applyQuaternion(playerJet.quaternion),' +
+  'window.__mt=()=>missileThreat;window.__gt=()=>gameTime;window.__mp=missilePool;window.__aimMissile=d=>{const f=new THREE.Vector3(0,0,-1).applyQuaternion(playerJet.quaternion),' +
   'p=playerJet.position.clone().addScaledVector(f,d);return !!spawnMissile(p,f.clone().negate(),new THREE.Vector3(),{mesh:playerJet,alive:true},true)};' +
   'function checkGameOver(){') });
 const p = game.page, out = await outDir();
@@ -113,24 +113,44 @@ await p.keyboard.up('KeyF');
 check('an empty rack stays empty', await ev(() => window.__pl.missileAmmo) === 0 && before < 0);
 await ev(() => { window.__pl.missileAmmo = 12; });
 
-// Flares: C drops a salvo, with its sound, and one press is one salvo.
-const flares0 = await ev(() => window.__pl.flares);
+// Flares: one press of C drops one salvo, with its sound. Hold it until the salvo has gone,
+// let go, and wait past the 0.6 s cooldown in game time: exactly one salvo spent.
+const flares0 = await ev(() => { window.__gt0 = window.__gt(); return window.__pl.flares; });
 await p.keyboard.down('KeyC');
-check('C drops a salvo of flares', await until(() => window.__pl.flares < 8, 10000), [flares0, await ev(() => window.__pl.flares)]);
+await until(() => window.__pl.flares < 8, 10000);
 await p.keyboard.up('KeyC');
+await until(() => window.__gt() > window.__gt0 + 1.5, 30000);
+check('one press of C drops one salvo', flares0 === 8 && await ev(() => window.__pl.flares) === 7, [flares0, await ev(() => window.__pl.flares)]);
 check('the flares sound', await ev(() => window.__snd._lastFlares > 0), await ev(() => window.__snd._lastFlares));
 
-// A missile tracking the player raises the warning, and its tone beeps.
+// A missile tracking the player raises the warning, and its tone beeps: sampled once a game
+// frame over a game-second (about five beeps; software rendering runs the game far slower
+// than the wall clock), it must be seen both on and off. When the missile is gone (here
+// taken out of play, as one that hits, expires or is decoyed is), the warning and tone stop.
 await ev(() => window.__aimMissile(1500));
 check('a missile tracking the player raises the warning', await until(() => window.__mt() > 0, 15000), await ev(() => window.__mt()));
-check('the missile warning tone beeps', await until(() => window.__snd.mslGain.gain.value > 0, 15000), await ev(() => window.__snd.mslGain.gain.value));
+const tone = { on: 0, off: 0 };
+for (const [t0, wall] = [await ev(() => window.__gt()), Date.now()]; Date.now() - wall < 90000;) {
+  const s = await ev(() => ({ t: window.__gt(), on: window.__snd.mslGain.gain.value > 0 }));
+  if (s.t !== tone.last) { tone.last = s.t; s.on ? tone.on++ : tone.off++; }
+  if (s.t > t0 + 1) break; await p.waitForTimeout(50);
+}
+delete tone.last;
+check('the missile warning tone beeps (heard on and off)', tone.on > 0 && tone.off > 0, tone);
+await ev(() => { for (const m of window.__mp) if (m.userData.active && m.userData.isEnemy) { m.userData.active = false; m.visible = false; } });
+check('the warning clears when the missile is gone', await until(() => window.__mt() === 0, 15000), await ev(() => window.__mt()));
+check('and its tone stops', await until(() => window.__snd.mslGain.gain.value === 0, 15000), await ev(() => window.__snd.mslGain.gain.value));
 
-// Crash into the ground while firing.
+// Crash into the ground while firing, with a missile warning sounding: at game over the
+// warning tone must stop with everything else.
+await ev(() => window.__aimMissile(2500));
+await until(() => window.__mt() > 0, 15000);
 await p.keyboard.down('Space');
 await ev(() => { window.__pj.position.y = -50; });
 check('ground crash ends the game', await until(() => window.__st().gameOver, 30000));
 await p.screenshot({ path: join(out, 'ui-crash.png') });
 check('gun audio stopped at game over', await until(() => !window.__snd._gun, 5000));
+check('missile warning tone stopped at game over', await until(() => window.__snd.mslGain.gain.value === 0, 5000), await ev(() => window.__snd.mslGain.gain.value));
 await p.keyboard.up('Space');
 check('game-over screen appears', await until(() => getComputedStyle(document.getElementById('game-over')).display !== 'none', 120000));
 await p.screenshot({ path: join(out, 'ui-gameover.png') });

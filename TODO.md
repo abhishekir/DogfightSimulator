@@ -78,19 +78,35 @@ Where the gameplay lives, for anyone changing how the game plays:
   Each state only chooses a point to fly at, how keenly to turn for it and a
   speed (`speedCmd`); `flyEnemy` flies there. It rolls until its lift points
   where the turn needs it, then pulls with that lift, so turns start with a
-  roll; the nose turns at most 47–57°/s and the roll at most 169–228°/s (both
-  rising with skill, under the player's 60°/s pitch and 270°/s), and the speed
-  flown (`currentSpeed`) follows the command at up to 15 m/s² faster and
-  18 m/s² slower. It pulls up for the ground 4 s ahead, keeping 150 m clear.
-  Enemies spawn pointing at the player. The extend state's speed is therefore a
+  roll; the nose turns at most 45–57°/s and the roll at most 161–228°/s (both
+  rising with skill, which starts at 0.2 on wave 1; under the player's 60°/s
+  pitch and 270°/s), and the speed flown (`currentSpeed`) follows the command
+  at up to 15 m/s² faster and 18 m/s² slower. It is integrated in substeps of
+  at most 1/120 s, so it flies the same at 30 fps as at 60. For the ground 4 s
+  ahead it blends a 35° climb into the direction it wants, starting at 220 m
+  clear and completely by 60 m, continuously, so the aim never jumps (an
+  earlier version switched to a climb below 150 m and chattered). Enemies
+  spawn pointing at the player. The extend state's speed is therefore a
   command it seldom reaches in 3–4 s.
+- **Where the fight is** (`enemyAltitudeBias`, `FIGHT_AGL`). Every height the
+  AI picks is relative to the player, and climbing costs neither side any
+  speed, so the two can lead each other upward. With enemies that turn within
+  limits they did: the person-like pilot's fight drifted to 10–60 km. Above
+  2,500 m over the ground the enemies now set up below the player instead, up
+  to 800 m below, and extend level or downward. `soak.mjs` reports the
+  player's altitude, so drift shows in the figures.
 - **Flares** (`dropFlares`, `updateFlares`). A salvo is two decoys that shed
   the aircraft's speed, fall and burn out in about 2.6 s. Every missile
   tracking the aircraft that dropped it, within 2 km and with a flare inside
   1 rad of its heading, is pulled onto a flare with a chance per salvo:
   `FLARE_DECOY_ENEMY` (0.35) for an enemy's against the player's missile,
   `FLARE_DECOY_PLAYER` (0.7) for the player's against an enemy's. A missile
-  whose flare burns out flies on unguided. An enemy carries 3 salvos and drops
+  whose flare burns out flies on unguided, and is still hit-tested against
+  every aircraft, so it can still hit the one it was pulled off: in
+  `flares.mjs`'s tail chase about 40% of decoyed player missiles did, flying on
+  along the enemy's straight track, so the 0.35 knob does less than it reads
+  (a review measured it). A salvo the pool cannot supply is not spent. An enemy
+  carries 3 salvos and drops
   one every 0.7 s once a player missile is tracking it inside 1,200 m, after a
   reaction time of 0.25–0.85 s that shortens with skill. The player has 8 on C,
   one every 0.6 s while it is held, reloaded when a wave is cleared; the

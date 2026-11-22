@@ -73,7 +73,10 @@ before/after comparison is done.
   `--pilot person` flies the person-like pilot (`person.mjs`: steers by the
   HUD, with a reaction delay and aim noise) instead, and for either pilot it
   reports how hard the game was: time to first kill, gun and missile kills per
-  minute, hits per round, missiles fired without a lock, deaths per wave.
+  minute, hits per round, missiles fired without a lock, deaths per wave, and
+  where the fight was (the jet's altitude: median, 90th percentile, highest,
+  time above 5 and 10 km). A fight that has drifted out of the world changes
+  every other figure, so look at that row first.
   `--tag` saves those figures; `figures.mjs <tag> <tag>` pools tagged runs and
   sets them side by side with their standard errors, and `track.mjs` checks
   the pilot's tracking against a target flying a straight line.
@@ -95,11 +98,14 @@ before/after comparison is done.
 - `handling.mjs` — holds each control key from rest in the game loop at 60 and
   30 fps and reports the steady rate, the time to 63% of it and to 90°, and the
   overrun after release; fails if the roll is not 90° in about 0.5 s at both.
-- `enemy-flight.mjs [--minutes 5] [--fps 60] [--check]` — samples every live
-  enemy every frame while the person-like pilot fights, and reports how fast
-  their noses turn, how fast they roll, how hard their speed changes
-  and how often the ground rules move them. `--check` fails outside the limits
-  in TODO.md's "Enemies fly twitchily". Run it at 30 as well as 60 fps.
+- `enemy-flight.mjs [--minutes 5] [--fps 60] [--low] [--check]` — samples every
+  live enemy every frame while the person-like pilot fights, and reports how
+  fast their noses turn, how fast they roll, how hard their speed changes, how
+  often their roll reverses (snaps between frames, rocks within 0.5 s), how
+  often they avoid terrain and how often the ground rules move them. `--low`
+  holds the player within 400 m of the ground, which is the only way the
+  terrain code runs. `--check` fails outside the limits in TODO.md's "Enemies
+  fly twitchily". Run it at 30 as well as 60 fps, with and without `--low`.
 - `flares.mjs [--trials 60] [--fps 60]` — fires missiles both ways, with
   flares and without, and reports how often they hit: an enemy missile at the
   player, who taps C inside 700 m, and the player's at an enemy held flying

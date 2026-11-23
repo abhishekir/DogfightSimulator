@@ -35,7 +35,7 @@
  *
  * --check fails the run unless the enemies stay inside the limits that task sets: nose
  * turn rate at most 60 deg/s (the player's pitch rate), roll rate at most 270 deg/s, speed
- * change at most 2 g, nothing lifted, and at most 5 snaps and 28 rocks per enemy-minute (see
+ * change at most 2 g, nothing lifted, and at most 5 snaps and 18 rocks per enemy-minute (see
  * LIMITS). Snaps are counted between frames, so they come easier at 30 fps; run both, and
  * with --low, which is where the terrain code runs. Without it the tool only measures. Exits 1 on a
  * failed check or a page error.
@@ -44,10 +44,12 @@ import { openGame, stepper, arg, flag } from './lib.mjs';
 import { installPerson, PERSON } from './person.mjs';
 
 const MINUTES = Number(arg('minutes', 5)), FPS = Number(arg('fps', 60)), CHECK = flag('check'), LOW = flag('low');
-// Snaps and rocks: some rocking is ordinary flying (13-16 rocks per enemy-minute at altitude,
-// 19-22 in a low fight, at 60 and at 30 fps). When the terrain pull-up switched on and off at
-// 150 m, a low fight at 30 fps gave 37 rocks and 24 snaps, against 25 and 0 at 60.
-const LIMITS = { turnDegS: 60, rollDegS: 270, speedChangeG: 2, snapsPerMin: 5, rocksPerMin: 28 };
+// Snaps and rocks: some rocking is ordinary flying (3-8 rocks per enemy-minute at altitude,
+// 9-13 in a low fight, at 60 and at 30 fps). When the terrain pull-up switched on and off at
+// 150 m, a low fight gave 27-37 rocks and 16-26 snaps at 30 fps, and 14-18 and 0 at 60.
+// (Rocks were miscounted until a review found the frame's nose turn rate shadowing the
+// clock; figures quoted before that, 13-37, are not comparable.)
+const LIMITS = { turnDegS: 60, rollDegS: 270, speedChangeG: 2, snapsPerMin: 5, rocksPerMin: 18 };
 const game = await openGame({ transform: stepper, viewport: { width: 1280, height: 720 } });
 const p = game.page;
 await p.waitForFunction(() => window.__g, null, { timeout: 90000 });
@@ -66,12 +68,12 @@ const r = await p.evaluate(([minutes, fps, low]) => {
       const q = e.mesh.quaternion, pos = e.mesh.position, o = prev.get(e);
       f.set(0, 0, -1).applyQuaternion(q);
       if (o) {
-        const t = Math.acos(Math.min(1, f.dot(o.f))) / dt * deg;
+        const noseDegS = Math.acos(Math.min(1, f.dot(o.f))) / dt * deg;   // not `t`: that is the clock
         dq.copy(o.q).invert().multiply(q);                       // last frame's attitude to this one's
         const rl = Math.abs(2 * Math.atan2(dq.z, dq.w));
-        turn.push(t); roll.push(Math.min(rl, 2 * Math.PI - rl) / dt * deg);
+        turn.push(noseDegS); roll.push(Math.min(rl, 2 * Math.PI - rl) / dt * deg);
         speed.push(Math.abs(e.currentSpeed - o.speed) / dt / 9.81); jump = Math.max(jump, Math.abs(e.currentSpeed - o.speed));
-        (byState[e.state] ||= []).push(t);
+        (byState[e.state] ||= []).push(noseDegS);
         if (((pos.y - o.y) - f.y * e.currentSpeed * dt) / dt > 60) lifted++;
         if (e.ground > 0) groundFrames++;
         // A roll reversal: the roll rate's sign flips while it is above 0.5 rad/s either side.

@@ -51,7 +51,9 @@
  *    off the marker of a target crossing at 60 m/s at 600 m, and then left alone with the
  *    trigger held: the lead point must come inside the round assist's cone within 0.6 s and
  *    stay there, and the target must take hits. With the trigger up, or with the marker
- *    outside the pull's cone, the nose must not move. (Sections 1-5 run with it held off:
+ *    outside the pull's cone, the nose must not move. Firing at a low target in a shallow
+ *    dive over hills, on a path that clears the ground without the pull, the pull must not
+ *    take the jet into it (it turns the nose down only with 150 m clear ahead). (Sections 1-5 run with it held off:
  *    they put the cross exactly where they mean it to be.)
  *
  * --dt runs the simulation at another frame time (1/30 for 30 fps). Exits 1 on a failed
@@ -72,7 +74,8 @@ const transform = html => {
   if (html.includes(PULL)) html = splice(html, PULL, "if(keys['Space']&&GUN_PULL_MAX>0&&!window.__noPull){");
   return splice(html, 'window.__g = {', `window.__x = { gunSight, GUN_ORIGIN, commandedSpeed, GUN_MUZZLE_SPEED, GUN_HIT_RADIUS, GUN_MUZZLE_OFFSET,
   assist: typeof GUN_ASSIST === 'number' ? GUN_ASSIST : 0, gunSolution: typeof gunSolution === 'function' ? gunSolution : null,
-  pull: typeof GUN_PULL_CONE === 'number' && GUN_PULL_MAX > 0 ? { cone: GUN_PULL_CONE, gain: GUN_PULL_GAIN, max: GUN_PULL_MAX } : null };\nwindow.__g = {`);
+  pull: typeof GUN_PULL_CONE === 'number' && GUN_PULL_MAX > 0 ? { cone: GUN_PULL_CONE, gain: GUN_PULL_GAIN, max: GUN_PULL_MAX } : null,
+  updatePlayer, updateParticles };\nwindow.__g = {`);
 };
 const game = await openGame({ transform, viewport: { width: 1280, height: 720 } });
 const p = game.page;
@@ -291,6 +294,22 @@ if (PULL) {
         endOffDeg: +(offs[offs.length - 1] * deg).toFixed(2) };
     };
     const out = { firing: run(3 / deg, true, 1.5), triggerUp: run(3 / deg, false, 0.5), outsideCone: run(X.pull.cone * 1.6, true, 0.5) };
+    // Low over hills: a target 200 m/s ahead and below, the jet in a 1-degree dive 52 m above
+    // it, trigger held 8 s. Only the jet is stepped (updatePlayer), and the target moved by
+    // hand, so nothing but the pull can differ. Without the pull this path clears the ground
+    // by about 9.5 m; the pull used to put the jet into it (a review found contact at 1.4 s).
+    const low = noPull => {
+      const e = t.target(600, [0, 0, 0]); window.__noPull = noPull;
+      e.velocity.set(0, 0, -200); e.mesh.position.set(-9840, 94.76822046713274, -1800);
+      G.jet.position.set(-9840, 147.52381526930236, -1200); G.jet.quaternion.setFromAxisAngle(new T.Vector3(1, 0, 0), -Math.PI / 180);
+      G.player.hp = 100; G.player.throttle = 0.7; G.player.velocity.set(0, 0, -327).applyQuaternion(G.jet.quaternion);
+      G.player.pitchRate = G.player.yawRate = G.player.rollRate = 0; G.keys.Space = true;
+      let minAGL = Infinity, contactAt = null;
+      for (let i = 0; i < Math.round(8 / dt); i++) { X.updatePlayer(dt); X.updateParticles(dt); e.mesh.position.addScaledVector(e.velocity, dt);
+        const p = G.jet.position; minAGL = Math.min(minAGL, p.y - G.ground(p.x, p.z)); if (G.player.onGround && contactAt === null) contactAt = +(i * dt).toFixed(3); }
+      G.keys.Space = false; return { minAGL: +minAGL.toFixed(2), contactAt, hp: +G.player.hp.toFixed(1) };
+    };
+    out.lowWithout = low(true); out.lowWith = low(false);
     window.__noPull = true; return out;
   }, [DT, ASSIST]);
   console.log(`\naim pull: cone ${(PULL.cone * 180 / Math.PI).toFixed(1)} deg, ${PULL.gain}/s, at most ${(PULL.max * 180 / Math.PI).toFixed(0)} deg/s; started 3 deg off the marker at 600 m, target crossing at 60 m/s`);
@@ -298,6 +317,8 @@ if (PULL) {
     pull.firing.settledAfterS !== null && pull.firing.settledAfterS <= 0.6 && pull.firing.hits > 20, pull.firing);
   check('with the trigger up the pull does nothing', pull.triggerUp.turnedDeg < 0.01, pull.triggerUp);
   check('with the marker outside the pull\'s cone it does nothing', pull.outsideCone.turnedDeg < 0.01, pull.outsideCone);
+  check('firing at a low target in a shallow dive, the pull never takes the jet into the ground (a path that clears it without the pull)',
+    pull.lowWithout.contactAt === null && pull.lowWith.contactAt === null, { without: pull.lowWithout, with: pull.lowWith });
 } else console.log('\nno aim pull in this page (GUN_PULL_CONE): its checks skipped');
 
 await game.close();

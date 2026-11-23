@@ -16,6 +16,7 @@
  *    which would leave nothing for flares to show. A hit is the 50 HP a missile does. What
  *    flares and the rest of its flying do together in a fight is for the soak with the
  *    person-like pilot to say.
+ * It also checks that a salvo is all or nothing when the flare pool is nearly full.
  * Reports the hit rate of each with its binomial standard error, and checks that flares
  * cut each by at least half of what the game's decoy chance would make them (an enemy may
  * drop several salvos, the player one) and that, without flares, missiles mostly hit; the
@@ -87,9 +88,23 @@ const r = await p.evaluate(([trials, fps]) => {
     }
     return { hits, salvos };
   }
+  // A salvo is all or nothing: with the pool full, or one flare short of a salvo, C spends
+  // nothing; with a salvo's worth free it spends one salvo and lights exactly that many.
+  function salvoFromPool() {
+    level(); pl.hp = 1e9; pl.flares = 8; pl.flareCooldown = 0;
+    const active = () => G.flarePool.filter(f => f.userData.active).length, out = {};
+    for (const f of G.flarePool) { const u = f.userData; u.active = true; u.decoy.alive = true; u.life = u.maxLife = 100; }
+    const press = () => { pl.flareCooldown = 0; G.keys.KeyC = true; G.frame(dt, false); G.keys.KeyC = false; return { spent: 8 - pl.flares, active: active() }; };
+    out.noneFree = press();
+    G.flarePool[0].userData.active = false; out.oneFree = press();
+    G.flarePool[1].userData.active = false; out.twoFree = press();
+    for (const f of G.flarePool) { f.userData.active = false; f.userData.decoy.alive = false; f.visible = false; }
+    pl.flares = 8; pl.hp = 100; return out;
+  }
+  const salvo = salvoFromPool();
   const playerWith = atPlayer(true), playerWithout = atPlayer(false);
   const enemyWith = atEnemy(true), enemyWithout = atEnemy(false);
-  return { playerWith, playerWithout, enemyWith, enemyWithout,
+  return { salvo, playerWith, playerWithout, enemyWith, enemyWithout,
     chance: typeof window.__g.flarePool === 'object' };
 }, [TRIALS, FPS]);
 await game.close();
@@ -109,6 +124,8 @@ check('without flares, a player missile mostly hits an enemy', rate(r.enemyWitho
 check('the player\'s flares cut the enemy missile\'s hits', r.playerWith < r.playerWithout * 0.65, [r.playerWith, r.playerWithout]);
 check('an enemy\'s flares cut the player missile\'s hits', r.enemyWith.hits < r.enemyWithout.hits * 0.8, [r.enemyWith.hits, r.enemyWithout.hits]);
 check('an enemy drops flares at a missile tracking it', r.enemyWith.salvos > 0, r.enemyWith.salvos);
+check('a salvo is all or nothing: none spent with 0 or 1 flare free, one with 2', r.salvo.noneFree.spent === 0 && r.salvo.oneFree.spent === 0
+  && r.salvo.twoFree.spent === 1 && r.salvo.twoFree.active === r.salvo.oneFree.active + 1, r.salvo);   // one more freed, two lit
 const errors = [...game.errors], failed = results.filter(ok => !ok).length;
 for (const [k, n] of errors) console.error(`  ${k} x${n}`);
 if (failed || errors.length) { console.error(`\nFAIL: ${failed} of ${results.length} checks failed, ${errors.length} page errors`); process.exit(1); }

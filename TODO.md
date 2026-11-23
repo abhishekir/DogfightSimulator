@@ -170,8 +170,11 @@ Where the gameplay lives, for anyone changing how the game plays:
   Aim pull: while the trigger is held and the lead point is within
   `GUN_PULL_CONE` (5°) of the nose, the nose is turned onto it, closing the
   angle at `GUN_PULL_GAIN` (6) per second and at most `GUN_PULL_MAX` (15°/s).
-  It does nothing with the trigger up or the marker further off. See "Aim
-  assist for the gun" for what each does.
+  It does nothing with the trigger up or the marker further off, and never
+  turns the nose down while the ground within 3 s along the path is closer than
+  `GUN_PULL_GROUND` (150 m): a review found it could fly the jet into the hills
+  firing at a low target in a shallow dive. See "Aim assist for the gun" for
+  what each does.
 
 ### Verifying a change
 
@@ -269,12 +272,20 @@ themselves would leave the speed changing less often.
 In a low fight (`enemy-flight.mjs --low`) the terrain code runs on about a
 quarter of enemy-frames. A review found that the first version of it, which
 switched to a climb below 150 m, chattered, and that the roll then differed
-between frame rates: rocks (a roll reversal within 0.5 s of the one before)
-37 per enemy-minute at 30 fps against 25 at 60, and snaps (a reversal between
-two frames) 24 against 0. With the climb blended in continuously and the
-flight integrated in 1/120 s substeps: rocks 19–22 at either frame rate (three
-runs each; 13–16 at altitude, which is ordinary turning), snaps 2–3 at 30 fps
-and 0 at 60. `--check` holds them under 28 and 5.
+between frame rates. Measured as rocks (a roll reversal within 0.5 s of the one
+before) and snaps (a reversal between two frames), per enemy-minute, two runs
+each:
+
+| | rocks, 60 fps | rocks, 30 fps | snaps, 30 fps |
+|---|---|---|---|
+| switched climb, low fight | 14–18 | 27–37 | 16–26 |
+| blended climb and 1/120 s substeps, low fight | 9–11 | 9–13 | 3 |
+| either, at altitude (no terrain code) | 4–8 | 3–7 | under 1 |
+
+Snaps at 60 fps are 0 throughout. `--check` holds rocks under 18 and snaps
+under 5. (The rock counts first quoted for this, 13–37, were miscounted: the
+tool compared the nose's turn rate where it meant the time since the last
+reversal. A third review found it.)
 
 **The game is much easier with all of it.** The first measurements (0.91 to
 2.10 kills a minute for the flight model, back to 1.37 with flares, and the
@@ -362,7 +373,10 @@ control they take from the player:
   15°/s), after the first playtests found it hard to keep the cross on the
   marker. `gunsight.mjs` checks it: from 3° off, the lead point is inside the
   round assist's cone in 0.13 s at 60 and 30 fps and stays there, and with the
-  trigger up or the marker outside the cone the nose does not move. In
+  trigger up or the marker outside the cone the nose does not move; and firing
+  at a low target in a shallow dive over hills, on a path that clears the
+  ground by 9.5 m without the pull, the jet still clears it with the pull (it
+  struck the ground at 1.4 s before the terrain guard). In
   `track.mjs` (with flares and the enemy flight model in the game), the pilot's
   median error from the marker fell from 1.6–2.5° to 0.7–1.1° in four of five
   cases and its hits rose from 20–256 to 833–1,439 in 20 s; a target crossing

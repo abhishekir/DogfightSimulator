@@ -113,7 +113,9 @@ Where the gameplay lives, for anyone changing how the game plays:
   flight-data panel shows them (`FLR`).
 - **Missile warning** (`updateThreatDetection`, `missileThreat`). An enemy
   missile tracking the player inside 3 km puts MISSILE and its range below the
-  centre, with "C — FLARES" and an arrow toward it, and a square-wave beep in
+  centre, with "C — FLARES" and an arrow toward it on screen (`hudBearing`: the
+  chase camera does not roll, so a bearing in the jet's own frame is wrong in a
+  bank), and a square-wave beep in
   the headset, 5 a second at 3 km rising to 12 close in. It stops when the
   missile is decoyed. (Before it, nothing warned of a missile: INCOMING is
   enemy rounds within 120 m.) `.github/tools/flares.mjs` measures what flares
@@ -499,6 +501,22 @@ them). The allocation check is a sampling heap profile of 20,000 calls, after
 the function (`--self-test-leak`). Without the warm-up the same profile
 charges the function with boxed numbers from its unoptimised runs, which say
 nothing about play; it was first misread that way.
+
+**The warning arrows point at the threat on screen now.** The missile
+warning's arrow and INCOMING's chevron took their angle from the jet's own
+right and up, but the chase camera keeps world up and does not roll with the
+jet, so the screen's axes are not the jet's. In a bank the arrows pointed up to
+180° wrong: banked 90° right, a missile straight below pointed right. INCOMING's
+chevron had its up and down flipped as well, in level flight too: a burst from
+below pointed up, one from the right pointed right. Both now use `hudBearing`,
+the same rule as the direction indicators, about the screen centre as before,
+and the chevron aims at the round's position (`threatPos`) rather than a bare
+direction. `indicators.mjs` checks both arrows, by recording what the HUD
+draws, against the threat's screen point at five banks (level, 45°, 90° either
+way, inverted) and five world directions: the code before this fails 45 of the
+50 cases, by up to 180°; now the worst is under 0.1°. The attitude indicator
+still rotates by the jet's roll: it shows the jet's bank, and is not an overlay
+on the world's horizon, which in this view stays level.
 
 **What is left:** the playtest: whether the ring's radius, the arcs' sizes and
 the colour steps are useful rather than cluttered, and whether a hollow arc

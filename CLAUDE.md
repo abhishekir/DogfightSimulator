@@ -124,7 +124,9 @@ before/after comparison is done.
   already in the sight, at its bearing on screen and without mirroring behind
   the camera, coloured and sized by range, none overlapping another or a
   warning's text box, and no allocation in the function (a heap profile;
-  `--self-test-leak` plants one to prove it is caught). Renders every case at
+  `--self-test-leak` plants one to prove it is caught); and that the missile
+  warning's arrow and INCOMING's chevron point at the threat on screen with the
+  jet banked or inverted. Renders every case at
   800×600, 1366×625 and 1280×720 to `.github/tools/out/`; look at them after
   touching the HUD.
 

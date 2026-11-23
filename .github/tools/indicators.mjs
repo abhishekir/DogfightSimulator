@@ -58,7 +58,11 @@ const transform = html => {
   spawn(){ spawnEnemy({}); return enemies[enemies.length-1]; },
   clear(){ for(const e of enemies){ e.alive=false; scene.remove(e.mesh); } enemies.length=0; lockTarget=null; },
   snapCam(){ camInit=false; updateCamera(1/60); camera.updateMatrixWorld(); },
-  threat(inc, msl){ incomingThreat=!!inc; threatDir.set(.3,-.2,-1).normalize().applyQuaternion(playerJet.quaternion);
+  // Threats from world directions, for the warning arrows' check: an enemy round 100 m out
+  // (INCOMING) and a missile 1,400 m out, along incDir and mslDir from the jet.
+  threatWorld(incDir, mslDir){ incomingThreat=!!incDir; if(incDir) threatPos.set(...incDir).normalize().multiplyScalar(100).add(playerJet.position);
+    missileThreat=mslDir?1400:0; if(mslDir) missileThreatDir.set(...mslDir).normalize(); },
+  threat(inc, msl){ incomingThreat=!!inc; threatPos.set(.3,-.2,-1).normalize().applyQuaternion(playerJet.quaternion).multiplyScalar(100).add(playerJet.position);
     missileThreat=msl||0; missileThreatDir.set(-.6,-.3,.7).normalize().applyQuaternion(playerJet.quaternion); },
   draw(render){ drawHUD(); if(render) composer.render(); },
   sight: gunSight, nearest: findNearestEnemy,
@@ -192,6 +196,54 @@ for (const side of [600, -600]) {
   for (let i = 1; i < angs.length; i++) check(angDiff(angs[i], angs[i - 1]) < 10, `continuity, side ${side}: arc jumps from ${angs[i - 1].toFixed(1)}° to ${angs[i].toFixed(1)}°`);
   check(angs.every(a => angDiff(a, side > 0 ? 90 : -90) < 30), `continuity, side ${side}: arc not at the ${side > 0 ? 'right' : 'left'} throughout`);
 }
+
+// The warning arrows: the missile warning's arrow and INCOMING's chevron must point at the
+// threat as it is on screen, with the jet banked or inverted (the chase camera keeps world
+// up, so the screen does not roll with the jet). What the HUD draws is recorded by wrapping
+// its context: the rotation in force when each arrow's tip is drawn (moveTo(0,-78) for the
+// missile arrow, moveTo(0,-55) for the chevron) and the point it turns about. The threat is
+// put at 1,400 m (a missile) or 100 m (a round) along a world direction from the jet; the
+// expected angle is from that turning point to the threat's screen point as three.js
+// projects it, or, behind the camera, its direction in the camera's frame. The chevron is
+// only drawn with no missile warning up, so each arrow is checked on its own.
+await p.evaluate(() => { const c = document.getElementById('hud-canvas').getContext('2d'); let T = [0, 0], A = 0;
+  window.__arrows = {}; const tr = c.translate.bind(c), ro = c.rotate.bind(c), mv = c.moveTo.bind(c);
+  c.translate = (x, y) => { T = [x, y]; tr(x, y); }; c.rotate = a => { A = a; ro(a); };
+  c.moveTo = (x, y) => { if (x === 0 && (y === -78 || y === -55)) window.__arrows[y] = { a: A * 180 / Math.PI, ox: T[0], oy: T[1] }; mv(x, y); }; });
+{ const WORLD = { below: [0, -1, 0], above: [0, 1, 0], north: [0, 0, -1], east: [1, 0, 0], 'south-west, low': [-1, -.5, 1] };
+  let worst = 0;
+  for (const bank of [0, 45, 90, -90, 180]) for (const [wn, wd] of Object.entries(WORLD)) for (const kind of ['missile', 'incoming']) {
+    const r = await p.evaluate(([bank, wd, kind]) => { const X = window.__x, G = window.__g, T = G.THREE, j = G.jet, cam = G.camera;
+      X.clear();
+      // Level, heading east (the spawn's heading varies), then rolled about the nose.
+      j.quaternion.setFromEuler(new T.Euler(0, -Math.PI / 2, 0, 'YXZ')).multiply(new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 0, 1), -bank * Math.PI / 180));
+      j.updateMatrixWorld(); X.snapCam();
+      X.threatWorld(kind === 'incoming' ? wd : null, kind === 'missile' ? wd : null);
+      window.__arrows = {}; X.draw(false);
+      const rec = window.__arrows[kind === 'missile' ? -78 : -55]; if (!rec) return null;
+      const pt = new T.Vector3(...wd).normalize().multiplyScalar(kind === 'missile' ? 1400 : 100).add(j.position);
+      const loc = cam.worldToLocal(pt.clone());
+      let want;
+      if (loc.z < -1) { const v = pt.clone().project(cam), sx = (v.x * .5 + .5) * innerWidth, sy = (-v.y * .5 + .5) * innerHeight;
+        want = Math.atan2(sx - rec.ox, -(sy - rec.oy)) * 180 / Math.PI; }
+      else want = Math.atan2(loc.x, loc.y) * 180 / Math.PI;
+      X.threatWorld(null, null);
+      return { got: rec.a, want }; }, [bank, wd, kind]);
+    const tag = `${kind} arrow, banked ${bank}°, threat ${wn}`;
+    if (!check(r, `${tag}: no arrow drawn`)) continue;
+    const e = angDiff(r.got, r.want); worst = Math.max(worst, e);
+    check(e < 3, `${tag}: arrow at ${r.got.toFixed(0)}°, the threat is at ${r.want.toFixed(0)}° on screen (${e.toFixed(0)}° off)`);
+  }
+  console.log(`warning arrows: worst error ${worst.toFixed(1)}° over 5 banks x 5 world directions x 2 arrows`);
+  // Two to look at, banked 90° right at 1280x720: a missile from straight below in the world,
+  // and a round from straight above. On screen the arrows must point down and up; the jet's own
+  // axes would have put them to the sides.
+  if (RENDER) for (const [name, kind, wd] of [['missile-below', 'missile', [0, -1, 0]], ['incoming-above', 'incoming', [0, 1, 0]]]) {
+    await p.evaluate(([kind, wd]) => { const X = window.__x, G = window.__g, T = G.THREE, j = G.jet; X.clear();
+      j.quaternion.setFromEuler(new T.Euler(0, -Math.PI / 2, 0, 'YXZ')).multiply(new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 0, 1), -Math.PI / 2));
+      j.updateMatrixWorld(); X.snapCam(); X.threatWorld(kind === 'incoming' ? wd : null, kind === 'missile' ? wd : null); X.draw(true); }, [kind, wd]);
+    const f = join(OUT, `indicators-banked-${name}-1280x720.png`); await p.screenshot({ path: f });
+    await p.evaluate(() => window.__x.threatWorld(null, null)); } }
 
 // The ring against the gun ring at its widest: the sight's ring grows as the range falls.
 { await place([{ at: [60, 0, 0] }]); await p.evaluate(() => window.__x.draw(false));

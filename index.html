@@ -729,7 +729,7 @@ function getWaveConfig(w){return{count:Math.min(2+w,10),aggrMin:Math.min(.2+(w-1
 function startWave(w){const wc=getWaveConfig(w);waveTotal=wc.count;waveSpawned=0;waveKilled=0;waveState='active';waveSpawnDelay=0;waveDisplayText=`WAVE ${w}`;waveDisplayTimer=3}
 let sunDirection = new THREE.Vector3();
 let gForce = 1, screenShake = 0, hitFlash = 0, fovPulse = 0;
-let incomingThreat = false, threatDir = new THREE.Vector3();
+let incomingThreat = false, threatPos = new THREE.Vector3();
 let lockTarget = null, lockProgress = 0;
 // What the seeker is doing while F is held, for the HUD: null with F up, else 'search',
 // 'range' (a target in the cone but beyond lock range), 'locking', 'locked' or 'empty'.
@@ -3772,12 +3772,30 @@ function updateThreatDetection(){incomingThreat=false;
     const d=m.position.distanceTo(playerJet.position);if(d<md){md=d;missileThreat=d;missileThreatDir.subVectors(m.position,playerJet.position).normalize()}}
   for(const b of bulletPool){if(!b.userData.active||!b.userData.isEnemy)continue;
     const tp=new THREE.Vector3().subVectors(playerJet.position,b.position);const d=tp.length();
-    if(d>120)continue;if(b.userData.vel.clone().normalize().dot(tp.normalize())>.88){incomingThreat=true;threatDir.copy(tp).negate().normalize();break}}}
+    if(d>120)continue;if(b.userData.vel.clone().normalize().dot(tp.normalize())>.88){incomingThreat=true;threatPos.copy(b.position);break}}}
 
 function updateKillNotifications(dt){for(let i=killNotifications.length-1;i>=0;i--){killNotifications[i].timer-=dt;if(killNotifications[i].timer<=0)killNotifications.splice(i,1)}}
 
 /* ═══════════════════ HUD ═══════════════════ */
-const _hudR=new THREE.Vector3(),_hudU=new THREE.Vector3();
+const _hudV=new THREE.Vector3();
+
+// Where a world point lies on the HUD as seen from (ox,oy): its bearing on screen, in radians
+// clockwise from up. In front of the camera, the direction from (ox,oy) to the point's screen
+// position; behind it, the point's direction in the camera's frame, which is the limit of the
+// former as the point passes the edge of the screen, so a bearing neither jumps nor mirrors as
+// something goes behind. The chase camera keeps world up and does not roll with the jet, so
+// the jet's own axes are not the screen's: the warning arrows once took their angle from the
+// jet's right and up, and pointed up to 180 degrees wrong in a bank. Results go in _hb: the
+// bearing, whether the point is in front of the camera (1 or 0), and its screen position if
+// so, in a Float64Array, which holds numbers unboxed.
+// Reads camera.matrixWorldInverse, which gunSight brings up to date each frame before
+// anything calls this.
+const HB_A=0,HB_FRONT=1,HB_X=2,HB_Y=3,_hb=new Float64Array(4),_hbV=new THREE.Vector3();
+function hudBearing(p,ox,oy){const w=hudCanvas.width,h=hudCanvas.height,f=(h/2)/Math.tan(camera.fov*Math.PI/360);
+  _hbV.copy(p).applyMatrix4(camera.matrixWorldInverse);
+  if(_hbV.z<-1){const sx=w/2+f*_hbV.x/-_hbV.z,sy=h/2-f*_hbV.y/-_hbV.z;
+    _hb[HB_FRONT]=1;_hb[HB_X]=sx;_hb[HB_Y]=sy;_hb[HB_A]=Math.atan2(sx-ox,-(sy-oy))}
+  else{_hb[HB_FRONT]=0;_hb[HB_A]=Math.atan2(_hbV.x,_hbV.y)}}
 
 // Enemy direction indicators: an arc for every live enemy on a ring round the gun cross, at
 // its bearing, so the player can see where they all are without looking down at the radar.
@@ -3786,10 +3804,9 @@ const _hudR=new THREE.Vector3(),_hudU=new THREE.Vector3();
 // holds out to about 2 km, past lock range); each arc grows longer and thicker as its enemy
 // closes, to the radar's 3 km, and beyond that it stays short and dims. An enemy behind the
 // jet gets a hollow arc (two thin lines) instead of a solid one.
-// Bearing: an enemy in front of the camera is pointed at where it is on screen, from the gun
-// cross; one behind by its direction in the camera's frame, which is the limit the on-screen
-// direction tends to as the enemy passes the screen's edge, so the pointer does not jump or
-// mirror as it goes behind. With the camera above the jet, one dead astern points down.
+// Bearing: hudBearing from the gun cross, so the arc points at where the enemy is on screen,
+// and behind the camera does not jump or mirror. With the camera above the jet, one dead
+// astern points down.
 // An enemy already in the sight gets no arc: one on screen inside the ring, the one with the
 // target box (nearest, on screen) and the one under the lock diamond.
 // The ring sits outside the gun ring and its ticks, at least IND_RADIUS out. The warnings'
@@ -3802,26 +3819,23 @@ const IND_RADIUS=100,IND_GAP=26,IND_STEP=7,IND_TIERS=4,IND_FAR=3000,IND_GUN_RANG
 const _ind={a:new Float32Array(IND_MAX),len:new Float32Array(IND_MAX),th:new Float32Array(IND_MAX),d:new Float32Array(IND_MAX),
   rr:new Float32Array(IND_MAX),tier:new Int8Array(IND_MAX),behind:new Uint8Array(IND_MAX),order:new Int16Array(IND_MAX),col:new Array(IND_MAX).fill(''),
   n:0,R:0,gx:0,gy:0,keepTop:0};
-const _indV=new THREE.Vector3(),_indF=new THREE.Vector3();
+const _indF=new THREE.Vector3();
 function indicatorColour(d){return d<IND_GUN_RANGE?'#ff3b30':d<LOCK_RANGE?'#ffd21f':'#d2d8de'}
 function drawEnemyIndicators(gs,nearest,keepTop,keepHW){
-  const w=hudCanvas.width,h=hudCanvas.height,gx=gs.cross.x,gy=gs.cross.y,cx=w/2,cy=h/2;
-  const f=(h/2)/Math.tan(camera.fov*Math.PI/360),R=Math.min(Math.max(IND_RADIUS,gs.ring+IND_GAP),h*.42);
-  const I=_ind,view=camera.matrixWorldInverse;
+  const w=hudCanvas.width,h=hudCanvas.height,gx=gs.cross.x,gy=gs.cross.y,cx=w/2;
+  const R=Math.min(Math.max(IND_RADIUS,gs.ring+IND_GAP),h*.42),I=_ind;
   _indF.set(0,0,-1).applyQuaternion(playerJet.quaternion);
   let n=0;
   for(const e of enemies){if(!e.alive||n>=IND_MAX)continue;
     const p=e.mesh.position,d=p.distanceTo(playerJet.position);
-    _indV.copy(p).applyMatrix4(view);
-    let a;
-    if(_indV.z<-1){const sx=cx+f*_indV.x/-_indV.z,sy=cy-f*_indV.y/-_indV.z,dx=sx-gx,dy=sy-gy;
-      const onScreen=sx>=0&&sx<=w&&sy>=0&&sy<=h;
-      if(dx*dx+dy*dy<R*R||(onScreen&&(e===nearest||(e===lockTarget&&lockTarget.alive))))continue;
-      a=Math.atan2(dx,-dy)}
-    else a=Math.atan2(_indV.x,_indV.y);
+    hudBearing(p,gx,gy);const a=_hb[HB_A];
+    if(_hb[HB_FRONT]){const sx=_hb[HB_X],sy=_hb[HB_Y],dx=sx-gx,dy=sy-gy,onScreen=sx>=0&&sx<=w&&sy>=0&&sy<=h;
+      if(dx*dx+dy*dy<R*R||(onScreen&&(e===nearest||(e===lockTarget&&lockTarget.alive))))continue}
     const c=d>=IND_FAR?0:1-d/IND_FAR;
     I.a[n]=a;I.d[n]=d;I.len[n]=12+28*c;I.th[n]=2.5+2.5*c;I.col[n]=indicatorColour(d);
-    I.behind[n]=_indV.subVectors(p,playerJet.position).dot(_indF)<0?1:0;
+    // Behind the jet: from scalars rather than a vector written each enemy. With the write, a
+    // copy of this function compiled with hudBearing inlined allocated 36 B an enemy.
+    const J=playerJet.position;I.behind[n]=(p.x-J.x)*_indF.x+(p.y-J.y)*_indF.y+(p.z-J.z)*_indF.z<0?1:0;
     // Insertion into the order by distance, nearest first.
     let k=n;while(k>0&&I.d[I.order[k-1]]>d){I.order[k]=I.order[k-1];k--}I.order[k]=n;n++}
   I.n=n;I.R=R;I.gx=gx;I.gy=gy;I.keepTop=keepTop;
@@ -4034,8 +4048,9 @@ function drawHUD(){
     // Its chevron, 43-55 px out, would cross its own text with the box moved up for MISSILE;
     // the missile warning has its own arrow, so the chevron waits until that clears.
     if(!(missileThreat>0)){
-    _hudR.set(1,0,0).applyQuaternion(playerJet.quaternion);_hudU.set(0,1,0).applyQuaternion(playerJet.quaternion);
-    const ang2=Math.atan2(threatDir.dot(_hudR),-threatDir.dot(_hudU));
+    // It points at the round, as it is on screen (it used to flip up and down: a burst from
+    // below pointed up).
+    hudBearing(threatPos,cx,cy);const ang2=_hb[HB_A];
     hud.save();hud.translate(cx,cy);hud.rotate(ang2);hud.strokeStyle='#ff3300';hud.lineWidth=3;
     hud.beginPath();hud.moveTo(0,-55);hud.lineTo(-6,-43);hud.moveTo(0,-55);hud.lineTo(6,-43);hud.stroke();hud.restore()}}
 
@@ -4047,8 +4062,7 @@ function drawHUD(){
     hud.shadowColor='#ff0000';hud.shadowBlur=12;hud.fillText(`MISSILE ${Math.round(missileThreat)}m`,cx,y0+20);hud.shadowBlur=0;
     hud.font='bold 13px Courier New';hud.fillStyle=player.flares>0?'#fd6':'#f44';
     hud.fillText(player.flares>0?`C — FLARES (${player.flares})`:'NO FLARES — BREAK',cx,y0+37);hud.textAlign='left';
-    _hudR.set(1,0,0).applyQuaternion(playerJet.quaternion);_hudU.set(0,1,0).applyQuaternion(playerJet.quaternion);
-    const ma=Math.atan2(missileThreatDir.dot(_hudR),missileThreatDir.dot(_hudU));
+    hudBearing(_hudV.copy(missileThreatDir).multiplyScalar(missileThreat).add(playerJet.position),cx,cy);const ma=_hb[HB_A];
     hud.save();hud.translate(cx,cy);hud.rotate(ma);hud.fillStyle=on?'#ff2200':'#ffaa00';
     hud.beginPath();hud.moveTo(0,-78);hud.lineTo(-9,-62);hud.lineTo(9,-62);hud.closePath();hud.fill();hud.restore()}
 

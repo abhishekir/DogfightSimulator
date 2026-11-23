@@ -3778,6 +3778,86 @@ function updateKillNotifications(dt){for(let i=killNotifications.length-1;i>=0;i
 
 /* ═══════════════════ HUD ═══════════════════ */
 const _hudR=new THREE.Vector3(),_hudU=new THREE.Vector3();
+
+// Enemy direction indicators: an arc for every live enemy on a ring round the gun cross, at
+// its bearing, so the player can see where they all are without looking down at the radar.
+// Grey beyond missile lock range, yellow inside it, red inside the gun's practical reach
+// (IND_GUN_RANGE: the sight's own inRange is rounds reaching within their 2.5 s life, which
+// holds out to about 2 km, past lock range); each arc grows longer and thicker as its enemy
+// closes, to the radar's 3 km, and beyond that it stays short and dims. An enemy behind the
+// jet gets a hollow arc (two thin lines) instead of a solid one.
+// Bearing: an enemy in front of the camera is pointed at where it is on screen, from the gun
+// cross; one behind by its direction in the camera's frame, which is the limit the on-screen
+// direction tends to as the enemy passes the screen's edge, so the pointer does not jump or
+// mirror as it goes behind. With the camera above the jet, one dead astern points down.
+// An enemy already in the sight gets no arc: one on screen inside the ring, the one with the
+// target box (nearest, on screen) and the one under the lock diamond.
+// The ring sits outside the gun ring and its ticks, at least IND_RADIUS out. The warnings'
+// arrows (INCOMING's chevron 43-55 px out, the missile arrow 62-78 px) turn about the screen
+// centre, about 45 px below the gun cross at 720p, so pointing down the missile arrow can
+// cross the ring: arcs are a shape neither arrow has. Arcs that would overlap are stacked
+// outward, IND_STEP apart, nearest innermost.
+// No per-frame allocation: everything lives in the preallocated arrays below.
+const IND_RADIUS=100,IND_GAP=26,IND_STEP=7,IND_TIERS=4,IND_FAR=3000,IND_GUN_RANGE=1000,IND_MAX=32;
+const _ind={a:new Float32Array(IND_MAX),len:new Float32Array(IND_MAX),th:new Float32Array(IND_MAX),d:new Float32Array(IND_MAX),
+  rr:new Float32Array(IND_MAX),tier:new Int8Array(IND_MAX),behind:new Uint8Array(IND_MAX),order:new Int16Array(IND_MAX),col:new Array(IND_MAX).fill(''),
+  n:0,R:0,gx:0,gy:0,keepTop:0};
+const _indV=new THREE.Vector3(),_indF=new THREE.Vector3();
+function indicatorColour(d){return d<IND_GUN_RANGE?'#ff3b30':d<LOCK_RANGE?'#ffd21f':'#d2d8de'}
+function drawEnemyIndicators(gs,nearest,keepTop,keepHW){
+  const w=hudCanvas.width,h=hudCanvas.height,gx=gs.cross.x,gy=gs.cross.y,cx=w/2,cy=h/2;
+  const f=(h/2)/Math.tan(camera.fov*Math.PI/360),R=Math.min(Math.max(IND_RADIUS,gs.ring+IND_GAP),h*.42);
+  const I=_ind,view=camera.matrixWorldInverse;
+  _indF.set(0,0,-1).applyQuaternion(playerJet.quaternion);
+  let n=0;
+  for(const e of enemies){if(!e.alive||n>=IND_MAX)continue;
+    const p=e.mesh.position,d=p.distanceTo(playerJet.position);
+    _indV.copy(p).applyMatrix4(view);
+    let a;
+    if(_indV.z<-1){const sx=cx+f*_indV.x/-_indV.z,sy=cy-f*_indV.y/-_indV.z,dx=sx-gx,dy=sy-gy;
+      const onScreen=sx>=0&&sx<=w&&sy>=0&&sy<=h;
+      if(dx*dx+dy*dy<R*R||(onScreen&&(e===nearest||(e===lockTarget&&lockTarget.alive))))continue;
+      a=Math.atan2(dx,-dy)}
+    else a=Math.atan2(_indV.x,_indV.y);
+    const c=d>=IND_FAR?0:1-d/IND_FAR;
+    I.a[n]=a;I.d[n]=d;I.len[n]=12+28*c;I.th[n]=2.5+2.5*c;I.col[n]=indicatorColour(d);
+    I.behind[n]=_indV.subVectors(p,playerJet.position).dot(_indF)<0?1:0;
+    // Insertion into the order by distance, nearest first.
+    let k=n;while(k>0&&I.d[I.order[k-1]]>d){I.order[k]=I.order[k-1];k--}I.order[k]=n;n++}
+  I.n=n;I.R=R;I.gx=gx;I.gy=gy;I.keepTop=keepTop;
+  if(!n)return;
+  // Stack arcs that would overlap: each takes the innermost tier where it clears every arc
+  // already placed there by 3 px along the ring.
+  for(let q=0;q<n;q++){const i=I.order[q];let t=0;
+    for(;t<IND_TIERS-1;t++){const rr=R+t*IND_STEP;let clash=false;
+      for(let s=0;s<q&&!clash;s++){const j=I.order[s];if(I.tier[j]!==t)continue;
+        let da=Math.abs(I.a[i]-I.a[j]);if(da>Math.PI)da=Math.PI*2-da;
+        clash=da*rr<(I.len[i]+I.len[j])/2+3}
+      if(!clash)break}
+    I.tier[i]=t}
+  // While a warning's text box is up below the sight, an arc that would land on it is pulled
+  // in along its bearing, so the bearing stays true: the tiers keep their spacing, counted
+  // back from the box's edge, but none comes inside the gun ring's ticks (in a window too
+  // short for that, the arc stays on the box).
+  const rMin=gs.ring+20;
+  for(let q=0;q<n;q++){const i=I.order[q],ca=Math.cos(I.a[i]),t=I.tier[i];let rr=R+t*IND_STEP;
+    if(ca<0&&keepTop<Infinity){const rMax=(keepTop-6-I.th[i]/2-gy)/-ca;
+      if(rr>rMax&&Math.abs(gx+rMax*Math.sin(I.a[i])-cx)<keepHW+I.len[i]/2+4)
+        rr=Math.max(rMin+t*IND_STEP,Math.min(rr,rMax-(IND_TIERS-1-t)*IND_STEP))}
+    I.rr[i]=rr}
+  hud.save();hud.lineCap='round';hud.shadowBlur=0;
+  for(let q=n-1;q>=0;q--){const i=I.order[q],rr=I.rr[i],half=I.len[i]/(2*rr),th=I.a[i]-Math.PI/2,hollow=I.behind[i];
+    // A dark band under each arc, so a grey one still shows against cloud or the jet.
+    hud.globalAlpha=.5;hud.strokeStyle='#001018';hud.lineWidth=I.th[i]+(hollow?4.5:3);
+    hud.beginPath();hud.arc(gx,gy,rr,th-half,th+half);hud.stroke();
+    hud.globalAlpha=I.d[i]>=IND_FAR?.7:1;hud.strokeStyle=I.col[i];
+    if(hollow){hud.lineWidth=1.4;const o=I.th[i]/2+.7;
+      hud.beginPath();hud.arc(gx,gy,rr-o,th-half,th+half);hud.stroke();
+      hud.beginPath();hud.arc(gx,gy,rr+o,th-half,th+half);hud.stroke()}
+    else{hud.lineWidth=I.th[i];hud.beginPath();hud.arc(gx,gy,rr,th-half,th+half);hud.stroke()}}
+  hud.restore();
+}
+
 function drawHUD(){
   const w=hudCanvas.width,h=hudCanvas.height;hud.clearRect(0,0,w,h);
   if(!gameStarted||(gameOver&&deathCamTimer<=0))return;
@@ -3834,6 +3914,12 @@ function drawHUD(){
       hud.beginPath();hud.moveTo(sx,sy-sz);hud.lineTo(sx+sz,sy);hud.lineTo(sx,sy+sz);hud.lineTo(sx-sz,sy);hud.closePath();hud.stroke();
       hud.font='10px Courier New';hud.fillStyle=hud.strokeStyle;
       hud.fillText(lockProgress>=1?'LOCKED':`LOCK ${Math.round(lockProgress*100)}%`,sx+sz+5,sy);hud.shadowBlur=0}}
+
+  // The warnings' text boxes stack below the centre, clear of the radar (whose top is h-190):
+  // MISSILE (44 px) above the radar, and INCOMING (28 px) above MISSILE when both are up. The
+  // direction indicators keep off whichever is up.
+  const yMsl=Math.min(cy+94,h-238),yInc=missileThreat>0?Math.min(cy+58,yMsl-34):cy+58;
+  drawEnemyIndicators(gs,nearest,incomingThreat?yInc:missileThreat>0?yMsl:Infinity,missileThreat>0?90:65);
 
   hud.fillStyle='rgba(0,15,30,.45)';hud.fillRect(cx-150,8,300,24);hud.strokeStyle='rgba(0,255,200,.2)';hud.strokeRect(cx-150,8,300,24);
   hud.font='10px Courier New';const hds=['N','NE','E','SE','S','SW','W','NW'];
@@ -3940,9 +4026,7 @@ function drawHUD(){
 
   if(player.hp<30){hud.fillStyle=Math.sin(Date.now()*.01)>0?'#ff0000':'transparent';hud.font='bold 16px Courier New';hud.fillText('WARNING: HULL CRITICAL',cx-100,60)}
   if(playerJet.position.y<60){hud.fillStyle=Math.sin(Date.now()*.015)>0?'#ff8800':'transparent';hud.font='bold 14px Courier New';hud.fillText('PULL UP',cx-30,80)}
-  // The two warnings stack below the centre, clear of the radar (whose top is h-190): MISSILE
-  // (44 px) above the radar, and INCOMING (28 px) above MISSILE when both are up.
-  const yMsl=Math.min(cy+94,h-238),yInc=missileThreat>0?Math.min(cy+58,yMsl-34):cy+58;
+  // The two warnings' text boxes, at yInc and yMsl (worked out above, before the indicators).
   if(incomingThreat){
     hud.fillStyle='rgba(0,0,0,.5)';hud.fillRect(cx-65,yInc,130,28);
     hud.fillStyle=Math.sin(Date.now()*.02)>0?'#ff0000':'#ff4400';hud.font='bold 20px Courier New';

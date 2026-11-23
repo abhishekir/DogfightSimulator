@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Eight more tools in `.github/tools/` go further. They run locally, not in CI,
+Nine more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -118,6 +118,15 @@ before/after comparison is done.
   and compare the frames in `.github/tools/out/`; they match until the copies
   behave differently. No enemy flies in it, so it shows nothing of how they
   fly: render a real fight for that.
+- `indicators.mjs [--no-render]` — places enemies at set offsets from the jet
+  (ahead, beside, behind, near and far, eight at once, both warnings up) and
+  checks the direction indicators round the gun sight: one arc per enemy not
+  already in the sight, at its bearing on screen and without mirroring behind
+  the camera, coloured and sized by range, none overlapping another or a
+  warning's text box, and no allocation in the function (a heap profile;
+  `--self-test-leak` plants one to prove it is caught). Renders every case at
+  800×600, 1366×625 and 1280×720 to `.github/tools/out/`; look at them after
+  touching the HUD.
 
 Everything below is still on you.
 

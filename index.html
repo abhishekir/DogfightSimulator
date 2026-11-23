@@ -2643,8 +2643,19 @@ function createPlayerJet(){
   j.traverse(c=>{if(c.isMesh){c.castShadow=true;c.receiveShadow=true}});
   j.scale.set(1.8,1.8,1.8);return j;
 }
-const playerJet=createPlayerJet();playerJet.position.set(0,350,0);scene.add(playerJet);
-const player={minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,0,-120),
+// The spawn: 350 m over the sea at the origin, pointed along whichever of 24 headings has the
+// lowest ground in the next SPAWN_CLEAR_RANGE (about 18 s of flight), ties going to the one
+// nearest -z. With no input the jet glides down at about 3 degrees, and the old fixed -z heading
+// met a 322 m ridge 400 m out, so a player who waited out the WAVE 1 banner crashed 3 s in.
+// Set from here at load and by resetGame, so the two cannot disagree.
+const SPAWN_POS=new THREE.Vector3(0,350,0),SPAWN_SPEED=120,SPAWN_CLEAR_RANGE=3000;
+const SPAWN_QUAT=(()=>{let best=0,lowest=Infinity;
+  for(let k=0;k<24;k++){const h=(k&1?-1:1)*Math.ceil(k/2)*Math.PI/12,dx=-Math.sin(h),dz=-Math.cos(h);let top=-Infinity;
+    for(let d=25;d<=SPAWN_CLEAR_RANGE;d+=25)top=Math.max(top,getGroundHeight(SPAWN_POS.x+dx*d,SPAWN_POS.z+dz*d));
+    if(top<lowest){lowest=top;best=h}}
+  return new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),best)})();
+const playerJet=createPlayerJet();playerJet.position.copy(SPAWN_POS);playerJet.quaternion.copy(SPAWN_QUAT);scene.add(playerJet);
+const player={minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,0,-SPAWN_SPEED).applyQuaternion(SPAWN_QUAT),
   rollRate:0,pitchRate:0,yawRate:0,hp:MAX_PLAYER_HP,gunSpin:0,gunPhase:0,gunRound:0,onGround:false,missileCooldown:0,missileAmmo:MAX_MISSILE_AMMO,
   missileSide:1,fWasDown:false,flares:MAX_PLAYER_FLARES,flareCooldown:0,prevVelocity:new THREE.Vector3(),prevPosition:playerJet.position.clone()};
 
@@ -3993,10 +4004,10 @@ function checkGameOver(){if(player.hp<=0&&!gameOver){gameOver=true;snd.silence()
   spawnExplosion(playerJet.position,60,emitters.explosion);snd.explosion(playerJet.position,2);playerJet.visible=false}}
 
 function resetPool(pool){for(const item of pool){item.userData.active=false;item.visible=false}}
-function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.set(0,0,-120);
+function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.set(0,0,-SPAWN_SPEED).applyQuaternion(SPAWN_QUAT);
   player.rollRate=player.pitchRate=player.yawRate=0;player.missileCooldown=0;player.gunSpin=player.gunPhase=player.gunRound=0;player.onGround=false;
   player.missileAmmo=MAX_MISSILE_AMMO;player.missileSide=1;player.fWasDown=false;player.flares=MAX_PLAYER_FLARES;player.flareCooldown=0;
-  playerJet.position.set(0,350,0);player.prevPosition.copy(playerJet.position);playerJet.quaternion.identity();playerJet.visible=true;
+  playerJet.position.copy(SPAWN_POS);player.prevPosition.copy(playerJet.position);playerJet.quaternion.copy(SPAWN_QUAT);playerJet.visible=true;
   rebuildWorldAround(playerJet.position.x,playerJet.position.z);
   score=0;kills=0;gameTime=0;gameOver=false;paused=false;camInit=false;screenShake=0;hitFlash=0;gForce=1;fovPulse=0;
   lockTarget=null;lockProgress=0;seekerState=null;rackEmptyFlash=0;incomingThreat=false;missileThreat=0;

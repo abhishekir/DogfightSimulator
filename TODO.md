@@ -797,11 +797,6 @@ covers them.
 
 ### 18. Small things to keep in mind — P4
 
-- **The spawn faces a ridge.** The jet starts at 350 m, and with no input it
-  flies into a 322 m ridge about 400 m ahead and dies 3.0 s in, on `main` as
-  well; a new player who hesitates during the WAVE 1 banner crashes. Spawn
-  higher, or facing open ground. (`ui-test.mjs` now lifts the jet clear first,
-  after its own checks ran into the ridge on a slower machine.)
 - **Below 20 fps, game time runs slow but audio does not.** `dt` is clamped to
   0.05 s, so the simulation slows while the audio clock keeps real time; the
   cannon's sound reaches full rate in 0.3 s of real time while the barrels in

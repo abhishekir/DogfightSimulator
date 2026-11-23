@@ -51,10 +51,11 @@ check('audio running at start', await until(() => window.__snd.ctx.state === 'ru
 check('output level is volume squared', await until(() => Math.abs(window.__snd.output.gain.value - 0.49) < 0.01, 5000),
       await ev(() => window.__snd.output.gain.value));
 
-// With no input the jet flies into a ridge near the spawn about 3 s of game time in (on main
-// too; see "Small things to keep in mind" in TODO.md), and how much game time the checks
-// below take depends on the machine. Put it at 1,500 m, level, so they test the game rather
-// than the crash, and again before anything that needs a live player.
+// With no input the jet glides from the spawn into the sea about 38 s of game time in (it
+// used to hit a ridge 3 s in, before the spawn heading was chosen from the terrain), the pitch
+// checks below leave it pointing anywhere, and how much game time the checks take depends on
+// the machine. Put it at 1,500 m, level, so they test the game rather than a crash, and again
+// before anything that needs a live player.
 const clearOfGround = () => ev(() => { const j = window.__pj, pl = window.__pl; j.position.y = 1500; j.quaternion.identity();
   pl.velocity.set(0, 0, -327); pl.pitchRate = pl.yawRate = pl.rollRate = 0; });
 await clearOfGround();
@@ -161,8 +162,8 @@ await ev(() => window.__aimMissile(2500));
 await until(() => window.__mt() > 0, 15000);
 await p.keyboard.down('Space');
 // One frame of ground contact costs 12.5 HP and puts the jet back on the surface, so hold it
-// under the ground until the game ends. (This passed with a single push only while the jet
-// was already dying on the ridge by the spawn; see clearOfGround.)
+// under the ground until the game ends. (This once passed with a single push only because
+// the jet was already dying on a ridge by the spawn.)
 check('ground crash ends the game', await until(() => { if (!window.__st().gameOver) window.__pj.position.y = -50; return window.__st().gameOver; }, 120000));
 await p.screenshot({ path: join(out, 'ui-crash.png') });
 check('gun audio stopped at game over', await until(() => !window.__snd._gun, 5000));

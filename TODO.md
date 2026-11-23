@@ -113,7 +113,9 @@ Where the gameplay lives, for anyone changing how the game plays:
   flight-data panel shows them (`FLR`).
 - **Missile warning** (`updateThreatDetection`, `missileThreat`). An enemy
   missile tracking the player inside 3 km puts MISSILE and its range below the
-  centre, with "C — FLARES" and an arrow toward it, and a square-wave beep in
+  centre, with "C — FLARES" and an arrow toward it on screen (`hudBearing`: the
+  chase camera does not roll, so a bearing in the jet's own frame is wrong in a
+  bank), and a square-wave beep in
   the headset, 5 a second at 3 km rising to 12 close in. It stops when the
   missile is decoyed. (Before it, nothing warned of a missile: INCOMING is
   enemy rounds within 120 m.) `.github/tools/flares.mjs` measures what flares
@@ -175,6 +177,11 @@ Where the gameplay lives, for anyone changing how the game plays:
   `GUN_PULL_GROUND` (150 m): a review found it could fly the jet into the hills
   firing at a low target in a shallow dive. See "Aim assist for the gun" for
   what each does.
+  Round the gun cross, a ring of arcs, one for each live enemy not already in
+  the sight, points at where it is (`drawEnemyIndicators`): red under 1,000 m,
+  yellow inside lock range, grey beyond, longer as it closes, hollow when it is
+  behind the jet. "Enemy direction indicators around the gun sight" has the
+  detail.
 
 ### Verifying a change
 
@@ -441,6 +448,79 @@ coloured by range, checked by a headless render at a few set geometries
 both INCOMING and the missile warning up, at 800×600 and at 1366×625 as well as
 1280×720), `ui-test.mjs`
 still passes, and a playtest finds it useful rather than cluttered.
+
+**Done so far** (`drawEnemyIndicators`, called from `drawHUD`):
+
+- **An arc per live enemy** on a ring round the gun cross, 100 px out
+  (`IND_RADIUS`), or 26 px outside the gun ring where that is wider (with a
+  target at 60 m the gun ring is 124 px and the indicators' ring 150 px). Arcs,
+  not triangles or chevrons, so they cannot be read as either warning's arrow.
+- **Colour by weapon:** red under 1,000 m (`IND_GUN_RANGE`), yellow under
+  `LOCK_RANGE`, light grey beyond. Not the sight's `inRange`, which the task
+  above calls "about 1,000 m": it is rounds reaching the target within their
+  2.5 s life, and against a target sat still ahead it holds out to 1,750 m at
+  no throttle and 2,800 m at full (measured by `indicators.mjs`), past lock
+  range, so red would have sat outside yellow.
+- **Size:** each arc grows from 12 to 40 px long and from 2.5 to 5 px thick as
+  its enemy closes from 3 km; beyond 3 km it stays at the smallest and dims.
+  Every arc has a dark band under it: without one, grey arcs vanished against
+  cloud and against the jet's own fins in the first renders.
+- **Bearing:** an enemy in front of the camera is pointed at where it is on
+  screen, from the gun cross; one behind the camera by its direction in the
+  camera's frame, which is the limit of the on-screen direction as the enemy
+  passes the edge of the screen, so the arc neither jumps nor mirrors as it
+  goes behind. The camera looks about 6° down past the jet, so an enemy behind
+  the jet points somewhat lower than its bearing in the jet's own frame (one
+  1,500 m astern and 300 m to the right points at about 4 o'clock, not 3), and
+  one dead astern points straight down. An enemy behind the jet gets a hollow
+  arc (two thin lines) instead of a solid one.
+- **No arc for an enemy already in the sight:** on screen inside the ring, the
+  one with the target box (the nearest, on screen) and the one under the lock
+  diamond.
+- **Crowding:** arcs that would overlap are stacked outward, 7 px apart,
+  nearest innermost, up to four deep. While INCOMING or the missile warning is
+  up, an arc that would land on its text box is pulled in along its bearing,
+  the tiers keeping their spacing, but never inside the gun ring's ticks; at
+  800×600 with both up there are 64 px between the gun cross and the INCOMING
+  box, so arcs pointing straight down sit just under the gun ring.
+- **No allocation:** no objects; everything is in preallocated arrays.
+
+`.github/tools/indicators.mjs` checks all of it at 800×600, 1366×625 and
+1280×720, against enemies placed at set offsets in the jet's frame (ahead,
+beside, behind, near and far, eight with five in nearly one direction, and both
+warnings up), and renders each case to `.github/tools/out/` to look at. It
+checks each on-screen arc against the enemy's screen point as three.js
+projects it, each behind-the-camera arc against the camera's frame from
+`worldToLocal`, every off-screen bearing within 35° of its direction in the
+jet's frame, colour, size order, hollowness, that no two arcs overlap, that no
+arc lands on a warning box, and that an enemy passing from in front of the
+camera to behind it keeps its arc's direction (a copy that projected points
+behind the camera as if in front fails 47 checks, the continuity ones among
+them). The allocation check is a sampling heap profile of 20,000 calls, after
+20,000 to warm up: 0 B sampled, against 60 B a call with a Vector3 planted in
+the function (`--self-test-leak`). Without the warm-up the same profile
+charges the function with boxed numbers from its unoptimised runs, which say
+nothing about play; it was first misread that way.
+
+**The warning arrows point at the threat on screen now.** The missile
+warning's arrow and INCOMING's chevron took their angle from the jet's own
+right and up, but the chase camera keeps world up and does not roll with the
+jet, so the screen's axes are not the jet's. In a bank the arrows pointed up to
+180° wrong: banked 90° right, a missile straight below pointed right. INCOMING's
+chevron had its up and down flipped as well, in level flight too: a burst from
+below pointed up, one from the right pointed right. Both now use `hudBearing`,
+the same rule as the direction indicators, about the screen centre as before,
+and the chevron aims at the round's position (`threatPos`) rather than a bare
+direction. `indicators.mjs` checks both arrows, by recording what the HUD
+draws, against the threat's screen point at five banks (level, 45°, 90° either
+way, inverted) and five world directions: the code before this fails 45 of the
+50 cases, by up to 180°; now the worst is under 0.1°. The attitude indicator
+still rotates by the jet's roll: it shows the jet's bank, and is not an overlay
+on the world's horizon, which in this view stays level.
+
+**What is left:** the playtest: whether the ring's radius, the arcs' sizes and
+the colour steps are useful rather than cluttered, and whether a hollow arc
+reads as "behind". None of it has been seen by a person yet.
 
 ### 4. GPU cost is unmeasured — P2 (needs real hardware)
 

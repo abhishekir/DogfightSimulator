@@ -58,7 +58,7 @@ left unset, because fetching the pinned CDN URLs for real is part of what is
 being tested.
 
 It is a smoke test, not a test suite. It proves the game still starts and draws.
-Seven more tools in `.github/tools/` go further. They run locally, not in CI,
+Eight more tools in `.github/tools/` go further. They run locally, not in CI,
 take the same two environment variables, and exit non-zero on failure; each
 takes `--page <file>` to test another copy of the game, which is how a
 before/after comparison is done.
@@ -73,7 +73,10 @@ before/after comparison is done.
   `--pilot person` flies the person-like pilot (`person.mjs`: steers by the
   HUD, with a reaction delay and aim noise) instead, and for either pilot it
   reports how hard the game was: time to first kill, gun and missile kills per
-  minute, hits per round, missiles fired without a lock, deaths per wave.
+  minute, hits per round, missiles fired without a lock, deaths per wave, and
+  where the fight was (the jet's altitude: median, 90th percentile, highest,
+  time above 5 and 10 km). A fight that has drifted out of the world changes
+  every other figure, so look at that row first.
   `--tag` saves those figures; `figures.mjs <tag> <tag>` pools tagged runs and
   sets them side by side with their standard errors, and `track.mjs` checks
   the pilot's tracking against a target flying a straight line.
@@ -87,22 +90,34 @@ before/after comparison is done.
   hit; follows every round to check that no round which left with the cue lit
   passes outside the hit radius (the cue is cautious: an unlit shot near the
   edge can still hit), at the cue's edge, at the edge of the round assist's
-  cone and against a target flying at the jet; and checks every round fired
-  through a hard turn passes through the gun cross's point. Run it after
-  touching the gunsight, the camera or the guns.
+  cone and against a target flying at the jet; checks every round fired
+  through a hard turn passes through the gun cross's point; and checks the aim
+  pull brings the cross onto the marker while firing and does nothing with the
+  trigger up or the marker outside its cone. Run it after touching the
+  gunsight, the camera or the guns.
 - `handling.mjs` — holds each control key from rest in the game loop at 60 and
   30 fps and reports the steady rate, the time to 63% of it and to 90°, and the
   overrun after release; fails if the roll is not 90° in about 0.5 s at both.
-- `enemy-flight.mjs [--minutes 5] [--fps 60] [--check]` — samples every live
-  enemy every frame while the person-like pilot fights, and reports how fast
-  their noses turn, how fast they roll, how hard their commanded speed changes
-  and how often the ground rules move them. `--check` fails outside the limits
-  in TODO.md's "Enemies fly twitchily". Run it at 30 as well as 60 fps.
+- `enemy-flight.mjs [--minutes 5] [--fps 60] [--low] [--check]` — samples every
+  live enemy every frame while the person-like pilot fights, and reports how
+  fast their noses turn, how fast they roll, how hard their speed changes, how
+  often their roll reverses (snaps between frames, rocks within 0.5 s), how
+  often they avoid terrain and how often the ground rules move them. `--low`
+  holds the player within 400 m of the ground, which is the only way the
+  terrain code runs. `--check` fails outside the limits in TODO.md's "Enemies
+  fly twitchily". Run it at 30 as well as 60 fps, with and without `--low`.
+- `flares.mjs [--trials 60] [--fps 60]` — fires missiles both ways, with
+  flares and without, and reports how often they hit: an enemy missile at the
+  player, who taps C inside 700 m, and the player's at an enemy held flying
+  away (evading off, so flares are its only defence). Fails unless flares cut
+  the hits and missiles without them mostly hit. Run it after touching flares
+  or missile guidance.
 - `scene.mjs [--tag name]` — a scripted, seeded fight that renders the same
   frames on every run: level flight, then a kill with the particle pool under
   heavy-fight pressure. Run it on two copies of the game with different tags
   and compare the frames in `.github/tools/out/`; they match until the copies
-  behave differently.
+  behave differently. No enemy flies in it, so it shows nothing of how they
+  fly: render a real fight for that.
 
 Everything below is still on you.
 

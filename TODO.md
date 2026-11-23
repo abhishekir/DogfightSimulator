@@ -75,6 +75,49 @@ Where the gameplay lives, for anyone changing how the game plays:
   sets up the next pass in the player's forward view.
   A hit, a player round passing within 60 m or a missile within 250 m triggers
   *evade* (a roll, a split-S or a climb), with a 2.5 s cooldown.
+  Each state only chooses a point to fly at, how keenly to turn for it and a
+  speed (`speedCmd`); `flyEnemy` flies there. It rolls until its lift points
+  where the turn needs it, then pulls with that lift, so turns start with a
+  roll; the nose turns at most 45–57°/s and the roll at most 161–228°/s (both
+  rising with skill, which starts at 0.2 on wave 1; under the player's 60°/s
+  pitch and 270°/s), and the speed flown (`currentSpeed`) follows the command
+  at up to 15 m/s² faster and 18 m/s² slower. It is integrated in substeps of
+  at most 1/120 s, so it flies the same at 30 fps as at 60. For the ground 4 s
+  ahead it blends a 35° climb into the direction it wants, starting at 220 m
+  clear and completely by 60 m, continuously, so the aim never jumps (an
+  earlier version switched to a climb below 150 m and chattered). Enemies
+  spawn pointing at the player. The extend state's speed is therefore a
+  command it seldom reaches in 3–4 s.
+- **Where the fight is** (`enemyAltitudeBias`, `FIGHT_AGL`). Every height the
+  AI picks is relative to the player, and climbing costs neither side any
+  speed, so the two can lead each other upward. With enemies that turn within
+  limits they did: the person-like pilot's fight drifted to 10–60 km. Above
+  2,500 m over the ground the enemies now set up below the player instead, up
+  to 800 m below, and extend level or downward. `soak.mjs` reports the
+  player's altitude, so drift shows in the figures.
+- **Flares** (`dropFlares`, `updateFlares`). A salvo is two decoys that shed
+  the aircraft's speed, fall and burn out in about 2.6 s. Every missile
+  tracking the aircraft that dropped it, within 2 km and with a flare inside
+  1 rad of its heading, is pulled onto a flare with a chance per salvo:
+  `FLARE_DECOY_ENEMY` (0.35) for an enemy's against the player's missile,
+  `FLARE_DECOY_PLAYER` (0.7) for the player's against an enemy's. A missile
+  whose flare burns out flies on unguided, and is still hit-tested against
+  every aircraft, so it can still hit the one it was pulled off: in
+  `flares.mjs`'s tail chase about 40% of decoyed player missiles did, flying on
+  along the enemy's straight track, so the 0.35 knob does less than it reads
+  (a review measured it). A salvo the pool cannot supply is not spent. An enemy
+  carries 3 salvos and drops
+  one every 0.7 s once a player missile is tracking it inside 1,200 m, after a
+  reaction time of 0.25–0.85 s that shortens with skill. The player has 8 on C,
+  one every 0.6 s while it is held, reloaded when a wave is cleared; the
+  flight-data panel shows them (`FLR`).
+- **Missile warning** (`updateThreatDetection`, `missileThreat`). An enemy
+  missile tracking the player inside 3 km puts MISSILE and its range below the
+  centre, with "C — FLARES" and an arrow toward it, and a square-wave beep in
+  the headset, 5 a second at 3 km rising to 12 close in. It stops when the
+  missile is decoyed. (Before it, nothing warned of a missile: INCOMING is
+  enemy rounds within 120 m.) `.github/tools/flares.mjs` measures what flares
+  do, both ways.
 - **Damage.** The player has 100 HP. An enemy round costs 5, an enemy missile
   30, and touching the terrain is fatal in under half a second. A player round
   does 2.5 (`GUN_DAMAGE`), so a wave-1 enemy takes 16 hits; a missile does 50,
@@ -123,8 +166,15 @@ Where the gameplay lives, for anyone changing how the game plays:
   Round assist: a round fired while the lead point is within `GUN_ASSIST` (1.5°)
   of the nose leaves aimed at the lead point. The cannon and the cue go by one
   rule, `gunAssisted(gunSolution(target))`, and the sight's ring is the larger
-  of the hit radius and that cone. The controls are never touched. Whether it
-  helps a person is not yet shown: see "Aim assist for the gun".
+  of the hit radius and that cone. The controls are never touched.
+  Aim pull: while the trigger is held and the lead point is within
+  `GUN_PULL_CONE` (5°) of the nose, the nose is turned onto it, closing the
+  angle at `GUN_PULL_GAIN` (6) per second and at most `GUN_PULL_MAX` (15°/s).
+  It does nothing with the trigger up or the marker further off, and never
+  turns the nose down while the ground within 3 s along the path is closer than
+  `GUN_PULL_GROUND` (150 m): a review found it could fly the jet into the hills
+  firing at a low target in a shallow dive. See "Aim assist for the gun" for
+  what each does.
 
 ### Verifying a change
 
@@ -184,76 +234,118 @@ See CLAUDE.md for how to run them.
 
 The first playtest found enemy movement unnatural and twitchy.
 `.github/tools/enemy-flight.mjs` measures it: the person-like pilot fights for
-five game-minutes while every live enemy is sampled every frame. Three runs at
-each frame rate on `main`, as ranges over the runs:
+five game-minutes while every live enemy is sampled every frame.
+
+**Done: they fly on a flight model with limits** (`flyEnemy`; "The game loop"
+above says how). Before, each frame slerped the nose toward the target point by
+`smoothT(turnRate, dt)` of the angle left, with no limit (evade's `turnRate`
+reached 3.2, so a point behind swung the nose at hundreds of degrees a second);
+multiplied in a bank of 0.6 rad × (direction to the point · right wing) once a
+frame, with no `dt`; set the speed outright each frame; and lifted the enemy
+off the ground with a clamp, and by 80 m/s below 80 m. Three runs at each frame
+rate, as ranges over the runs, before (`main` before `flyEnemy`) and after:
 
 | | fps | median | 95th percentile | 99th | peak |
 |---|---|---|---|---|---|
-| turn rate of the nose, °/s | 60 | 16 | 106–110 | 151–156 | 469–520 |
-| | 30 | 13–18 | 98–114 | 144–159 | 352–529 |
-| roll rate, °/s | 60 | 16–17 | 161–169 | 542–635 | 2,094–2,293 |
-| | 30 | 14–16 | 143–161 | 461–566 | 1,162–1,195 |
-| change of commanded speed, g | 60 | 2.6–3.3 | 10–14 | 35–39 | a step |
-| | 30 | 3.0–3.6 | 10–14 | 37–53 | a step |
+| turn rate of the nose, °/s, before | 60 | 16 | 106–110 | 151–156 | 469–520 |
+| after | 60 | 12–13 | 53–55 | 56 | 56 |
+| before | 30 | 13–18 | 98–114 | 144–159 | 352–529 |
+| after | 30 | 10–11 | 53–54 | 56–57 | 56–57 |
+| roll rate, °/s, before | 60 | 16–17 | 161–169 | 542–635 | 2,094–2,293 |
+| after | 60 | 17–23 | 190–194 | 211–217 | 223–227 |
+| before | 30 | 14–16 | 143–161 | 461–566 | 1,162–1,195 |
+| after | 30 | 17–23 | 189–197 | 211–218 | 224–226 |
+| change of speed, g, before | 60 / 30 | 2.6–3.6 | 10–14 | 35–53 | a step of up to 452 m/s |
+| after | 60 / 30 | 1.5 | 1.8 | 1.8 | 1.8 |
 
-The player's jet pitches at 60°/s at most. What the two frame rates show:
+Moved by the ground rules: 1.7–4.5% of enemy-frames before, none after. The
+figures now agree between 60 and 30 fps. `enemy-flight.mjs --check` passes at
+both.
 
-- **Turn rate does not depend on the frame rate.** The medians and percentiles
-  agree, and the peaks overlap from run to run (a peak is one frame of one
-  enemy).
-- **Roll does.** The roll peak halves at 30 fps, because the bank is added once
-  a frame, not per second (below). So enemies roll differently at different
-  frame rates, which is a bug in its own right.
-- **Speed changes are steps.** The commanded speed jumps by up to 394–452 m/s
-  in a single frame at either frame rate, so its "g" is only the step divided
-  by one frame time.
-- **1.7–4.5% of enemy-frames are moved by the ground rules**, not by flying:
-  the terrain clamp, and the 80 m/s climb below 80 m.
+The roll's median rose a little, because a turn now starts with a roll where
+before the wings followed the target point. The speed figures are at the
+limits most of the time: the states' speed commands still move faster than an
+aircraft can follow (extend asks for the player's speed plus 140 m/s), so the
+enemies are nearly always accelerating or braking. Smoothing the commands
+themselves would leave the speed changing less often.
 
-Where it comes from (`updateEnemies`, `smoothLookAt`):
+In a low fight (`enemy-flight.mjs --low`) the terrain code runs on about a
+quarter of enemy-frames. A review found that the first version of it, which
+switched to a climb below 150 m, chattered, and that the roll then differed
+between frame rates. Measured as rocks (a roll reversal within 0.5 s of the one
+before) and snaps (a reversal between two frames), per enemy-minute, two runs
+each:
 
-- **Steering.** Each frame the nose slerps toward a target point by
-  `smoothT(turnRate, dt)` of the angle left, so the turn rate is proportional to
-  the error, with no limit: a point 180° away swings the nose at
-  `turnRate × π` rad/s to begin with, and evade's `turnRate` reaches 3.2. Every
-  state change picks a new point at once (an aim point, a fixed extend vector, a
-  random evade direction), so the nose flicks at each one; evade peaks highest.
-- **Bank.** The look rotation is wings-level, and a roll of 0.6 rad × (direction
-  to the target point · right wing) is multiplied in after it every frame, with
-  no `dt`: up to 34° a frame, which is about 2,060°/s at 60 fps and 1,030°/s at
-  30. The wings follow where the target point is, not the turn being flown, and
-  flip when the point swings across.
-- **Speed.** Each state assigns `currentSpeed` outright every frame
-  (`enemyPositioningSpeed` follows the range and the player's speed), so speed
-  has no inertia and jumps at a state change: extend demands at least the
-  player's speed plus 140 m/s.
-- **Terrain.** Below 60 m above the ground the position is clamped up, a visible
-  hop, and below 80 m altitude it climbs 80 m/s whatever its attitude.
+| | rocks, 60 fps | rocks, 30 fps | snaps, 30 fps |
+|---|---|---|---|
+| switched climb, low fight | 14–18 | 27–37 | 16–26 |
+| blended climb and 1/120 s substeps, low fight | 9–11 | 9–13 | 3 |
+| either, at altitude (no terrain code) | 4–8 | 3–7 | under 1 |
 
-What to do: fly the enemies on a flight model with limits, keeping the state
-machine (inbound, attack, extend, reposition, evade) as the thing that chooses
-where to go.
+Snaps at 60 fps are 0 throughout. `--check` holds rocks under 18 and snaps
+under 5. (The rock counts first quoted for this, 13–37, were miscounted: the
+tool compared the nose's turn rate where it meant the time since the last
+reversal. A third review found it.)
 
-- A bounded turn rate, no higher than the player's at the same speed (or a
-  g limit), instead of an exponential approach to the target direction.
-- Roll to the bank the turn needs (tan(bank) = speed × turn rate / g) at a
-  bounded roll rate, per second, then pull, so turns start with a roll the way
-  the player's do.
-- Speed changing at a bounded acceleration toward what the state asks for.
-- Terrain avoidance that pulls up early, from the ground ahead, not a clamp.
-- Smooth with `smoothT`, never `lerp(a, b, k * dt)`.
+**The game is much easier with all of it.** The first measurements (0.91 to
+2.10 kills a minute for the flight model, back to 1.37 with flares, and the
+runs isolating the turn and speed limits below) were taken with the fight
+drifted to 10–60 km, where nothing can hit the ground; a review replicated them
+there and found the drift ("Where the fight is", in "The game loop"). Re-taken
+with the fight held down, the person-like pilot, 15-minute runs, mean of runs ±
+standard error:
 
-It will change how hard the game is (smoother targets are easier to track;
-slower turns make passes longer), so measure with the person-like pilot before
-and after, eight 15-minute runs a side.
+| | `main` | all of it | all, aim pull off | all, enemy flares off |
+|---|---|---|---|---|
+| runs | 16 | 16 | 16 | 8 |
+| fight altitude, median of runs | 1.4–5.9 km | 2.9–5.2 km | 3.1–12.2 km | 3.0–8.3 km |
+| kills per minute | 0.85 ± 0.08 | 1.48 ± 0.11 | 1.08 ± 0.07 | 1.96 ± 0.21 |
+| gun kills per minute | 0.03 ± 0.01 | 0.14 ± 0.03 | 0.05 ± 0.01 | 0.15 ± 0.04 |
+| missiles that killed | 22% | 29% | 28% | 35% |
+| deaths (on the ground) | 31 (8) in 4 h | 5 (0) in 4 h | 1 in 4 h | 2 in 2 h |
+| lives reaching wave 4 | 1 of 47 | 17 of 21 | 15 of 17 | 7 of 10 |
+| *a review's campaign, 16 runs each:* | | | | |
+| fight altitude, median of runs | 1.2–5.3 km | 3.1–5.7 km | 3.0–4.7 km | |
+| kills per minute | 1.02 ± 0.10 | 1.22 ± 0.11 | 1.25 ± 0.06 | |
+| gun kills per minute | 0.02 ± 0.01 | 0.13 ± 0.02 | 0.06 ± 0.02 | |
+| deaths (on the ground) | 34 (8) | 2 (0) | 5 (1) | |
+| lives reaching wave 4 | 2 of 50 | 14 of 18 | 16 of 21 | |
 
-**Done when:**
+- **The game is much easier**: deaths fall from 31–34 to 2–5 in four hours,
+  and most lives now reach wave 4 (31 of 39), where on `main` almost none
+  did (3 of 97).
+- **Kills rise by roughly 1.2–1.7×; the two campaigns disagree on the size.**
+  Ours put it at 0.85 to 1.48, the review's at 1.02 to 1.22 (not resolved on
+  its own); pooled it is about 1.4×. The same build differs between the two by
+  1.3–1.8 standard errors each time, always the way that widens our effects,
+  so the per-run standard error understates the noise: one sixteen-run
+  campaign should not be quoted at "4.6" or "about three" standard errors.
+- **The aim pull raises gun kills** (0.05 to 0.14 here, 0.06 to 0.13 in the
+  review's; replicated in three campaigns). Its effect on all kills is not
+  resolved (1.08 to 1.48 here, 1.25 against 1.22 in the review's).
+- Enemy flares take back part of the kill rate (1.96 to 1.48, eight runs
+  against sixteen, about two standard errors; not re-run by the review).
+- What cut the deaths is not separated at this altitude. At 10–60 km, the
+  speed limit did (16 deaths against 3, with speed made instant again, in a
+  review's runs); the player's flares and the missile warning are new since.
+- At altitude, the turn limit doubled missile kills: about two-thirds of the
+  player's missiles had lost lock against an enemy in *evade*, which could snap
+  its nose more than the missile's 69° lock limit off in a few frames, and a
+  quarter did after. Warning enemies of a missile at 1,000 m instead of 250 m
+  did not help. These were not re-taken low.
 
-- `enemy-flight.mjs --check` passes at 60 and at 30 fps: the nose never turns
-  faster than 60°/s, roll stays under 270°/s, commanded speed changes by no
-  more than 2 g, and nothing is moved by the ground rules.
-- The person-like pilot's figures are quoted before and after.
-- A playtest no longer finds the enemies twitchy.
+**Still open:**
+
+- **Difficulty.** The first playtest of all of it found the game plays a lot
+  better; whether it is now too easy is for play to say. The enemy flares'
+  chance and salvo count are the knobs (note that decoyed missiles can still
+  hit, so the chance does less than it reads), and enemies that survive one
+  missile or harder waves are the other ways. Measure against the "all of it"
+  column above.
+- **A playtest** that no longer finds the enemies twitchy.
+
+**Done when:** the playtest agrees, and the difficulty has been decided and
+measured.
 
 ### 2. Aim assist for the gun — P2
 
@@ -270,49 +362,87 @@ control they take from the player:
   the trigger is held and the gun cross is close to it. It is the strongest
   option and the one most likely to feel like losing control.
 
-**Done so far:** the round assist, at `GUN_ASSIST` = 1.5° (0 turns it off). The
-mechanism works, and `.github/tools/gunsight.mjs` checks it: with the cross
-held 0.9 of the cone off the marker at 1,000 m every round hits; held 1.1 off,
-none does; and a wave-1 enemy dies 1.6 s into a hold that wanders inside the
-cone. Against a target flying a straight line, `track.mjs` has the person-like
-pilot landing 31–69% of its rounds with the assist, firing 19–39% of the time,
-where without it it fires 4–9% of the time.
+**Done so far:**
 
-**Not shown: that a person gets more gun kills in the game.** Gun kills are
-rare with or without it, about one every 20 to 50 minutes of play, so they take
-a great deal of play to compare:
+- **Round assist**, at `GUN_ASSIST` = 1.5° (0 turns it off). Against a target
+  flying a straight line, `track.mjs` has the person-like pilot landing 31–69%
+  of its rounds with it, firing 19–39% of the time, where without it it fires
+  4–9% of the time. Gun kills in play did not move measurably: 5 without
+  against 13 with in sixteen runs a side, 10 against 8 in a reviewer's eight.
+- **Aim pull** (`GUN_PULL_CONE` 5°, `GUN_PULL_GAIN` 6/s, `GUN_PULL_MAX`
+  15°/s), after the first playtests found it hard to keep the cross on the
+  marker. `gunsight.mjs` checks it: from 3° off, the lead point is inside the
+  round assist's cone in 0.13 s at 60 and 30 fps and stays there, and with the
+  trigger up or the marker outside the cone the nose does not move; and firing
+  at a low target in a shallow dive over hills, on a path that clears the
+  ground by 9.5 m without the pull, the jet still clears it with the pull (it
+  struck the ground at 1.4 s before the terrain guard). In
+  `track.mjs` (with flares and the enemy flight model in the game), the pilot's
+  median error from the marker fell from 1.6–2.5° to 0.7–1.1° in four of five
+  cases and its hits rose from 20–256 to 833–1,439 in 20 s; a target crossing
+  at 200 m/s at 600 m leaves the cone and gains nothing. In play, sixteen
+  15-minute runs a side with the fight at a sane altitude: gun kills
+  0.05 ± 0.01 a minute without it and 0.14 ± 0.03 with (11 against 33 kills),
+  and hits per round fired 5.0% against 8.2%. Two independent campaigns by a
+  review agree on the gun kills: 0.06 ± 0.02 against 0.20 ± 0.04 with the
+  fight at altitude, and 0.06 ± 0.02 against 0.13 ± 0.02 at a sane one. Its
+  effect on all kills is not resolved: 1.08 ± 0.07 against 1.48 ± 0.11 here,
+  1.25 ± 0.06 against 1.22 ± 0.11 in the review's.
 
-- The first comparison, four 15-minute runs a side: one gun kill without the
-  assist against five. It was reported as an improvement and should not have
-  been: four runs cannot tell those apart.
-- A reviewer's re-run, eight runs a side: 10 gun kills without, 8 with.
-- A third, sixteen runs a side (four hours of play each) after the pilot and
-  the cue were corrected: 5 without, 13 with (0.02 ± 0.01 against
-  0.06 ± 0.01 per minute as the mean of the runs). Total kills per minute went
-  from 0.99 ± 0.10 to 1.26 ± 0.12, which is under two standard errors.
+Gun kills are still a small share: the person-like pilot fires only with the
+cue lit and the marker in the ring, under 1,000 m, and most of its kills are
+missiles. A person holding the trigger earlier gets more from the pull than
+this pilot does. With hits concentrated, the cannon's hit sparks could empty
+the particle pool; they are now left out while fewer than 200 particles are
+free (`HIT_SPARK_FLOOR`).
 
-Taken together that is no established effect, and the default strength of 1.5°
-is a guess from the middle of "a degree or two". The first playtest asked for a
-stronger assist.
+What is left:
 
-What to do next:
+- **The strength, by play.** The values are a first choice. Make the pull's
+  rate and cone, and the round assist's cone, a setting ("Settings screen"),
+  from off to strong, and keep what a person can feel without the gun aiming
+  itself.
+- **Hit tolerance** growing with range, the third option above, is not done.
 
-- Decide the strength by play, not by this pilot alone: make it a setting
-  ("Settings screen"), try 1.5°, 3° and the two stronger options above, and keep
-  what a person can feel without the gun aiming itself.
-- For a measurement that can show an effect, raise how often the gun gets used
-  first. The person-like pilot fires only while the cue is lit and the marker is
-  in the ring, under 1,000 m, and enemies spend little time there; most kills
-  are missile kills either way. Counting hits per trigger-second, or runs with
-  the missiles taken away, would say more per hour than gun kills do.
+**Done when:** the strength has been chosen by playtest. (The measured part is
+done: the aim pull made the person-like pilot's gun kills measurably more
+frequent, sixteen runs a side, and a review's independent campaign agreed.)
 
-**Done when:** a player who keeps the gun cross roughly on a wave-1 enemy's
-lead marker gets a gun kill (checked by `gunsight.mjs`), the strength has been
-chosen by playtest, and a comparison of at least sixteen runs a side shows the
-person-like pilot killing measurably faster with the assist than without it, or
-the task records that it does not.
+### 3. Enemy direction indicators around the gun sight — P2
 
-### 3. GPU cost is unmeasured — P2 (needs real hardware)
+From the playtest after the enemy flight model, flares and aim pull. The radar
+(bottom centre, 3 km) is the only place that shows where every enemy is, and
+it means looking away from the sight. Put a pointer for each live enemy on a
+ring round the gun cross, at the enemy's bearing, so the player can see where
+they all are without leaving the sight.
+
+- **Far:** small and grey, a direction only.
+- **Closer:** larger, and grey to yellow to red as the enemy approaches. One
+  way to pick the steps is by weapon: red inside the gun's reach (the sight's
+  `inRange`, about 1,000 m), yellow inside missile lock range (`LOCK_RANGE`,
+  1,500 m), grey beyond, up to the radar's 3 km. Size can grow continuously
+  with closeness. Fix these by play.
+- **Bearing:** the direction from the jet to the enemy, projected into the
+  screen about the gun cross (behind the jet it must still point the right
+  way, not mirror). Whether an enemy already on screen (its target box shown)
+  keeps a pointer is a design call; dropping it inside the box keeps the sight
+  clear.
+- **Room on the ring:** the missile warning's arrow sits 78 px from the screen
+  centre and INCOMING's 55 px; give the indicators their own radius, outside
+  the gun ring at its widest, and a shape that cannot be mistaken for either
+  warning. With eight enemies, pointers in nearly the same direction should
+  not hide each other (offset or merge them).
+- `drawHUD` redraws every frame: no per-frame allocations, and nothing that
+  needs `Date.now()` beyond what the HUD's other blinks already use.
+
+**Done when:** a pointer is drawn for every live enemy at its bearing, sized and
+coloured by range, checked by a headless render at a few set geometries
+(ahead, beside, behind, near and far, one with eight enemies, and one with
+both INCOMING and the missile warning up, at 800×600 and at 1366×625 as well as
+1280×720), `ui-test.mjs`
+still passes, and a playtest finds it useful rather than cluttered.
+
+### 4. GPU cost is unmeasured — P2 (needs real hardware)
 
 Every performance figure in the commit history comes from a software
 rasteriser, which does not predict GPU cost for an ALU-heavy raymarch. The
@@ -324,7 +454,7 @@ false` is the fallback. This cannot be done in a headless container.
 one integrated and one discrete GPU, and a default for `USE_VOLUMETRIC_CLOUDS`
 is chosen from it.
 
-### 4. Enemy aircraft make no sound — P2
+### 5. Enemy aircraft make no sound — P2
 
 Only the player's engine is audible, so a merge has no audio. Give each entry in
 `enemies` a cheap engine voice through `_voice(..., follow)` (see "Reference:
@@ -339,7 +469,7 @@ nothing but explosions).
 across the stereo field with a Doppler drop, and eight enemies cost less than
 the player's engine.
 
-### 5. Hits and enemy gunfire make no physical sound — P2
+### 6. Hits and enemy gunfire make no physical sound — P2
 
 `hitMarker()` is a UI confirmation tone (limited to one per 80 ms) and should
 stay one, but there is no *physical* impact sound. Rounds striking an airframe
@@ -358,7 +488,7 @@ bake or pool them, and rate-limit per target.
 100 m, and different again from hosing the sea; you hear an enemy firing at
 you.
 
-### 6. Enemy damage you can read at range — P2
+### 7. Enemy damage you can read at range — P2
 
 An enemy carries no visible damage state: you cannot tell one that is about to
 die from a fresh one. Smoke from a damaged enemy, thickening as HP falls, would
@@ -368,7 +498,7 @@ continuous emitter: see "Reference: the particle pool" for how to tag it.
 
 **Done when:** at 1 km you can tell a nearly dead enemy from a fresh one.
 
-### 7. Enemies leave no contrails — P2
+### 8. Enemies leave no contrails — P2
 
 `updateContrails` draws one contrail, the player's, from the fuselage origin.
 At altitude a contrail is how you spot a bandit before the radar does, so
@@ -378,7 +508,7 @@ persistence with altitude rather than the hard 300 m cut while doing it.
 **Done when:** an enemy above 3,000 m is visible by its contrail before it is
 visible as an aircraft.
 
-### 8. Cockpit view — P3
+### 9. Cockpit view — P3
 
 There is one chase camera (`camOff`, `camLookOff`) and nothing else. A cockpit
 or virtual-cockpit view would change how the game reads more than any other
@@ -398,7 +528,7 @@ already modelled. Before starting:
 **Done when:** a key toggles views, the canopy is transparent from inside
 without sorting artefacts, and the HUD sits on the combiner.
 
-### 9. The player's jet does not look like an F-22 — P3
+### 10. The player's jet does not look like an F-22 — P3
 
 The first playtest found the player's aircraft still does not look like an
 F-22, in its shape or in how its control surfaces move. What
@@ -464,7 +594,7 @@ What to do:
   (`scene.mjs` or a script like it).
 - The smoke test, the soak and the gunsight check pass.
 
-### 10. Battle damage on the airframe — P3
+### 11. Battle damage on the airframe — P3
 
 Beyond the smoke in "Enemy damage you can read at range", both the player and
 enemies go from pristine to
@@ -484,7 +614,7 @@ particle pool").
 heavy hits knock pieces off, a killed engine trails flame, no texture assets
 are added, and the soak still drops nothing outside the trails.
 
-### 11. Time of day — P3
+### 12. Time of day — P3
 
 The sun direction is a module-scope constant, and a good deal of tuning assumes
 it: `uCloudShadowOffset` is computed once from it at load, the terrain's
@@ -509,7 +639,7 @@ would be worth a lot and avoids most of the dynamic-shadowing problem.
 each, the sky, the water's specular, the cloud lighting and the terrain's
 shadowing all agree with where the sun is.
 
-### 12. Wingtip vortices and contrail polish — P3
+### 13. Wingtip vortices and contrail polish — P3
 
 **Wingtip vapour** exists in `updatePlayer` under `// Wing vapor`: above 3 G it
 spawns pale smoke particles at both wingtips. It is a puff emitter, not a
@@ -527,7 +657,7 @@ vortex. Remaining (enemy contrails are in "Enemies leave no contrails"):
 **Done when:** a roll visibly twists the pair of wingtip contrails, the vapour
 grows smoothly with G, and the wingtip positions come from the wing geometry.
 
-### 13. More aircraft: sixth-generation designs — P3
+### 14. More aircraft: sixth-generation designs — P3
 
 Do this last of the large features, once the gameplay and graphics tasks above
 are settled.
@@ -581,7 +711,7 @@ are assigned.
 its own silhouette and handling, and the soak, the UI test and the smoke test
 pass with each.
 
-### 14. The flight model allows 30+ G — P4 (decision)
+### 15. The flight model allows 30+ G — P4 (decision)
 
 The HUD's G readout regularly shows 30–37 G in hard turns. Steady pitch rate
 reaches about 1.05 rad/s (60°/s, `.github/tools/handling.mjs`),
@@ -629,7 +759,7 @@ setting ("Settings screen"). The measurements support trying a lower rate such
 as 150°/s; they do not say what a person will prefer.
 `.github/tools/handling.mjs` says what any pair of values gives.
 
-### 15. Settings screen — P4
+### 16. Settings screen — P4
 
 There is none. Volume and mute are keys only (`-`/`+`, `M`). Graphics options
 (`USE_VOLUMETRIC_CLOUDS`, pixel ratio) are constants in the source. Settings
@@ -656,7 +786,7 @@ sets volume, mute, the graphics options and whichever of those other settings
 exist; they persist across a reload as volume does now, and `ui-test.mjs`
 covers them.
 
-### 16. Cloud and water quality — P4
+### 17. Cloud and water quality — P4
 
 - The cloud march is half resolution (`CLOUD_SCALE = 0.5`) and resolved with a
   four-tap rotated-grid blur. Temporal reprojection would do better if anyone
@@ -665,8 +795,13 @@ covers them.
   mirrored camera can see; everything off-screen falls back to the analytic sky
   plus the analytic cloud tint. Look for the seam at grazing angles.
 
-### 17. Small things to keep in mind — P4
+### 18. Small things to keep in mind — P4
 
+- **The spawn faces a ridge.** The jet starts at 350 m, and with no input it
+  flies into a 322 m ridge about 400 m ahead and dies 3.0 s in, on `main` as
+  well; a new player who hesitates during the WAVE 1 banner crashes. Spawn
+  higher, or facing open ground. (`ui-test.mjs` now lifts the jet clear first,
+  after its own checks ran into the ridge on a slower machine.)
 - **Below 20 fps, game time runs slow but audio does not.** `dt` is clamped to
   0.05 s, so the simulation slows while the audio clock keeps real time; the
   cannon's sound reaches full rate in 0.3 s of real time while the barrels in
@@ -751,11 +886,14 @@ well it aims.
 
 **What each playability change measured.** The pilot as corrected after
 review, 15-minute runs; kills per minute is the mean of the runs with its
-standard error. "All" is the game as it now stands. The first figure is the
+standard error. "All" is the game after the first five playability changes;
+the last two rows are `main` after them and the game after the next three
+("Enemies fly twitchily", "Aim assist for the gun", with the fight held at a
+sane altitude: see "Where the fight is"). The first figure is the
 author's campaign; where a reviewer re-ran a variant independently, theirs
 follows after a slash.
 
-| game | runs | kills per minute | gun kills | hits per round | missiles without a lock | first kill, median |
+| game | runs | kills per minute | gun kills | hits per round | missiles without a lock | first kill (median, or lives with one inside 10 s) |
 |---|---|---|---|---|---|---|
 | before any of it (56841cd) | 8 | 0.67 ± 0.09 / 0.50 ± 0.12 | 3 in 2 h | 1.06% | 26% | 68.8 s |
 | lock-only missiles alone | 8 | 0.57 ± 0.09 | 4 in 2 h | 0.59% | 0 | 41.1 s |
@@ -767,6 +905,8 @@ follows after a slash.
 | all, at 120°/s | 16 | 1.09 ± 0.09 | 9 in 4 h | 5.08% | 0 | 8.4 s |
 | all, at 150°/s | 16 | 1.14 ± 0.07 / 1.05 ± 0.09 | 11 in 4 h | 4.21% | 0 | 14.9 s |
 | all, with unguided fire put back | 16 | 0.92 ± 0.08 / 1.10 ± 0.08 | 10 in 4 h | 4.92% | 9% | 27.1 s |
+| `main` after all of it (170dbe1), re-run | 16 | 0.85 ± 0.08 | 7 in 4 h | 5.35% | 0 | 13 of 47 lives inside 10 s |
+| then the enemy flight model, flares and aim pull | 16 | 1.48 ± 0.11 | 33 in 4 h | 8.23% | 0 | 7 of 21 inside 10 s |
 
 The two campaigns agree in direction more often than in size, and the same
 game differs between them by up to 0.2 kills a minute. Read accordingly:
@@ -775,9 +915,15 @@ game differs between them by up to 0.2 kills a minute. Read accordingly:
   from 1% to 6–7%, the first kill of a life from over a minute to seconds, and
   kills from 0.67 to 0.99 a minute (2.4 standard errors). An earlier eight-run
   comparison by the reviewer found the same direction (0.56 to 0.95).
-- **The gun still rarely kills**: 1.5 to 4 gun kills an hour in every row.
-  Missiles make nearly every kill. Whether the round assist helps is not
-  settled ("Aim assist for the gun").
+- **The gun rarely kills**: 1.5 to 4 gun kills an hour in every row before the
+  aim pull, and 8 an hour with it. Missiles make nearly every kill. The round
+  assist alone did not measurably help; the aim pull did ("Aim assist for the
+  gun").
+- **The enemy flight model, flares and aim pull together made the game much
+  easier**: deaths fell from 31–34 to 2–5 in four hours (two campaigns), and
+  kills rose by roughly 1.2–1.7× (0.85 to 1.48 in one, 1.02 to 1.22 in the
+  other).
+  Which part does what is in "Enemies fly twitchily".
 - **Lock-only missiles: no effect on the kill rate was resolved.** The author's
   campaign found none (0.93 against 0.92 with unguided fire put back). The
   reviewer's favoured unguided fire (0.83 against 1.10; difference −0.27, 95%
@@ -789,8 +935,9 @@ game differs between them by up to 0.2 kills a minute. Read accordingly:
   minute under the old roll, and no difference was detected at 150°/s. The
   playtest found 210°/s a bit twitchy. "The flight model allows 30+ G" has the
   detail.
-- **This pilot rarely gets past wave 3.** In the game as it stands, 32 of 50
-  lives reached wave 2, 11 reached wave 3 and 2 reached wave 4. The soak bot,
+- **On `main` this pilot rarely gets past wave 3**: 10 of 47 lives reached
+  wave 3 and 1 reached wave 4. With the enemy flight model, flares and aim
+  pull, 17 of 21 reached wave 4 and 2 reached wave 6. The soak bot,
   on the game before any of this, reached wave 4 in 9 of 20 lives and killed
   3.6 enemies a minute, 2.4 of them with the gun.
 

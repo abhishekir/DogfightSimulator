@@ -76,6 +76,11 @@ window.__g = {
   nearest: typeof findNearestEnemy === 'function' ? findNearestEnemy : null,
   inCrosshair: typeof isEnemyInCrosshair === 'function' ? isEnemyInCrosshair : null,
   sight: typeof gunSight === 'function' ? gunSight : null,
+  // The missile warning: the range of the nearest enemy missile tracking the player, 0 for
+  // none (and always 0 on a copy of the game from before the warning), and the flare pool.
+  get missileThreat(){return typeof missileThreat === 'number' ? missileThreat : 0},
+  get flarePool(){return typeof flarePool === 'object' ? flarePool : []},
+  spawnMissile: typeof spawnMissile === 'function' ? spawnMissile : null,
   start(){document.getElementById('blocker').style.display='none';gameStarted=true;startGame()},
   restart(){startGame()},
   MAX_BULLETS, MAX_PLAYER_HP, MAX_MISSILE_AMMO, MAX_PARTICLES,

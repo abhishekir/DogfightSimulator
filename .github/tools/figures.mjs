@@ -10,7 +10,9 @@
  *
  * Each argument is a tag prefix: it pools .github/tools/out/soak-<prefix>.json and every
  * soak-<prefix>-*.json. Rates are pooled (total kills over total minutes, total hits over
- * total rounds) and the time to first kill is the median over every life that made one.
+ * total rounds); the time to first kill is bimodal, so it is given as the share of lives
+ * that made one inside 10 s. Runs that recorded it also give where the fight was: the
+ * range of the runs' median altitude, the highest point, and the share of time above 5 km.
  * Kills per minute also gets the mean of the runs with its standard error (the spread of
  * the runs over the square root of how many): two groups whose means are within about two
  * standard errors of the difference have not been told apart. Four runs a side told apart
@@ -40,14 +42,15 @@ for (const g of groups) {
   const meanSe = a => { const m = a.reduce((x, y) => x + y, 0) / a.length;
     const se = a.length > 1 ? Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1) / a.length) : NaN;
     return `${m.toFixed(2)} ± ${se.toFixed(2)}`; };
-  const waves = [];
+  const waves = [], alts = runs.map(r => r.altitudeM).filter(a => a && a.samples);
   for (const r of runs) for (const w of r.deathsPerWave) {
     const c = waves[w.wave - 1] ||= { died: 0, reached: 0 }; c.died += w.died; c.reached += w.reached; }
   cols.push({ name: g, rows: {
     'runs, pilot': `${runs.length}, ${[...new Set(runs.map(r => r.pilot))].join('/')}`,
     'game-minutes alive': minutes.toFixed(1),
     'lives': String(lives.length),
-    'time to first kill (median)': firsts.length ? `${median(firsts).toFixed(1)} s` : '-',
+    // Bimodal (a kill inside 10 s, or a wait of 12-60 s), so the share, not a median.
+    'first kill inside 10 s': `${firsts.filter(t => t <= 10).length} of ${lives.length} lives`,
     'lives without a kill': `${lives.length - firsts.length} of ${lives.length}`,
     'kills per minute': `${((gun + missile) / minutes).toFixed(2)} (runs ${Math.min(...kpm).toFixed(2)}-${Math.max(...kpm).toFixed(2)})`,
     '  mean of runs ± s.e.': meanSe(kpm),
@@ -58,6 +61,11 @@ for (const g of groups) {
     'missiles fired': String(missiles),
     '  without a lock': `${unguided} (${(100 * unguided / Math.max(missiles, 1)).toFixed(0)}%)`,
     ...Object.fromEntries(waves.map((w, i) => [`deaths on wave ${i + 1}`, `${w.died} of ${w.reached}`])),
+    ...(alts.length ? {
+      'altitude median, km (runs)': `${(Math.min(...alts.map(a => a.p50)) / 1000).toFixed(1)}-${(Math.max(...alts.map(a => a.p50)) / 1000).toFixed(1)}`,
+      'altitude highest, km': (Math.max(...alts.map(a => a.max)) / 1000).toFixed(1),
+      'time above 5 km': `${(100 * alts.reduce((n, a) => n + a.over5km, 0) / alts.length).toFixed(0)}%`,
+      'ground deaths': String(runs.reduce((n, r) => n + r.deathsPerWave.reduce((m, w) => m + (w.ground || 0), 0), 0)) } : {}),
   } });
 }
 const keys = [...new Set(cols.flatMap(c => Object.keys(c.rows)))];

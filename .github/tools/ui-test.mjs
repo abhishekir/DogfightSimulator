@@ -15,7 +15,10 @@ import { join } from 'node:path';
 import { openGame, exposeSound, splice, outDir } from './lib.mjs';
 
 const game = await openGame({ transform: h => splice(exposeSound(h), 'function checkGameOver(){',
-  'window.__pj=playerJet;window.__pl=player;window.__st=()=>({gameOver,paused,gameStarted,score});function checkGameOver(){') });
+  'window.__pj=playerJet;window.__pl=player;window.__st=()=>({gameOver,paused,gameStarted,score});' +
+  'window.__mt=()=>missileThreat;window.__gt=()=>gameTime;window.__mp=missilePool;window.__aimMissile=d=>{const f=new THREE.Vector3(0,0,-1).applyQuaternion(playerJet.quaternion),' +
+  'p=playerJet.position.clone().addScaledVector(f,d);return !!spawnMissile(p,f.clone().negate(),new THREE.Vector3(),{mesh:playerJet,alive:true},true)};' +
+  'function checkGameOver(){') });
 const p = game.page, out = await outDir();
 const results = [];
 const check = (name, ok, detail) => { results.push(ok); console.log(`${ok ? 'pass' : 'FAIL'}  ${name}${detail !== undefined ? '  ' + JSON.stringify(detail) : ''}`); };
@@ -35,6 +38,9 @@ check('start and pause screens say ↑ / ↓ is nose down / up', screens.every(t
 const title = await ev(() => document.getElementById('blocker').innerText);
 check('start screen explains the missile rack', /12 in the rack/.test(title) && /\+2 per kill/.test(title) && /wave is cleared/.test(title));
 
+// Both screens list the flares key.
+check('start and pause screens list C for flares', screens.every(t => /C\s*— Flares/.test(t)));
+
 // Volume keys on the title screen, before the audio context exists.
 for (let i = 0; i < 3; i++) await p.keyboard.press('Minus');
 check('volume keys work before start', await ev(() => window.__snd.volume) === 0.7, await ev(() => window.__snd.volume));
@@ -44,6 +50,14 @@ check('click starts the game', !(await shown('blocker')) && await ev(() => windo
 check('audio running at start', await until(() => window.__snd.ctx.state === 'running', 5000));
 check('output level is volume squared', await until(() => Math.abs(window.__snd.output.gain.value - 0.49) < 0.01, 5000),
       await ev(() => window.__snd.output.gain.value));
+
+// With no input the jet flies into a ridge near the spawn about 3 s of game time in (on main
+// too; see "Small things to keep in mind" in TODO.md), and how much game time the checks
+// below take depends on the machine. Put it at 1,500 m, level, so they test the game rather
+// than the crash, and again before anything that needs a live player.
+const clearOfGround = () => ev(() => { const j = window.__pj, pl = window.__pl; j.position.y = 1500; j.quaternion.identity();
+  pl.velocity.set(0, 0, -327); pl.pitchRate = pl.yawRate = pl.rollRate = 0; });
+await clearOfGround();
 
 // The pitch keys do what the screens say.
 const noseY = () => ev(() => new window.__THREE.Vector3(0, 0, -1).applyQuaternion(window.__pj.quaternion).y);
@@ -107,12 +121,52 @@ await p.keyboard.up('KeyF');
 check('an empty rack stays empty', await ev(() => window.__pl.missileAmmo) === 0 && before < 0);
 await ev(() => { window.__pl.missileAmmo = 12; });
 
-// Crash into the ground while firing.
+await clearOfGround();
+check('the player is alive and clear of the ground for the flares and missile checks',
+      await ev(() => !window.__st().gameOver && window.__pl.hp > 0 && window.__pj.position.y > 1000));
+
+// Flares: one press of C drops one salvo, with its sound. Hold it until the salvo has gone,
+// let go, and wait past the 0.6 s cooldown in game time: exactly one salvo spent.
+const flares0 = await ev(() => { window.__gt0 = window.__gt(); return window.__pl.flares; });
+await p.keyboard.down('KeyC');
+await until(() => window.__pl.flares < 8, 10000);
+await p.keyboard.up('KeyC');
+await until(() => window.__gt() > window.__gt0 + 1.5, 30000);
+check('one press of C drops one salvo', flares0 === 8 && await ev(() => window.__pl.flares) === 7, [flares0, await ev(() => window.__pl.flares)]);
+check('the flares sound', await ev(() => window.__snd._lastFlares > 0), await ev(() => window.__snd._lastFlares));
+
+// A missile tracking the player raises the warning, and its tone beeps: sampled once a game
+// frame over a game-second (about five beeps; software rendering runs the game far slower
+// than the wall clock), it must be seen both on and off. When the missile is gone (here
+// taken out of play, as one that hits, expires or is decoyed is), the warning and tone stop.
+check('still alive before the missile checks (a dead player raises no warning and would pass them trivially)',
+      await ev(() => !window.__st().gameOver), await ev(() => ({ hp: window.__pl.hp, y: Math.round(window.__pj.position.y) })));
+await ev(() => window.__aimMissile(1500));
+check('a missile tracking the player raises the warning', await until(() => window.__mt() > 0, 15000), await ev(() => window.__mt()));
+const tone = { on: 0, off: 0 };
+for (const [t0, wall] = [await ev(() => window.__gt()), Date.now()]; Date.now() - wall < 90000;) {
+  const s = await ev(() => ({ t: window.__gt(), on: window.__snd.mslGain.gain.value > 0 }));
+  if (s.t !== tone.last) { tone.last = s.t; s.on ? tone.on++ : tone.off++; }
+  if (s.t > t0 + 1) break; await p.waitForTimeout(50);
+}
+delete tone.last;
+check('the missile warning tone beeps (heard on and off)', tone.on > 0 && tone.off > 0, tone);
+await ev(() => { for (const m of window.__mp) if (m.userData.active && m.userData.isEnemy) { m.userData.active = false; m.visible = false; } });
+check('the warning clears when the missile is gone', await until(() => window.__mt() === 0, 15000), await ev(() => window.__mt()));
+check('and its tone stops', await until(() => window.__snd.mslGain.gain.value === 0, 15000), await ev(() => window.__snd.mslGain.gain.value));
+
+// Crash into the ground while firing, with a missile warning sounding: at game over the
+// warning tone must stop with everything else.
+await ev(() => window.__aimMissile(2500));
+await until(() => window.__mt() > 0, 15000);
 await p.keyboard.down('Space');
-await ev(() => { window.__pj.position.y = -50; });
-check('ground crash ends the game', await until(() => window.__st().gameOver, 30000));
+// One frame of ground contact costs 12.5 HP and puts the jet back on the surface, so hold it
+// under the ground until the game ends. (This passed with a single push only while the jet
+// was already dying on the ridge by the spawn; see clearOfGround.)
+check('ground crash ends the game', await until(() => { if (!window.__st().gameOver) window.__pj.position.y = -50; return window.__st().gameOver; }, 120000));
 await p.screenshot({ path: join(out, 'ui-crash.png') });
 check('gun audio stopped at game over', await until(() => !window.__snd._gun, 5000));
+check('missile warning tone stopped at game over', await until(() => window.__snd.mslGain.gain.value === 0, 5000), await ev(() => window.__snd.mslGain.gain.value));
 await p.keyboard.up('Space');
 check('game-over screen appears', await until(() => getComputedStyle(document.getElementById('game-over')).display !== 'none', 120000));
 await p.screenshot({ path: join(out, 'ui-gameover.png') });

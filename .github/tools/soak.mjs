@@ -166,6 +166,8 @@ await p.evaluate(() => {
       try { G.frame(dt, renderLast && i === n - 1); }
       catch (e) { A('exception in frame: ' + e.message, (e.stack || '').split('\n').slice(0, 3).join(' | ')); }
       S.t += dt; S.steps++; S.lifeT += dt;
+      // Where the fight is: the jet's altitude above sea level, sampled every half second.
+      if (!G.gameOver && (S.altT = (S.altT || 0) + dt) >= 0.5) { S.altT = 0; (S.alt ||= []).push(G.jet.position.y); }
       if (!G.gameOver) { life.alive += dt; life.wave = Math.max(life.wave, G.wave);
         const r = G.player.gunRound; life.rounds += r >= lastRound ? r - lastRound : r; lastRound = r; }
       if (E) drops();
@@ -207,6 +209,10 @@ for (let gameT = 0, shot = 0; gameT < MINUTES * 60; gameT += CHUNK * DT) {
 const wait = await p.evaluate(() => { const s = window.__g.snd, ends = s.voices.map(v => v.end).filter(Number.isFinite);
   return Math.min(15, Math.max(0, ...ends.map(e => e - s.ctx.currentTime))); });
 await p.waitForTimeout(wait * 1000 + 500);
+const altitude = await p.evaluate(() => { const a = [...(window.__soak.alt || [])].sort((x, y) => x - y), n = a.length;
+  const at = q => n ? Math.round(a[Math.min(n - 1, Math.floor(n * q))]) : null;
+  return { samples: n, p50: at(0.5), p90: at(0.9), max: n ? Math.round(a[n - 1]) : null,
+    over5km: n ? +(a.filter(y => y > 5000).length / n).toFixed(3) : 0, over10km: n ? +(a.filter(y => y > 10000).length / n).toFixed(3) : 0 }; });
 const leftover = await p.evaluate(() => { const G = window.__g; G.keys.Space = false; G.frame(1 / 60, false);
   const now = G.snd.ctx.currentTime;
   return G.snd.voices.filter(v => !(v.follow && v.release))
@@ -253,7 +259,7 @@ const figures = { pilot: PILOT, page: arg('page', 'index.html'), gameMinutes: +m
   killsPerMin: +(kills / minutes).toFixed(2), gunKillsPerMin: +(sum('gun') / minutes).toFixed(2), missileKillsPerMin: +(sum('missile') / minutes).toFixed(2),
   rounds, hits, hitsPerRound: +(hits / Math.max(rounds, 1)).toFixed(4),
   missiles: sum('launches'), missilesWithoutLock: sum('unguided'),
-  forcedCrashes: L.filter(l => l.died && l.died.forced).length, deathsPerWave: perWave,
+  forcedCrashes: L.filter(l => l.died && l.died.forced).length, deathsPerWave: perWave, altitudeM: altitude,
   lifeDetail: L.map(l => ({ min: +(l.alive / 60).toFixed(1), wave: l.wave, gun: l.gun, missile: l.missile, firstKill: l.firstKill,
     hitsPerRound: +(l.hits / Math.max(l.rounds, 1)).toFixed(3), missiles: l.launches, unguided: l.unguided, died: l.died })) };
 console.log(`
@@ -262,6 +268,7 @@ difficulty (${PILOT} pilot): ${figures.lives} lives, ${figures.gameMinutes} game
   kills per minute ${figures.killsPerMin} (gun ${figures.gunKillsPerMin}, missile ${figures.missileKillsPerMin}), ${kills} kills
   hits per round fired ${(100 * figures.hitsPerRound).toFixed(2)}% (${hits} of ${rounds})
   missiles fired ${figures.missiles}, without a lock ${figures.missilesWithoutLock}
+  altitude, m: median ${altitude.p50}, 90th percentile ${altitude.p90}, highest ${altitude.max}; above 5 km ${(100 * altitude.over5km).toFixed(0)}% of the time, above 10 km ${(100 * altitude.over10km).toFixed(0)}%
   deaths per wave, not counting ${figures.forcedCrashes} forced crashes: ${perWave.map(w => `w${w.wave} ${w.died}/${w.reached}${w.ground ? ` (${w.ground} ground)` : ''}`).join(', ')}`);
 for (const l of figures.lifeDetail) console.log('  life ' + JSON.stringify(l));
 if (TAG) { const f = join(await outDir(), `soak-${TAG}.json`); await writeFile(f, JSON.stringify(figures, null, 1)); console.log(`figures written to ${f}`); }

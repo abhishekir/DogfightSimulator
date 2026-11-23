@@ -38,6 +38,7 @@ canvas{display:block}
     <span>SPACE</span> — Fire Cannons<br>
     <span>F (hold)</span> — Lock on; fires when locked<br>
     <span>MISSILES</span> — 12 in the rack, +2 per kill, full reload when a wave is cleared<br>
+    <span>C</span> — Flares, against a missile tracking you (8 salvos, reloaded when a wave is cleared)<br>
     <span>− / +</span> — Volume &nbsp; <span>M</span> — Mute<br>
     <span>ESC</span> — Pause
   </div>
@@ -58,6 +59,7 @@ canvas{display:block}
     <span>SPACE</span> — Fire Cannons<br>
     <span>F (hold)</span> — Lock on; fires when locked<br>
     <span>MISSILES</span> — 12 in the rack, +2 per kill, full reload when a wave is cleared<br>
+    <span>C</span> — Flares, against a missile tracking you (8 salvos, reloaded when a wave is cleared)<br>
     <span>− / +</span> — Volume &nbsp; <span>M</span> — Mute<br>
     <span>ESC</span> — Resume
   </div>
@@ -103,7 +105,7 @@ class SoundEngine {
     this.ctx = null; this.noiseBuffer = null;
     this.voices = [];
     this.listenerPos = new THREE.Vector3(); this.listenerVel = new THREE.Vector3(); this._listenerPlaced = false;
-    this._fireDuck = 1; this._gun = null; this._lastHitMarker = 0; this._lastRackEmpty = -1;
+    this._fireDuck = 1; this._gun = null; this._lastHitMarker = 0; this._lastRackEmpty = -1; this._lastFlares = -1;
     this.volume = 1; this.muted = false;
     try {
       const s = JSON.parse(localStorage.getItem(AUDIO_SETTINGS_KEY));
@@ -412,10 +414,18 @@ class SoundEngine {
     this.warnOsc = this.ctx.createOscillator(); this.warnOsc.type = 'sine'; this.warnOsc.frequency.value = 1600;
     this.warnGain = this.ctx.createGain(); this.warnGain.gain.value = 0;
     this.warnOsc.connect(this.warnGain); this.warnGain.connect(this.buses.cockpit); this.warnOsc.start();
+    // Missile warning: a square-wave beep, band-limited like the other headset tones, lower and
+    // more insistent than the round warning, beeping faster as the missile closes.
+    this.mslOsc = this.ctx.createOscillator(); this.mslOsc.type = 'square'; this.mslOsc.frequency.value = 1050;
+    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 3000;
+    this.mslGain = this.ctx.createGain(); this.mslGain.gain.value = 0;
+    this.mslOsc.connect(lp); lp.connect(this.mslGain); this.mslGain.connect(this.buses.cockpit); this.mslOsc.start();
+    this._mslPhase = 0; this._warnPhase = 0;
   }
   // `seek` is -1 with the seeker off, 0 with it looking at nothing, and the target's signal
   // strength (0-1] with one in it. `gunSpin` is the cannon's barrel speed, 0-1.
-  update(throttle, speed, firing, lockProg, threat, dt, seek = -1, gunSpin = 0) {
+  // `missile` is 0 with no missile tracking the player, else how close the nearest is (0-1].
+  update(throttle, speed, firing, lockProg, threat, dt, seek = -1, gunSpin = 0, missile = 0) {
     if (!this.ctx) return;
     const t = throttle, t2 = t * t;
     // Roar does most of the work and grows hard with power; its top end opens with it.
@@ -461,7 +471,12 @@ class SoundEngine {
     this.seekDepth.gain.value = sk.depth; this.seekChop.gain.value = 1 - sk.depth; this.seekLfo.frequency.value = sk.rate;
     this.seekHiss.gain.value = sk.hiss;
     // Threat warning - pulsing tone
-    this.warnGain.gain.value = threat ? (Math.sin(performance.now() * 0.025) > 0 ? 0.05 : 0) : 0;
+    // On a dt phase, 4 beeps a second as before, so an offline render or a long frame keeps time.
+    this._warnPhase = threat ? (this._warnPhase + dt * 4) % 1 : 0;
+    this.warnGain.gain.value = threat && this._warnPhase < 0.5 ? 0.05 : 0;
+    // Missile warning: 5 beeps a second at the edge of the warning range, 12 close in.
+    this._mslPhase = missile > 0 ? (this._mslPhase + dt * (5 + 7 * missile)) % 1 : 0;
+    this.mslGain.gain.value = missile > 0 && this._mslPhase < 0.5 ? 0.105 : 0;
   }
   // Once per rendered frame, after the camera has moved: put the listener at the camera and
   // re-place every live world-space voice relative to it.
@@ -541,8 +556,8 @@ class SoundEngine {
   silence() {
     if (!this.ctx) return;
     for (const g of [this.roarGain, this.rumbleGain, this.whineGain, this.abGain, this.crackleGain,
-                     this.windGain, this.seekGain, this.seekHiss, this.warnGain]) g.gain.value = 0;
-    this._seek.level = 0; this._seek.hiss = 0;
+                     this.windGain, this.seekGain, this.seekHiss, this.warnGain, this.mslGain]) g.gain.value = 0;
+    this._seek.level = 0; this._seek.hiss = 0; this._mslPhase = 0; this._warnPhase = 0;
     if (this._gun) this._gunStop(0);
     // Missile motors follow pool entries that stop updating when the game ends.
     for (const v of this.voices) if (v.follow && v.release) { v.follow = null; v.release(); }
@@ -655,6 +670,20 @@ class SoundEngine {
     g.gain.setValueAtTime(0.1, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
     o.connect(g); g.connect(this.buses.cockpit); o.start(now); o.stop(now + 0.07);
   }
+  // Flares leaving the dispenser: a dull thump and a short hiss, over the headset.
+  flares() {
+    if (!this.ctx) return;
+    const ctx = this.ctx, now = ctx.currentTime;
+    const src = ctx.createBufferSource(), bp = ctx.createBiquadFilter(), g = ctx.createGain();
+    src.buffer = this.noiseBuffer; bp.type = 'bandpass'; bp.frequency.value = 1400; bp.Q.value = 0.7;
+    g.gain.setValueAtTime(0, now); g.gain.linearRampToValueAtTime(1.35, now + 0.006); g.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    src.connect(bp); bp.connect(g); g.connect(this.buses.cockpit); src.start(now, Math.random()); src.stop(now + 0.32);
+    const o = ctx.createOscillator(), og = ctx.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(110, now); o.frequency.exponentialRampToValueAtTime(50, now + 0.08);
+    og.gain.setValueAtTime(1.1, now); og.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    o.connect(og); og.connect(this.buses.cockpit); o.start(now); o.stop(now + 0.11);
+    this._lastFlares = now;
+  }
   // The missile rack is empty: two short falling beeps over the headset, when the last
   // missile leaves the rail and whenever F is pressed with none left. Fixed pitches, so it is
   // never mistaken for the seeker, whose pitch moves with the lock; band-limited and softly
@@ -707,11 +736,26 @@ let lockTarget = null, lockProgress = 0;
 let seekerState = null, rackEmptyFlash = 0;
 const LOCK_TIME = 1.5, LOCK_CONE = 0.85, LOCK_RANGE = 1500, LOCK_WAIT_PROGRESS = 0.99;
 const MAX_PLAYER_HP = 100, MAX_MISSILE_AMMO = 12;
+// Flares. A salvo puts FLARE_SALVO decoys in the air, and every missile tracking the aircraft
+// that dropped it, within FLARE_RANGE and with one of them inside FLARE_SEEKER of its heading,
+// is pulled off onto one with the given chance: FLARE_DECOY_ENEMY for an enemy's salvo against
+// the player's missile, FLARE_DECOY_PLAYER for the player's against an enemy's. A missile left
+// chasing a flare that has burnt out flies on unguided. The player has MAX_PLAYER_FLARES salvos,
+// on C, one every FLARE_COOLDOWN; enemies carry FLARE_ENEMY_SALVOS and react to a missile
+// tracking them inside FLARE_REACT_RANGE. See "Flares" under "The game loop" in TODO.md.
+const FLARE_SALVO = 2, FLARE_LIFE = 2.6, FLARE_RANGE = 2000, FLARE_SEEKER = 1.0;
+const FLARE_DECOY_ENEMY = 0.35, FLARE_DECOY_PLAYER = 0.7;
+const MAX_PLAYER_FLARES = 8, FLARE_COOLDOWN = 0.6;
+const FLARE_ENEMY_SALVOS = 3, FLARE_REACT_RANGE = 1200, FLARE_ENEMY_INTERVAL = 0.7;
+// The nearest enemy missile tracking the player, for the warning: its range in metres (0 for
+// none, or none inside MISSILE_WARN_RANGE) and the direction it is coming from.
+const MISSILE_WARN_RANGE = 3000;
+let missileThreat = 0, missileThreatDir = new THREE.Vector3();
 let deathCamTimer = 0, deathCamCenter = new THREE.Vector3(), deathCamAngle = 0;
 const killNotifications = [];
 let audioToastUntil = 0;
 const keys = {};
-const gameKeys = new Set(['KeyW','KeyS','KeyA','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','KeyF']);
+const gameKeys = new Set(['KeyW','KeyS','KeyA','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','KeyF','KeyC']);
 window.addEventListener('keydown', e => {
   keys[e.code] = true;
   if (gameKeys.has(e.code)) e.preventDefault();
@@ -2602,7 +2646,7 @@ function createPlayerJet(){
 const playerJet=createPlayerJet();playerJet.position.set(0,350,0);scene.add(playerJet);
 const player={minSpeed:40,maxSpeed:450,throttle:.3,velocity:new THREE.Vector3(0,0,-120),
   rollRate:0,pitchRate:0,yawRate:0,hp:MAX_PLAYER_HP,gunSpin:0,gunPhase:0,gunRound:0,onGround:false,missileCooldown:0,missileAmmo:MAX_MISSILE_AMMO,
-  missileSide:1,fWasDown:false,prevVelocity:new THREE.Vector3(),prevPosition:playerJet.position.clone()};
+  missileSide:1,fWasDown:false,flares:MAX_PLAYER_FLARES,flareCooldown:0,prevVelocity:new THREE.Vector3(),prevPosition:playerJet.position.clone()};
 
 /* ═══════════════════ ENEMY JET ═══════════════════ */
 const eBMat=airframeMaterial(0x74413a,{roughness:.56});
@@ -2780,7 +2824,50 @@ function spawnMissile(pos,dir,carrierVelocity,target,isEnemy=false,launchSide=0)
   u.age=0;u.launchSpeed=u.vel.length();u.maxSpeed=carrierVelocity.length()+(isEnemy?320:410);u.trailDistance=0;u.prevPos.copy(pos);
   m.lookAt(pos.clone().add(dir));m.visible=true;emitMissileLaunch(pos,dir,isEnemy);return m}}
 
+// A flare is a bright sprite that sheds the aircraft's speed, falls and burns out, trailing a
+// little smoke. Its `decoy` is what a missile pulled off by it steers for: a target with a mesh
+// and an `alive` flag, the same shape as an enemy or the player's target.
+const MAX_FLARES=48,flarePool=[],_flareEject=new THREE.Vector3(),_flareToMissile=new THREE.Vector3(),_flareRise=new THREE.Vector3(0,3,0);
+const flareMat=fxCloudAware(new THREE.SpriteMaterial({map:createSunGlowTexture(),color:0xfff2c8,transparent:true,opacity:1,depthWrite:false,blending:THREE.AdditiveBlending,fog:false}));
+for(let i=0;i<MAX_FLARES;i++){const f=asEffect(new THREE.Sprite(flareMat));f.visible=false;
+  f.userData={active:false,vel:new THREE.Vector3(),life:0,maxLife:1,smoke:0,decoy:{mesh:f,alive:false,isFlare:true}};scene.add(f);flarePool.push(f)}
+// Drop a salvo from an aircraft at `pos`, moving at `vel`, attitude `quat`: out to either side,
+// down and back. `owner` is the enemy dropping it, or null for the player; the missiles it can
+// pull off are the ones tracking that aircraft. A whole salvo or nothing: with fewer than
+// FLARE_SALVO flares free it drops none and returns 0, so the caller spends nothing. The
+// scratch array keeps its FLARE_SALVO slots and is never truncated (truncating it frees its
+// storage, and refilling allocates again on every refused attempt while C is held).
+const _salvo=new Array(FLARE_SALVO).fill(null);
+function dropFlares(pos,vel,quat,chance,owner){
+  let n=0;
+  for(let i=0;i<flarePool.length&&n<FLARE_SALVO;i++)if(!flarePool[i].userData.active)_salvo[n++]=flarePool[i];
+  if(n<FLARE_SALVO)return 0;
+  for(let i=0;i<n;i++){const f=_salvo[i],u=f.userData,side=i%2?1:-1;
+    _flareEject.set(side*(16+Math.random()*10),-12-Math.random()*8,8+Math.random()*8).applyQuaternion(quat);
+    f.position.copy(pos);u.vel.copy(vel).add(_flareEject);u.life=u.maxLife=FLARE_LIFE*(.85+Math.random()*.3);u.smoke=0;
+    u.active=true;u.decoy.alive=true;f.visible=true}
+  for(const m of missilePool){const u=m.userData;if(!u.active||!u.tracking||!u.target||u.target.isFlare)continue;
+    if(owner?(u.isEnemy||u.target!==owner):(!u.isEnemy||u.target.mesh!==playerJet))continue;
+    if(m.position.distanceTo(pos)>FLARE_RANGE)continue;
+    const f=_salvo[Math.floor(Math.random()*n)];
+    if(u.vel.angleTo(_flareToMissile.subVectors(f.position,m.position))>FLARE_SEEKER)continue;
+    if(Math.random()<chance)u.target=f.userData.decoy}
+  return n}
+function updateFlares(dt){const drag=Math.exp(-1.4*dt);
+  for(const f of flarePool){const u=f.userData;if(!u.active)continue;u.life-=dt;
+    if(u.life<=0){u.active=false;f.visible=false;u.decoy.alive=false;
+      for(const m of missilePool)if(m.userData.target===u.decoy)m.userData.tracking=false;continue}
+    u.vel.multiplyScalar(drag);u.vel.y-=9.81*dt;f.position.addScaledVector(u.vel,dt);
+    const burn=Math.min(u.life/u.maxLife*4,1),s=(6+14*burn)*(.8+Math.random()*.4);f.scale.set(s,s,1);
+    u.smoke+=dt;if(u.smoke>.08){u.smoke=0;spawnP(emitters.flareSmoke,f.position,_flareRise,1.1,0xbbbbbb,2.5+Math.random()*2,'smoke')}}}
+function resetFlares(){for(const f of flarePool){f.userData.active=false;f.userData.decoy.alive=false;f.visible=false}}
+
 const MAX_PARTICLES=600,MAX_TRAIL_PARTICLES=360,PARTICLE_EFFECT_RESERVE=160,freeParticles=[],activeParticles=[];
+// A cannon hit's sparks are 9 particles living up to 3 s, and with the aim pull holding the
+// cross on a target the hits come fast enough to empty the pool; they are cosmetic, so they
+// are left out while fewer than this many particles are free, which keeps room for two kill
+// explosions (about 90 particles each).
+const HIT_SPARK_FLOOR=200;
 let activeTrailParticles=0;
 // Every spawnP request names its emitter, which counts what it asked for, what the pool
 // refused it and how many of its particles were evicted (the soak reports all three). A trail
@@ -2790,7 +2877,7 @@ const particleEmitter=(name,trail)=>({name,trail,requested:0,dropped:0,evicted:0
 const emitters={explosion:particleEmitter('explosion',false),impact:particleEmitter('impact',false),spark:particleEmitter('spark',false),
   launch:particleEmitter('launch',false),missileTrail:particleEmitter('missileTrail',true),exhaust:particleEmitter('exhaust',false),
   enemyExhaust:particleEmitter('enemyExhaust',false),muzzle:particleEmitter('muzzle',false),damage:particleEmitter('damage',false),
-  vapour:particleEmitter('vapour',false),debris:particleEmitter('debris',false)};
+  vapour:particleEmitter('vapour',false),debris:particleEmitter('debris',false),flareSmoke:particleEmitter('flareSmoke',true)};
 function createSmokeTexture(){
   const S=128,R=S*.5,lump=tileableFBM(S,5,4,31337),data=new Uint8Array(S*S*4);
   for(let y=0;y<S;y++)for(let x=0;x<S;x++){
@@ -2974,8 +3061,12 @@ function spawnEnemy(wc){if(enemies.length>=MAX_ENEMIES)return;const m=enemyJetTe
   const aggression=aggrMin+Math.random()*(1-aggrMin),skill=skillMin+Math.random()*(1-skillMin);
   const baseSpeed=100+Math.random()*80+(wc.speedBonus||0);
   const hp=40+(wc.hpBonus||0);
+  // Spawn pointing at the player, wings level, so the first thing it does is not a turn.
+  _eLook.lookAt(m.position,playerJet.position,_axisY);m.quaternion.setFromRotationMatrix(_eLook);
   const e={mesh:m,prevPosition:m.position.clone(),velocity:new THREE.Vector3(),hp,alive:true,
-    aggression,skill,baseSpeed,currentSpeed:baseSpeed,
+    aggression,skill,baseSpeed,currentSpeed:baseSpeed,speedCmd:baseSpeed,rollRate:0,
+    turnMax:ENEMY_TURN_MAX*(.7+.25*skill),rollMax:ENEMY_ROLL_MAX*(.6+.35*skill),
+    flares:FLARE_ENEMY_SALVOS,flareCooldown:0,flareReact:0,
     state:'inbound',stateTimer:0,stateDuration:0,
     extendDir:new THREE.Vector3(),attackPoint:new THREE.Vector3(),attackAligned:false,
     fireCooldown:1+Math.random()*2,burstCount:0,missileCooldown:8+Math.random()*12,
@@ -3104,6 +3195,18 @@ const GUN_SIGHT_RANGE=600;
 // angle of the nose leaves aimed at the lead point instead of straight along the nose. The
 // controls are untouched, so it never fights the player; 0 turns it off.
 const GUN_ASSIST=1.5*Math.PI/180;
+// Aim pull ("Aim assist for the gun"): while the trigger is held and the lead point is within
+// GUN_PULL_CONE of the nose, the nose is turned onto it, closing the angle at GUN_PULL_GAIN per
+// second and never faster than GUN_PULL_MAX. It acts only while firing and only near the
+// marker, so it holds a cross the player has put there rather than finding targets; with
+// GUN_PULL_MAX 0 it is off.
+const GUN_PULL_CONE=5*Math.PI/180,GUN_PULL_GAIN=6,GUN_PULL_MAX=15*Math.PI/180,_pullAxis=new THREE.Vector3();
+// Nor does it ever turn the nose down while the ground within 3 s along the jet's path is
+// closer than GUN_PULL_GROUND: firing at a low target in a shallow dive, it would otherwise
+// take the jet into the hills. The player's own inputs are never touched.
+const GUN_PULL_GROUND=150,_pullAhead=new THREE.Vector3();
+function playerClearanceAhead(){const p=playerJet.position;let c=p.y-getGroundHeight(p.x,p.z);
+  for(let i=1;i<=6;i++){_pullAhead.copy(p).addScaledVector(player.velocity,i*.5);c=Math.min(c,_pullAhead.y-getGroundHeight(_pullAhead.x,_pullAhead.z))}return c}
 const _gsF=new THREE.Vector3(),_gsD=new THREE.Vector3(),_gsR=new THREE.Vector3(),_gsL=new THREE.Vector3(),_gsP=new THREE.Vector3();
 // The gun's solution on `target`, in world space: for a round leaving GUN_ORIGIN now along
 // the nose at the gun's round speed, and the target holding its velocity,
@@ -3187,6 +3290,17 @@ function updatePlayer(dt){
   _qP.setFromAxisAngle(_axisX,player.pitchRate*dt);
   _qY.setFromAxisAngle(_axisY,player.yawRate*dt);
   playerJet.quaternion.multiply(_qY).multiply(_qP).multiply(_qR).normalize();
+  // Aim pull, before the guns fire this frame (see GUN_PULL_CONE). Exponential in the angle,
+  // so the same at any frame rate.
+  if(keys['Space']&&GUN_PULL_MAX>0){const tgt=lockTarget&&lockTarget.alive?lockTarget:findNearestEnemy();
+    if(tgt){const sol=gunSolution(tgt);
+      if(sol.solved&&sol.reach&&sol.off>1e-5&&sol.off<=GUN_PULL_CONE){
+        _fwd.set(0,0,-1).applyQuaternion(playerJet.quaternion);
+        _pullAxis.subVectors(sol.lead,sol.muzzle).normalize();
+        if(!(_pullAxis.y<_fwd.y&&playerClearanceAhead()<GUN_PULL_GROUND)){   // not nose-down near the ground
+          _pullAxis.crossVectors(_fwd,_pullAxis).normalize();
+          _tmpQ.setFromAxisAngle(_pullAxis,Math.min(sol.off*(1-Math.exp(-GUN_PULL_GAIN*dt)),GUN_PULL_MAX*dt));
+          playerJet.quaternion.premultiply(_tmpQ).normalize()}}}}
   _fwd.set(0,0,-1).applyQuaternion(playerJet.quaternion);
   _tmpV1.copy(_fwd).multiplyScalar(speed);player.velocity.lerp(_tmpV1,smoothT(2,dt));
   if(playerJet.position.y>5)player.velocity.y-=18*dt;
@@ -3242,6 +3356,12 @@ function updatePlayer(dt){
   // builds, and one lost before it completes starts again from nothing. (Holding F with
   // nothing locked used to fire unguided every half second, which emptied the rack of a
   // player holding F while manoeuvring for a shot.)
+  // Flares on C: a salvo every FLARE_COOLDOWN while it is held, from MAX_PLAYER_FLARES.
+  player.flareCooldown=Math.max(0,player.flareCooldown-dt);
+  if(keys['KeyC']&&player.flareCooldown<=0&&player.flares>0){
+    if(dropFlares(playerJet.position,player.velocity,playerJet.quaternion,FLARE_DECOY_PLAYER,null)){
+      player.flares--;player.flareCooldown=FLARE_COOLDOWN;snd.flares()}}
+
   player.missileCooldown-=dt;let seekSignal=-1;
   const fDown=!!keys['KeyF'];
   if(fDown&&!player.fWasDown&&player.missileAmmo<=0){snd.rackEmpty();rackEmptyFlash=2}
@@ -3294,16 +3414,85 @@ function updatePlayer(dt){
     spawnP(emitters.vapour,wL,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke');
     spawnP(emitters.vapour,wR,v,.3+Math.random()*.4,0xddddff,.5+Math.random()*1.5,'smoke')}
 
-  snd.update(player.throttle,speed,trigger,lockProgress,incomingThreat,dt,seekSignal,player.gunSpin);
+  snd.update(player.throttle,speed,trigger,lockProgress,incomingThreat,dt,seekSignal,player.gunSpin,
+    missileThreat>0?1-missileThreat/MISSILE_WARN_RANGE:0);
 }
 
-const _eFwd=new THREE.Vector3(),_eTarget=new THREE.Vector3(),_eTargetOffset=new THREE.Vector3(),_eDesired=new THREE.Quaternion(),_eLook=new THREE.Matrix4();
+const _eFwd=new THREE.Vector3(),_eTarget=new THREE.Vector3(),_eTargetOffset=new THREE.Vector3(),_eLook=new THREE.Matrix4();
 const ENEMY_BREAK_DISTANCE=400,ENEMY_ATTACK_BREAK_DISTANCE=180,ENEMY_REENGAGE_DISTANCE=700;
 const ENEMY_INBOUND_TARGET_DISTANCE=600,ENEMY_REPOSITION_TARGET_DISTANCE=800;
-function smoothLookAt(mesh, target, dt, turnSpeed) {
-  _eLook.lookAt(mesh.position, target, _axisY);
-  _eDesired.setFromRotationMatrix(_eLook);
-  mesh.quaternion.slerp(_eDesired, smoothT(turnSpeed, dt));
+// Where the fight is held. Every height the AI picks is relative to the player, and climbing
+// costs neither side any speed, so the two used to lead each other upward: enemies set up
+// above the player, the player followed them up, and their next point was higher again (with
+// enemies that turn within limits, the fight drifted to 10-60 km). Above FIGHT_AGL over the
+// ground, the enemies set up below the player instead, up to 800 m below, and extend level or
+// downward, which draws the fight back down. Below it nothing changes.
+const FIGHT_AGL=2500;
+function enemyAltitudeBias(){const agl=playerJet.position.y-getGroundHeight(playerJet.position.x,playerJet.position.z);
+  return -THREE.MathUtils.clamp((agl-FIGHT_AGL)*.3,0,800)}
+// How an enemy flies (TODO.md, "Enemies fly twitchily"). The state machine chooses a point to
+// fly at, how keenly to turn for it, and a speed; flyEnemy gets there the way an aircraft does.
+// It rolls until its lift points where the turn needs it (tan(bank) = speed x turn rate / g in
+// a level turn), and pulls only with the lift it has, so a turn starts with a roll, as the
+// player's do. The nose turns at most turnMax (under 60 deg/s, the player's pitch rate), the
+// roll rate stays under rollMax (under 270 deg/s), and speed changes by at most ENEMY_ACCEL /
+// ENEMY_DECEL (under 2 g). Every rate is per second, so it flies the same at any frame rate.
+const ENEMY_TURN_MAX=60*Math.PI/180,ENEMY_ROLL_MAX=240*Math.PI/180,ENEMY_ACCEL=15,ENEMY_DECEL=18,ENEMY_G=9.81;
+const ENEMY_ROLL_GAIN=6,ENEMY_ROLL_RESPONSE=12,ENEMY_SPEED_RESPONSE=1.5;
+// Terrain: as the ground within ENEMY_LOOKAHEAD seconds ahead comes inside ENEMY_CLEAR_START, a
+// climb of ENEMY_CLIMB (tan of its angle, about 35 degrees) is blended into the direction it
+// wants, completely by ENEMY_CLEAR_FULL. The step is integrated in substeps of at most
+// ENEMY_SUBSTEP, so the roll loop behaves the same at any frame rate.
+const ENEMY_CLEAR_START=220,ENEMY_CLEAR_FULL=60,ENEMY_CLIMB=.7,ENEMY_LOOKAHEAD=4,ENEMY_FLOOR=15,ENEMY_SUBSTEP=1/120;
+const _eUp=new THREE.Vector3(),_eDir=new THREE.Vector3(),_eLift=new THREE.Vector3(),_eGrav=new THREE.Vector3(),
+  _eAcc=new THREE.Vector3(),_eAxis=new THREE.Vector3(),_eAhead=new THREE.Vector3(),_eClimb=new THREE.Vector3(),_eQ=new THREE.Quaternion();
+// The least height above the ground or sea along the next ENEMY_LOOKAHEAD seconds of its path.
+function enemyClearanceAhead(e){const p=e.mesh.position;let c=p.y-getGroundHeight(p.x,p.z);
+  for(let i=1;i<=4;i++){_eAhead.copy(p).addScaledVector(_eFwd,e.currentSpeed*ENEMY_LOOKAHEAD*i/4);
+    c=Math.min(c,_eAhead.y-getGroundHeight(_eAhead.x,_eAhead.z))}return c}
+function flyEnemy(e,target,dt,gain){
+  const n=Math.max(1,Math.ceil(dt/ENEMY_SUBSTEP-1e-9)),h=dt/n;
+  for(let i=0;i<n;i++)flyEnemyStep(e,target,h,gain);
+  _eFwd.set(0,0,-1).applyQuaternion(e.mesh.quaternion);
+  // A last resort that the pull-up should never leave to it; enemy-flight.mjs counts it.
+  const g=getGroundHeight(e.mesh.position.x,e.mesh.position.z);
+  if(e.mesh.position.y<g+ENEMY_FLOOR)e.mesh.position.y=g+ENEMY_FLOOR;
+}
+function flyEnemyStep(e,target,dt,gain){
+  const q=e.mesh.quaternion;
+  _eFwd.set(0,0,-1).applyQuaternion(q);_eUp.set(0,1,0).applyQuaternion(q);
+  // The direction it wants: toward the target, with a climb blended in for the ground ahead.
+  // The blend follows the clearance continuously, so the aim never jumps between the two.
+  _eDir.subVectors(target,e.mesh.position).normalize();
+  const wGround=THREE.MathUtils.clamp((ENEMY_CLEAR_START-enemyClearanceAhead(e))/(ENEMY_CLEAR_START-ENEMY_CLEAR_FULL),0,1);
+  e.ground=wGround;   // for enemy-flight.mjs
+  if(wGround>0){_eClimb.set(_eFwd.x,0,_eFwd.z);if(_eClimb.lengthSq()<1e-6)_eClimb.set(0,0,-1);
+    _eClimb.normalize().setY(ENEMY_CLIMB).normalize();_eDir.lerp(_eClimb,wGround);
+    if(_eDir.lengthSq()<1e-6)_eDir.copy(_eClimb);else _eDir.normalize();gain+=(Math.max(gain,2)-gain)*wGround}
+  // The turn it wants, at a rate that grows with the angle left, up to turnMax.
+  const cosA=THREE.MathUtils.clamp(_eFwd.dot(_eDir),-1,1),w=Math.min(e.turnMax,gain*Math.acos(cosA));
+  _eLift.copy(_eDir).addScaledVector(_eFwd,-cosA);                 // toward the target, across the nose
+  if(_eLift.lengthSq()<1e-8)_eLift.copy(_eUp);else _eLift.normalize(); // dead astern: pull the way it is banked
+  // The lift that would fly that turn: the turn's acceleration plus what holds it up.
+  _eGrav.copy(_axisY).addScaledVector(_eFwd,-_eFwd.y).multiplyScalar(ENEMY_G);
+  _eLift.multiplyScalar(e.currentSpeed*w).add(_eGrav);
+  // Roll toward it, at a bounded rate that builds and dies away smoothly.
+  let bankErr=0;
+  if(_eLift.lengthSq()>1e-6){_eAxis.crossVectors(_eUp,_eLift);bankErr=Math.atan2(_eAxis.dot(_eFwd),_eUp.dot(_eLift))}
+  const pCmd=THREE.MathUtils.clamp(bankErr*ENEMY_ROLL_GAIN,-e.rollMax,e.rollMax);
+  e.rollRate=THREE.MathUtils.clamp(e.rollRate+(pCmd-e.rollRate)*smoothT(ENEMY_ROLL_RESPONSE,dt),-e.rollMax,e.rollMax);
+  _eQ.setFromAxisAngle(_axisZ,-e.rollRate*dt);q.multiply(_eQ);      // about the nose (-z)
+  // Pull with the lift it has: only the part along its own lift line, never negative.
+  _eUp.set(0,1,0).applyQuaternion(q);
+  _eAcc.copy(_eUp).multiplyScalar(Math.max(0,_eLift.dot(_eUp))).sub(_eGrav);
+  const a=_eAcc.length(),turn=Math.min(a/Math.max(e.currentSpeed,1),e.turnMax);
+  if(turn>1e-6){_eAxis.crossVectors(_eFwd,_eAcc).normalize();_eQ.setFromAxisAngle(_eAxis,turn*dt);q.premultiply(_eQ)}
+  q.normalize();
+  // Speed: toward what the state asks for, at a bounded acceleration.
+  const dv=(e.speedCmd-e.currentSpeed)*(1-Math.exp(-ENEMY_SPEED_RESPONSE*dt));
+  e.currentSpeed+=THREE.MathUtils.clamp(dv,-ENEMY_DECEL*dt,ENEMY_ACCEL*dt);
+  _eFwd.set(0,0,-1).applyQuaternion(q);
+  e.mesh.position.addScaledVector(_eFwd,e.currentSpeed*dt);
 }
 function ensureEnemyHorizontalTargetDistance(target,right,side,minDistance){
   _eTargetOffset.subVectors(target,playerJet.position);
@@ -3331,7 +3520,7 @@ function beginEnemyExtend(e){
   transitionEnemy(e,'extend',3+Math.random());
   const right=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
   e.extendDir.copy(_eFwd).addScaledVector(right,e.passSide*(.12+Math.random()*.12));
-  e.extendDir.y+=.08+Math.random()*.12;e.extendDir.normalize();
+  e.extendDir.y+=(.08+Math.random()*.12)*THREE.MathUtils.clamp(1+enemyAltitudeBias()/400,-1,1);e.extendDir.normalize();
 }
 function beginEnemyReposition(e){
   transitionEnemy(e,'reposition');e.passSide=Math.random()>.5?1:-1;
@@ -3357,6 +3546,17 @@ function updateEnemies(dt){
     const toPN=toP.clone().normalize();
     _eFwd.set(0,0,-1).applyQuaternion(e.mesh.quaternion);
     const facingPlayer=_eFwd.dot(toPN);
+
+    // Flares: once one of the player's missiles is tracking it inside FLARE_REACT_RANGE, after a
+    // reaction time that shortens with skill, a salvo every FLARE_ENEMY_INTERVAL while it has any.
+    e.flareCooldown=Math.max(0,e.flareCooldown-dt);
+    if(e.flares>0){let chased=false;
+      for(const m of missilePool){const u=m.userData;
+        if(u.active&&u.tracking&&!u.isEnemy&&u.target===e&&m.position.distanceTo(e.mesh.position)<FLARE_REACT_RANGE){chased=true;break}}
+      if(!chased)e.flareReact=0;
+      else if((e.flareReact+=dt)>=.25+.6*(1-e.skill)&&e.flareCooldown<=0){
+        if(dropFlares(e.mesh.position,e.velocity,e.mesh.quaternion,FLARE_DECOY_ENEMY,e))e.flares--;
+        e.flareCooldown=FLARE_ENEMY_INTERVAL}}
 
     // Hits during cooldown remain queued for the next available evade.
     if(e.wasHit&&e.state!=='evade'&&e.evadeCooldown<=0){e.wasHit=false;
@@ -3402,19 +3602,19 @@ function updateEnemies(dt){
       const playerRight=new THREE.Vector3().crossVectors(playerFwd,_axisY);
       if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
       _eTarget.copy(playerJet.position).addScaledVector(playerFwd,500).addScaledVector(playerRight,e.passSide*220);
-      _eTarget.y+=100;
+      _eTarget.y+=100+enemyAltitudeBias();
       ensureEnemyHorizontalTargetDistance(_eTarget,playerRight,e.passSide,ENEMY_INBOUND_TARGET_DISTANCE);
       _eTarget.y=Math.max(_eTarget.y,getGroundHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
       const catchupWeight=THREE.MathUtils.smoothstep(playerFwd.dot(toPN),-.2,.8);
-      e.currentSpeed=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1+e.skill*.35;
+      e.speedCmd=enemyPositioningSpeed(e,dist,1.1,catchupWeight);turnRate=1+e.skill*.35;
       const presentationReady=playerBearing<-.55&&dist>500;
       if(presentationReady&&dist<1050+e.aggression*200)beginEnemyAttack(e);
       else if(dist<ENEMY_INBOUND_TARGET_DISTANCE)beginEnemyReposition(e);
     }else if(e.state==='attack'){
       // Hold a fixed aim point so every attack becomes a committed fly-by instead of a pursuit turn.
       _eTarget.copy(e.attackPoint);
-      e.currentSpeed=enemyAttackSpeed(e);turnRate=.95+e.skill*.55;
+      e.speedCmd=enemyAttackSpeed(e);turnRate=.95+e.skill*.55;
       if(facingPlayer>.45)e.attackAligned=true;
       if(dist<500&&facingPlayer>.85&&e.fireCooldown<=0){
         e.fireCooldown=.12+.08*(1-e.skill);e.burstCount++;
@@ -3438,7 +3638,7 @@ function updateEnemies(dt){
     }else if(e.state==='extend'){
       // Hold a straight escape vector until there is enough room for a genuinely separate pass.
       _eTarget.copy(e.mesh.position).addScaledVector(e.extendDir,1000);
-      e.currentSpeed=Math.min(Math.max(e.baseSpeed*(1.35+e.aggression*.1),player.velocity.length()+140),650);turnRate=.35;
+      e.speedCmd=Math.min(Math.max(e.baseSpeed*(1.35+e.aggression*.1),player.velocity.length()+140),650);turnRate=.35;
       if(e.stateTimer>e.stateDuration&&dist>ENEMY_REENGAGE_DISTANCE)beginEnemyReposition(e);
     }else if(e.state==='reposition'){
       // Stay inside the forward view corridor while setting up the next pass.
@@ -3447,33 +3647,20 @@ function updateEnemies(dt){
       if(playerRight.lengthSq()<.001)playerRight.set(1,0,0);else playerRight.normalize();
       _eTarget.copy(playerJet.position).addScaledVector(playerFwd,e.repositionForward)
         .addScaledVector(playerRight,e.passSide*e.repositionLateral);
-      _eTarget.y+=e.repositionHeight;
+      _eTarget.y+=e.repositionHeight+enemyAltitudeBias();
       ensureEnemyHorizontalTargetDistance(_eTarget,playerRight,e.passSide,ENEMY_REPOSITION_TARGET_DISTANCE);
       _eTarget.y=Math.max(_eTarget.y,getGroundHeight(_eTarget.x,_eTarget.z)+120);
       const playerBearing=playerFwd.dot(toPN);
-      e.currentSpeed=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=.75+e.skill*.35;
+      e.speedCmd=enemyPositioningSpeed(e,dist,.95+e.aggression*.08,1);turnRate=.75+e.skill*.35;
       const enemyAhead=playerBearing<-.65;
       if(e.stateTimer>2&&enemyAhead&&dist>ENEMY_REENGAGE_DISTANCE&&dist<1300)beginEnemyAttack(e);
     }else if(e.state==='evade'){
       _eTarget.copy(e.mesh.position).addScaledVector(e.evadeDir,600);
-      e.currentSpeed=e.baseSpeed*1.3;turnRate=2.4+e.skill*.8;
+      e.speedCmd=e.baseSpeed*1.3;turnRate=2.4+e.skill*.8;
       if(e.stateTimer>e.stateDuration)beginEnemyExtend(e);
     }
 
-    // Smooth turning toward target
-    smoothLookAt(e.mesh,_eTarget,dt,turnRate);
-    _eFwd.set(0,0,-1).applyQuaternion(e.mesh.quaternion);
-    e.mesh.position.add(_eFwd.clone().multiplyScalar(e.currentSpeed*dt));
-    // Bank into turns
-    const toTarget=new THREE.Vector3().subVectors(_eTarget,e.mesh.position).normalize();
-    const rightVec=new THREE.Vector3(1,0,0).applyQuaternion(e.mesh.quaternion);
-    const bankAmount=toTarget.dot(rightVec);
-    _tmpQ.setFromAxisAngle(_axisZ,-bankAmount*.6);
-    e.mesh.quaternion.multiply(_tmpQ).normalize();
-    // Terrain avoidance
-    const h=getGroundHeight(e.mesh.position.x,e.mesh.position.z);
-    if(e.mesh.position.y<h+60)e.mesh.position.y=h+60;
-    if(e.mesh.position.y<80)e.mesh.position.y+=80*dt;
+    flyEnemy(e,_eTarget,dt,turnRate);
     // Exhaust trail
     if(Math.random()<.3){const ep=e.mesh.position.clone().add(_eFwd.clone().multiplyScalar(16));
       spawnP(emitters.enemyExhaust,ep,_eFwd.clone().multiplyScalar(-15),.2+Math.random()*.3,0xff6600,.3+Math.random()*.6)}
@@ -3490,7 +3677,7 @@ function killEnemy(e,sv){e.alive=false;spawnExplosion(e.mesh.position,sv>100?55:
   waveKilled++;
   if(waveKilled>=waveTotal&&enemies.length===0){
     waveState='cleared';waveTimer=4;waveDisplayText=`WAVE ${waveNumber} CLEARED`;waveDisplayTimer=3;
-    player.hp=Math.min(player.hp+25,MAX_PLAYER_HP);player.missileAmmo=MAX_MISSILE_AMMO}}
+    player.hp=Math.min(player.hp+25,MAX_PLAYER_HP);player.missileAmmo=MAX_MISSILE_AMMO;player.flares=MAX_PLAYER_FLARES}}
 
 function updateBullets(dt){for(const b of bulletPool){if(!b.userData.active)continue;b.userData.life-=dt;
   if(b.userData.life<=0){b.userData.active=false;b.visible=false;continue}
@@ -3500,7 +3687,7 @@ function updateBullets(dt){for(const b of bulletPool){if(!b.userData.active)cont
     for(let k=0;k<3;k++)spawnP(emitters.spark,b.position,new THREE.Vector3((Math.random()-.5)*60,(Math.random()-.5)*60,(Math.random()-.5)*60),.08,0xffaa44,1);
     screenShake=.5;hitFlash=.15}}
   else{for(const e of enemies){if(!e.alive)continue;if(b.position.distanceTo(e.mesh.position)<GUN_HIT_RADIUS){
-    e.hp-=GUN_DAMAGE;e.wasHit=true;if(b.visible)spawnExplosion(b.position,4,emitters.spark);b.userData.active=false;b.visible=false;snd.hitMarker();
+    e.hp-=GUN_DAMAGE;e.wasHit=true;if(b.visible&&freeParticles.length>HIT_SPARK_FLOOR)spawnExplosion(b.position,4,emitters.spark);b.userData.active=false;b.visible=false;snd.hitMarker();
     if(e.hp<=0)killEnemy(e,100);break}}}
   if(b.position.y<getGroundHeight(b.position.x,b.position.z)){b.userData.active=false;b.visible=false}}}
 
@@ -3569,6 +3756,9 @@ function updateContrails(dt){contrailTimer+=dt;
   cGeo.attributes.position.needsUpdate=true;cGeo.attributes.alpha.needsUpdate=true}
 
 function updateThreatDetection(){incomingThreat=false;
+  let md=MISSILE_WARN_RANGE;missileThreat=0;
+  for(const m of missilePool){const u=m.userData;if(!u.active||!u.isEnemy||!u.tracking||!u.target||u.target.mesh!==playerJet)continue;
+    const d=m.position.distanceTo(playerJet.position);if(d<md){md=d;missileThreat=d;missileThreatDir.subVectors(m.position,playerJet.position).normalize()}}
   for(const b of bulletPool){if(!b.userData.active||!b.userData.isEnemy)continue;
     const tp=new THREE.Vector3().subVectors(playerJet.position,b.position);const d=tp.length();
     if(d>120)continue;if(b.userData.vel.clone().normalize().dot(tp.normalize())>.88){incomingThreat=true;threatDir.copy(tp).negate().normalize();break}}}
@@ -3576,6 +3766,7 @@ function updateThreatDetection(){incomingThreat=false;
 function updateKillNotifications(dt){for(let i=killNotifications.length-1;i>=0;i--){killNotifications[i].timer-=dt;if(killNotifications[i].timer<=0)killNotifications.splice(i,1)}}
 
 /* ═══════════════════ HUD ═══════════════════ */
+const _hudR=new THREE.Vector3(),_hudU=new THREE.Vector3();
 function drawHUD(){
   const w=hudCanvas.width,h=hudCanvas.height;hud.clearRect(0,0,w,h);
   if(!gameStarted||(gameOver&&deathCamTimer<=0))return;
@@ -3647,9 +3838,9 @@ function drawHUD(){
   // wide that a panel reaches the radar in the middle (85 px either side of centre, with a
   // 16 px gap), nor so tall that the left one reaches the compass strip. Below about 540 px
   // wide nothing fits, and the scale stops at 0.75.
-  const hk=Math.max(.75,Math.min(1.375*THREE.MathUtils.clamp(h/900,1,1.6),(w/2-119)/200,(h-72)/218));
-  const lpX=25,lpY=h-238;hud.save();hud.translate(lpX-8,h-28);hud.scale(hk,hk);hud.translate(-(lpX-8),-(h-28));
-  hud.fillStyle='rgba(0,15,30,.5)';hud.fillRect(lpX-8,lpY-8,190,218);hud.strokeStyle='rgba(0,255,200,.12)';hud.strokeRect(lpX-8,lpY-8,190,218);
+  const hk=Math.max(.75,Math.min(1.375*THREE.MathUtils.clamp(h/900,1,1.6),(w/2-119)/200,(h-72)/238));
+  const lpX=25,lpY=h-258;hud.save();hud.translate(lpX-8,h-28);hud.scale(hk,hk);hud.translate(-(lpX-8),-(h-28));
+  hud.fillStyle='rgba(0,15,30,.5)';hud.fillRect(lpX-8,lpY-8,190,238);hud.strokeStyle='rgba(0,255,200,.12)';hud.strokeRect(lpX-8,lpY-8,190,238);
   hud.font='10px Courier New';hud.fillStyle='#0aa';hud.fillText('FLIGHT DATA',lpX+45,lpY+5);
   hud.font='12px Courier New';hud.fillStyle='#0ff';
   // velocity is in m/s: knots for the readout, Mach from the raw figure.
@@ -3670,6 +3861,9 @@ function drawHUD(){
   const st=empty?['NO MISSILES',blink?'transparent':'#f44']:{search:['SEARCHING','#8cf'],range:['OUT OF RANGE','#fa0'],
     locking:[`LOCKING ${Math.round(lockProgress*100)}%`,'#fc0'],locked:['LOCKED','#f33']}[seekerState]||['HOLD F TO LOCK','#0aa8'];
   hud.fillStyle=st[1];hud.fillText(`SKR   ${st[0]}`,lpX,lpY+192);
+  // Flare salvos left, red with none.
+  hud.fillStyle=player.flares>0?'#fd6':'#f44';
+  hud.fillText(`FLR   ${String(player.flares).padStart(2)}/${MAX_PLAYER_FLARES} ${player.flares>0?'*'.repeat(player.flares):'EMPTY'}`,lpX,lpY+212);
   hud.restore();
 
   const rpX=w-210,rpY=h-140;hud.save();hud.translate(rpX+192,h-23);hud.scale(hk,hk);hud.translate(-(rpX+192),-(h-23));
@@ -3735,14 +3929,33 @@ function drawHUD(){
 
   if(player.hp<30){hud.fillStyle=Math.sin(Date.now()*.01)>0?'#ff0000':'transparent';hud.font='bold 16px Courier New';hud.fillText('WARNING: HULL CRITICAL',cx-100,60)}
   if(playerJet.position.y<60){hud.fillStyle=Math.sin(Date.now()*.015)>0?'#ff8800':'transparent';hud.font='bold 14px Courier New';hud.fillText('PULL UP',cx-30,80)}
+  // The two warnings stack below the centre, clear of the radar (whose top is h-190): MISSILE
+  // (44 px) above the radar, and INCOMING (28 px) above MISSILE when both are up.
+  const yMsl=Math.min(cy+94,h-238),yInc=missileThreat>0?Math.min(cy+58,yMsl-34):cy+58;
   if(incomingThreat){
-    hud.fillStyle='rgba(0,0,0,.5)';hud.fillRect(cx-65,cy+58,130,28);
+    hud.fillStyle='rgba(0,0,0,.5)';hud.fillRect(cx-65,yInc,130,28);
     hud.fillStyle=Math.sin(Date.now()*.02)>0?'#ff0000':'#ff4400';hud.font='bold 20px Courier New';
-    hud.shadowColor='#ff0000';hud.shadowBlur=15;hud.textAlign='center';hud.fillText('INCOMING',cx,cy+78);hud.textAlign='left';hud.shadowBlur=0;
-    const pR2=new THREE.Vector3(1,0,0).applyQuaternion(playerJet.quaternion),pU2=new THREE.Vector3(0,1,0).applyQuaternion(playerJet.quaternion);
-    const dR2=threatDir.dot(pR2),dU2=threatDir.dot(pU2),ang2=Math.atan2(dR2,-dU2);
+    hud.shadowColor='#ff0000';hud.shadowBlur=15;hud.textAlign='center';hud.fillText('INCOMING',cx,yInc+20);hud.textAlign='left';hud.shadowBlur=0;
+    // Its chevron, 43-55 px out, would cross its own text with the box moved up for MISSILE;
+    // the missile warning has its own arrow, so the chevron waits until that clears.
+    if(!(missileThreat>0)){
+    _hudR.set(1,0,0).applyQuaternion(playerJet.quaternion);_hudU.set(0,1,0).applyQuaternion(playerJet.quaternion);
+    const ang2=Math.atan2(threatDir.dot(_hudR),-threatDir.dot(_hudU));
     hud.save();hud.translate(cx,cy);hud.rotate(ang2);hud.strokeStyle='#ff3300';hud.lineWidth=3;
-    hud.beginPath();hud.moveTo(0,-55);hud.lineTo(-6,-43);hud.moveTo(0,-55);hud.lineTo(6,-43);hud.stroke();hud.restore()}
+    hud.beginPath();hud.moveTo(0,-55);hud.lineTo(-6,-43);hud.moveTo(0,-55);hud.lineTo(6,-43);hud.stroke();hud.restore()}}
+
+  // Missile warning: an enemy missile tracking the player. The prompt says what to do about it,
+  // and the arrow points where it is coming from.
+  if(missileThreat>0){const on=Math.sin(Date.now()*.03)>0,y0=yMsl;
+    hud.fillStyle='rgba(0,0,0,.55)';hud.fillRect(cx-90,y0,180,44);
+    hud.textAlign='center';hud.font='bold 20px Courier New';hud.fillStyle=on?'#ff2200':'#ffaa00';
+    hud.shadowColor='#ff0000';hud.shadowBlur=12;hud.fillText(`MISSILE ${Math.round(missileThreat)}m`,cx,y0+20);hud.shadowBlur=0;
+    hud.font='bold 13px Courier New';hud.fillStyle=player.flares>0?'#fd6':'#f44';
+    hud.fillText(player.flares>0?`C — FLARES (${player.flares})`:'NO FLARES — BREAK',cx,y0+37);hud.textAlign='left';
+    _hudR.set(1,0,0).applyQuaternion(playerJet.quaternion);_hudU.set(0,1,0).applyQuaternion(playerJet.quaternion);
+    const ma=Math.atan2(missileThreatDir.dot(_hudR),missileThreatDir.dot(_hudU));
+    hud.save();hud.translate(cx,cy);hud.rotate(ma);hud.fillStyle=on?'#ff2200':'#ffaa00';
+    hud.beginPath();hud.moveTo(0,-78);hud.lineTo(-9,-62);hud.lineTo(9,-62);hud.closePath();hud.fill();hud.restore()}
 
   for(let i=0;i<killNotifications.length;i++){const kn=killNotifications[i];const ratio=kn.timer/kn.maxTimer;
     const alpha=ratio<.3?ratio/.3:1;const yOff=cy-80-i*40+(1-ratio)*-20;
@@ -3782,17 +3995,17 @@ function checkGameOver(){if(player.hp<=0&&!gameOver){gameOver=true;snd.silence()
 function resetPool(pool){for(const item of pool){item.userData.active=false;item.visible=false}}
 function resetGame(){player.hp=MAX_PLAYER_HP;player.throttle=.3;player.velocity.set(0,0,-120);
   player.rollRate=player.pitchRate=player.yawRate=0;player.missileCooldown=0;player.gunSpin=player.gunPhase=player.gunRound=0;player.onGround=false;
-  player.missileAmmo=MAX_MISSILE_AMMO;player.missileSide=1;player.fWasDown=false;
+  player.missileAmmo=MAX_MISSILE_AMMO;player.missileSide=1;player.fWasDown=false;player.flares=MAX_PLAYER_FLARES;player.flareCooldown=0;
   playerJet.position.set(0,350,0);player.prevPosition.copy(playerJet.position);playerJet.quaternion.identity();playerJet.visible=true;
   rebuildWorldAround(playerJet.position.x,playerJet.position.z);
   score=0;kills=0;gameTime=0;gameOver=false;paused=false;camInit=false;screenShake=0;hitFlash=0;gForce=1;fovPulse=0;
-  lockTarget=null;lockProgress=0;seekerState=null;rackEmptyFlash=0;incomingThreat=false;
+  lockTarget=null;lockProgress=0;seekerState=null;rackEmptyFlash=0;incomingThreat=false;missileThreat=0;
   waveNumber=1;waveTotal=0;waveSpawned=0;waveKilled=0;waveState='intermission';waveTimer=3;waveSpawnDelay=0;
   waveDisplayText='WAVE 1';waveDisplayTimer=3;
   deathCamTimer=0;killNotifications.length=0;contrailPos.length=0;
   camera.fov=68;camera.updateProjectionMatrix();
   for(const e of enemies)scene.remove(e.mesh);enemies.length=0;
-  resetPool(bulletPool);resetPool(missilePool);resetParticlePool();resetPool(speedLines);resetPool(debrisPool);
+  resetPool(bulletPool);resetPool(missilePool);resetFlares();resetParticlePool();resetPool(speedLines);resetPool(debrisPool);
   document.getElementById('game-over').style.display='none';
   document.getElementById('pause').style.display='none';
   clock=new THREE.Clock()}
@@ -4257,7 +4470,7 @@ function animate(){requestAnimationFrame(animate);
   if (paused) { updateWorldAnchors(clock.getElapsedTime()); drawHUD(); composer.render(); return; }
   const dt=Math.min(clock.getDelta(),.05);const elapsed=clock.getElapsedTime();
   if(gameStarted&&!gameOver){
-    gameTime+=dt;updatePlayer(dt);updateEnemies(dt);updateBullets(dt);updateMissiles(dt);
+    gameTime+=dt;updatePlayer(dt);updateEnemies(dt);updateBullets(dt);updateMissiles(dt);updateFlares(dt);
     updateParticles(dt);updateDebris(dt);updateSpeedLines(dt);updateContrails(dt);
     updateKillNotifications(dt);updateThreatDetection();updateCamera(dt);
     updateTerrain(playerJet.position.x,playerJet.position.z);updateClouds(playerJet.position.x,playerJet.position.z,dt);

@@ -2834,23 +2834,25 @@ for(let i=0;i<MAX_FLARES;i++){const f=asEffect(new THREE.Sprite(flareMat));f.vis
 // Drop a salvo from an aircraft at `pos`, moving at `vel`, attitude `quat`: out to either side,
 // down and back. `owner` is the enemy dropping it, or null for the player; the missiles it can
 // pull off are the ones tracking that aircraft. A whole salvo or nothing: with fewer than
-// FLARE_SALVO flares free it drops none and returns 0, so the caller spends nothing.
-const _salvo=[];
+// FLARE_SALVO flares free it drops none and returns 0, so the caller spends nothing. The
+// scratch array keeps its FLARE_SALVO slots and is never truncated (truncating it frees its
+// storage, and refilling allocates again on every refused attempt while C is held).
+const _salvo=new Array(FLARE_SALVO).fill(null);
 function dropFlares(pos,vel,quat,chance,owner){
-  _salvo.length=0;
-  for(const f of flarePool){if(!f.userData.active){_salvo.push(f);if(_salvo.length>=FLARE_SALVO)break}}
-  if(_salvo.length<FLARE_SALVO)return 0;
-  for(let i=0;i<_salvo.length;i++){const f=_salvo[i],u=f.userData,side=i%2?1:-1;
+  let n=0;
+  for(let i=0;i<flarePool.length&&n<FLARE_SALVO;i++)if(!flarePool[i].userData.active)_salvo[n++]=flarePool[i];
+  if(n<FLARE_SALVO)return 0;
+  for(let i=0;i<n;i++){const f=_salvo[i],u=f.userData,side=i%2?1:-1;
     _flareEject.set(side*(16+Math.random()*10),-12-Math.random()*8,8+Math.random()*8).applyQuaternion(quat);
     f.position.copy(pos);u.vel.copy(vel).add(_flareEject);u.life=u.maxLife=FLARE_LIFE*(.85+Math.random()*.3);u.smoke=0;
     u.active=true;u.decoy.alive=true;f.visible=true}
   for(const m of missilePool){const u=m.userData;if(!u.active||!u.tracking||!u.target||u.target.isFlare)continue;
     if(owner?(u.isEnemy||u.target!==owner):(!u.isEnemy||u.target.mesh!==playerJet))continue;
     if(m.position.distanceTo(pos)>FLARE_RANGE)continue;
-    const f=_salvo[Math.floor(Math.random()*_salvo.length)];
+    const f=_salvo[Math.floor(Math.random()*n)];
     if(u.vel.angleTo(_flareToMissile.subVectors(f.position,m.position))>FLARE_SEEKER)continue;
     if(Math.random()<chance)u.target=f.userData.decoy}
-  return _salvo.length}
+  return n}
 function updateFlares(dt){const drag=Math.exp(-1.4*dt);
   for(const f of flarePool){const u=f.userData;if(!u.active)continue;u.life-=dt;
     if(u.life<=0){u.active=false;f.visible=false;u.decoy.alive=false;
